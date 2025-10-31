@@ -150,5 +150,6 @@ test_*.py
 tests/
 
 # Alembic
-alembic/versions/*.py
-!alembic/versions/__init__.py
+# Миграции НЕ игнорируем - они нужны для работы БД
+# alembic/versions/*.py
+# !alembic/versions/__init__.py

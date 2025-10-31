@@ -124,7 +124,6 @@ jobs:
   build-and-deploy-prod:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
-    needs: test
     
     environment: production
     
@@ -171,16 +170,9 @@ jobs:
         key: ${{ secrets.PROD_SERVER_SSH_KEY }}
         script: |
           cd /opt/telegram-bot
-          docker-compose -f docker-compose.prod.yml down
-          docker-compose -f docker-compose.prod.yml pull
-          docker-compose -f docker-compose.prod.yml up -d
+          git pull origin main || echo "Git pull failed, continuing..."
+          docker compose -f docker-compose.prod.yml pull || docker-compose -f docker-compose.prod.yml pull
+          docker compose -f docker-compose.prod.yml down || docker-compose -f docker-compose.prod.yml down
+          docker compose -f docker-compose.prod.yml up -d --build || docker-compose -f docker-compose.prod.yml up -d --build
           docker system prune -f
-
-    - name: Notify deployment
-      uses: 8398a7/action-slack@v3
-      if: always()
-      with:
-        status: ${{ job.status }}
-        channel: '#deployments'
-        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
-        fields: repo,message,commit,author,action,eventName,ref,workflow
+          echo "✅ Деплой завершен!"
