@@ -1,0 +1,81 @@
+version: '3.8'
+
+services:
+  postgres_test:
+    image: postgres:15
+    container_name: postgres_test
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: test_password
+      POSTGRES_DB: bot_test
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d bot_test"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis_test:
+    image: redis:7
+    container_name: redis_test
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_test_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  bot_test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    container_name: bot_test
+    env_file:
+      - .env.test
+    environment:
+      ENV_PATH: .env.test
+      PYTHONPATH: /app
+    depends_on:
+      postgres_test:
+        condition: service_healthy
+      redis_test:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/app
+    restart: unless-stopped
+    networks:
+      - test_network
+
+  # Nginx для webhook (опционально для тестирования)
+  nginx_test:
+    image: nginx:alpine
+    container_name: nginx_test
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.test.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/ssl:ro
+    depends_on:
+      - bot_test
+    restart: unless-stopped
+    networks:
+      - test_network
+
+volumes:
+  postgres_test_data:
+  redis_test_data:
+
+networks:
+  test_network:
+    driver: bridge
