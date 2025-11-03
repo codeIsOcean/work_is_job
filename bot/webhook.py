@@ -50,6 +50,10 @@ async def create_app(bot: Bot = None, dp: Dispatcher = None) -> web.Application:
         
         # Подключение middleware (только если создаем новый dispatcher)
         dp.update.middleware(DbSessionMiddleware(async_session))
+        
+        # Подключение структурированного логирования
+        from bot.middleware.structured_logging import StructuredLoggingMiddleware
+        dp.update.middleware(StructuredLoggingMiddleware())
     else:
         # Dispatcher передан из bot.py - middleware уже подключен
         logger.info("ℹ️ Используем dispatcher из bot.py с уже подключенными middleware")
@@ -81,6 +85,12 @@ async def create_app(bot: Bot = None, dp: Dispatcher = None) -> web.Application:
     # Создание веб-приложения
     app = web.Application()
 
+    # КРИТИЧНО: Отключаем встроенное логирование aiogram для апдейтов ДО регистрации handler
+    # Это должно предотвратить логирование "📩 Получен апдейт от Telegram"
+    for log_name in ["aiogram.dispatcher", "aiogram.event", "aiogram"]:
+        lg = logging.getLogger(log_name)
+        lg.setLevel(logging.ERROR)  # Только ошибки - отключаем INFO логи
+    
     # Настройка webhook
     webhook_requests_handler = SimpleRequestHandler(
         dispatcher=dp,
@@ -107,21 +117,55 @@ async def create_app(bot: Bot = None, dp: Dispatcher = None) -> web.Application:
 async def setup_webhook(bot: Bot):
     """Настройка webhook для бота"""
     try:
+        logger.info(f"📋 WEBHOOK_URL из конфига: {WEBHOOK_URL}")
+        
+        if not WEBHOOK_URL:
+            logger.error("❌ WEBHOOK_URL не установлен в конфигурации! Проверьте .env файл.")
+            raise ValueError("WEBHOOK_URL не установлен")
+        
         # Удаляем старый webhook
-        await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("✅ Старый webhook удален")
+        logger.info("🔄 Удаление старого webhook...")
+        deleted = await bot.delete_webhook(drop_pending_updates=True)
+        logger.info(f"✅ Старый webhook удален: {deleted}")
 
         # Устанавливаем новый webhook
-        await bot.set_webhook(
+        logger.info(f"🔧 Установка webhook: {WEBHOOK_URL}")
+        set_result = await bot.set_webhook(
             url=WEBHOOK_URL,
             drop_pending_updates=True,
             secret_token=None,  # Можно добавить секретный токен для безопасности
             allowed_updates=["message", "callback_query", "chat_member", "my_chat_member", "chat_join_request"]
         )
-        logger.info(f"✅ Webhook установлен: {WEBHOOK_URL}")
+        logger.info(f"📤 Результат set_webhook: {set_result}")
+        
+        # Проверяем статус webhook через API
+        logger.info("🔍 Проверка статуса webhook через get_webhook_info...")
+        webhook_info = await bot.get_webhook_info()
+        logger.info(f"📊 Информация о webhook:")
+        logger.info(f"   - URL: {webhook_info.url}")
+        logger.info(f"   - Pending updates: {webhook_info.pending_update_count}")
+        logger.info(f"   - Has custom cert: {webhook_info.has_custom_certificate}")
+        logger.info(f"   - Max connections: {webhook_info.max_connections}")
+        
+        if webhook_info.url == WEBHOOK_URL:
+            logger.info(f"✅ Webhook успешно установлен и проверен: {WEBHOOK_URL}")
+        else:
+            logger.warning(f"⚠️ Webhook установлен, но URL не совпадает!")
+            logger.warning(f"   Ожидалось: {WEBHOOK_URL}")
+            logger.warning(f"   Получено: {webhook_info.url}")
+        
+        if webhook_info.last_error_date:
+            logger.warning(f"⚠️ Последняя ошибка webhook:")
+            logger.warning(f"   - Дата: {webhook_info.last_error_date}")
+            logger.warning(f"   - Сообщение: {webhook_info.last_error_message}")
+        else:
+            logger.info("✅ Ошибок webhook не обнаружено")
         
     except Exception as e:
         logger.error(f"❌ Ошибка настройки webhook: {e}")
+        import traceback
+        logger.error(f"📋 Трассировка ошибки:")
+        logger.error(traceback.format_exc())
         raise
 
 
@@ -133,15 +177,17 @@ async def run_webhook(bot: Bot = None, dp: Dispatcher = None):
 
     app = await create_app(bot=bot, dp=dp)
     
-    # Настройка SSL для продакшна
+    # SSL обрабатывается на уровне nginx, поэтому бот работает по HTTP внутри сети
+    # Настройка SSL для продакшна (если бот работает напрямую, без nginx)
     ssl_context = None
-    if SSL_CERT_PATH and SSL_KEY_PATH:
-        try:
-            ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-            ssl_context.load_cert_chain(SSL_CERT_PATH, SSL_KEY_PATH)
-            logger.info("✅ SSL контекст загружен")
-        except Exception as e:
-            logger.warning(f"⚠️ Ошибка загрузки SSL: {e}")
+    # Отключаем SSL для работы через nginx
+    # if SSL_CERT_PATH and SSL_KEY_PATH:
+    #     try:
+    #         ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    #         ssl_context.load_cert_chain(SSL_CERT_PATH, SSL_KEY_PATH)
+    #         logger.info("✅ SSL контекст загружен")
+    #     except Exception as e:
+    #         logger.warning(f"⚠️ Ошибка загрузки SSL: {e}")
 
     # Запуск сервера
     runner = web.AppRunner(app)
@@ -151,7 +197,7 @@ async def run_webhook(bot: Bot = None, dp: Dispatcher = None):
         runner, 
         host='0.0.0.0', 
         port=WEBHOOK_PORT,
-        ssl_context=ssl_context
+        ssl_context=ssl_context  # None - HTTP внутри сети, SSL на nginx
     )
     
     await site.start()

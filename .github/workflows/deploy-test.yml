@@ -1,0 +1,73 @@
+name: Deploy Test Bot
+
+on:
+  push:
+    branches:
+      - test
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - '.gitignore'
+
+env:
+  SERVER_HOST: ${{ secrets.TEST_SERVER_HOST }}
+  SERVER_USER: ${{ secrets.TEST_SERVER_USER }}
+  DEPLOY_PATH: /opt/jobs_inDubai_testBot
+
+jobs:
+  deploy-test:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/test'
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup SSH
+      uses: webfactory/ssh-agent@v0.9.0
+      with:
+        ssh-private-key: ${{ secrets.TEST_SERVER_SSH_KEY }}
+
+    - name: Deploy to test server
+      uses: appleboy/scp-action@v0.1.7
+      with:
+        host: ${{ env.SERVER_HOST }}
+        username: ${{ env.SERVER_USER }}
+        key: ${{ secrets.TEST_SERVER_SSH_KEY }}
+        source: "."
+        target: ${{ env.DEPLOY_PATH }}
+        strip_components: 0
+        exclude: |
+          .git
+          .github
+          __pycache__
+          *.pyc
+          .env*
+          docs/
+          *.md
+          .gitignore
+          .DS_Store
+
+    - name: Restart services on server
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ env.SERVER_HOST }}
+        username: ${{ env.SERVER_USER }}
+        key: ${{ secrets.TEST_SERVER_SSH_KEY }}
+        script: |
+          cd ${{ env.DEPLOY_PATH }}
+          
+          # Pull latest changes (if using git on server)
+          git pull origin test || echo "Git pull failed, continuing with deployed files..."
+          
+          # Rebuild and restart containers
+          docker compose -f docker-compose.test.yml build bot_test || docker-compose -f docker-compose.test.yml build bot_test
+          docker compose -f docker-compose.test.yml up -d || docker-compose -f docker-compose.test.yml up -d
+          
+          # Wait for services to be ready
+          sleep 10
+          
+          # Check bot status
+          docker logs bot_test --tail 20 || echo "Bot container not found"
+          
+          echo "✅ Deploy completed!"
+

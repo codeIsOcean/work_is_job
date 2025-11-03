@@ -16,7 +16,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 #from bot.handlers import handlers_router
 from bot.services.redis_conn import test_connection
 
-from bot.config import BOT_TOKEN, USE_WEBHOOK
+from bot.config import BOT_TOKEN, USE_WEBHOOK, WEBHOOK_URL
 from bot.database.session import engine, async_session
 from bot.database.models import Base
 from bot.middleware.db_session import DbSessionMiddleware  # Добавляем импорт DbSessionMiddleware
@@ -43,10 +43,12 @@ telegram_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)
 telegram_handler.setFormatter(telegram_formatter)
 logger.addHandler(telegram_handler)
 
-# Настройка логгеров aiogram - только консоль
+# КРИТИЧНО: Отключаем встроенное логирование aiogram для апдейтов
+# Это должно предотвратить логирование "📩 Получен апдейт от Telegram"
 for logger_name in ("aiogram", "aiogram.dispatcher", "aiogram.event"):
     log = logging.getLogger(logger_name)
     log.addHandler(console_handler)
+    log.setLevel(logging.ERROR)  # Только ошибки - отключаем INFO и WARNING логи
     log.propagate = False
 
 # определяем, где мы запускаемся
@@ -83,6 +85,12 @@ async def main():
 
     # ✅ Подключение middleware — будет автоматически прокидывать сессию в каждый хендлер
     dp.update.middleware(DbSessionMiddleware(async_session))
+    
+    # ✅ Подключение структурированного логирования ПЕРВЫМ (чтобы перехватить все логи)
+    from bot.middleware.structured_logging import StructuredLoggingMiddleware
+    # ВАЖНО: middleware выполняется в обратном порядке регистрации, поэтому регистрируем последним
+    # чтобы он выполнился первым
+    dp.update.middleware(StructuredLoggingMiddleware())
 
     # ✅ Подключение всех маршрутов (хендлеров), которые ты заранее определил
     dp.include_router(handlers_router)
@@ -91,12 +99,60 @@ async def main():
     # ✅ Выбираем режим запуска: webhook или polling
     if USE_WEBHOOK:
         logging.info("🌐 Запуск в режиме webhook...")
-        # Удаление старого webhook перед запуском
-        await bot.delete_webhook(drop_pending_updates=True)
+        logging.info(f"📋 WEBHOOK_URL из конфига: {WEBHOOK_URL}")
         
+        if not WEBHOOK_URL:
+            logging.error("❌ WEBHOOK_URL не установлен в конфигурации! Проверьте .env файл.")
+            raise ValueError("WEBHOOK_URL не установлен")
+        
+        try:
+            # Удаляем старый webhook
+            logging.info("🔄 Удаление старого webhook...")
+            deleted = await bot.delete_webhook(drop_pending_updates=True)
+            logging.info(f"✅ Старый webhook удален: {deleted}")
+            
+            # Устанавливаем новый webhook
+            logging.info(f"🔧 Установка webhook: {WEBHOOK_URL}")
+            set_result = await bot.set_webhook(
+                WEBHOOK_URL,
+                drop_pending_updates=True
+            )
+            logging.info(f"📤 Результат set_webhook: {set_result}")
+            
+            # Проверяем статус webhook через API
+            logging.info("🔍 Проверка статуса webhook через get_webhook_info...")
+            webhook_info = await bot.get_webhook_info()
+            logging.info(f"📊 Информация о webhook:")
+            logging.info(f"   - URL: {webhook_info.url}")
+            logging.info(f"   - Pending updates: {webhook_info.pending_update_count}")
+            logging.info(f"   - Has custom cert: {webhook_info.has_custom_certificate}")
+            logging.info(f"   - Max connections: {webhook_info.max_connections}")
+            
+            if webhook_info.url == WEBHOOK_URL:
+                logging.info(f"✅ Webhook успешно установлен и проверен: {WEBHOOK_URL}")
+            else:
+                logging.warning(f"⚠️ Webhook установлен, но URL не совпадает!")
+                logging.warning(f"   Ожидалось: {WEBHOOK_URL}")
+                logging.warning(f"   Получено: {webhook_info.url}")
+            
+            if webhook_info.last_error_date:
+                logging.warning(f"⚠️ Последняя ошибка webhook:")
+                logging.warning(f"   - Дата: {webhook_info.last_error_date}")
+                logging.warning(f"   - Сообщение: {webhook_info.last_error_message}")
+            else:
+                logging.info("✅ Ошибок webhook не обнаружено")
+                
+        except Exception as e:
+            logging.error(f"❌ Ошибка при установке Webhook: {e}")
+            import traceback
+            logging.error(f"📋 Трассировка ошибки:")
+            logging.error(traceback.format_exc())
+            raise
+
         # Импортируем и запускаем webhook
         # Передаем bot и dp чтобы использовать уже подключенные handlers
         from bot.webhook import run_webhook
+        logging.info("🚀 Запуск webhook сервера...")
         await run_webhook(bot=bot, dp=dp)
     else:
         logging.info("🔄 Запуск в режиме polling...")
@@ -107,4 +163,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

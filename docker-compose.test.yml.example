@@ -5,19 +5,21 @@ services:
     image: postgres:15
     container_name: postgres_test
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: test_password
-      POSTGRES_DB: bot_test
+      POSTGRES_USER: jobs_inDubai_testBot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-your_strong_password_here}
+      POSTGRES_DB: jobs_inDubai_testBot
     ports:
       - "5433:5432"
     volumes:
       - postgres_test_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d bot_test"]
+      test: ["CMD-SHELL", "pg_isready -U jobs_inDubai_testBot -d jobs_inDubai_testBot"]
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    networks:
+      - test_network
 
   redis_test:
     image: redis:7
@@ -32,6 +34,8 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    networks:
+      - test_network
 
   bot_test:
     build:
@@ -52,11 +56,15 @@ services:
       - "8080:8080"
     volumes:
       - .:/app
+      # Монтируем SSL сертификаты из хоста в контейнер (только на сервере)
+      - /etc/letsencrypt:/etc/letsencrypt:ro
     restart: unless-stopped
     networks:
       - test_network
 
   # Nginx для webhook (опционально для тестирования)
+  # ВАЖНО: На сервере SSL сертификаты монтируются из /etc/letsencrypt
+  # Локально nginx можно не запускать, если USE_WEBHOOK=false или используется другой прокси
   nginx_test:
     image: nginx:alpine
     container_name: nginx_test
@@ -65,7 +73,9 @@ services:
       - "443:443"
     volumes:
       - ./nginx/nginx.test.conf:/etc/nginx/nginx.conf:ro
-      - ./ssl:/etc/ssl:ro
+      # На сервере: монтируем SSL сертификаты из /etc/letsencrypt
+      # Локально: можно закомментировать или использовать самоподписанные сертификаты
+      - /etc/letsencrypt:/etc/letsencrypt:ro
     depends_on:
       - bot_test
     restart: unless-stopped
@@ -79,3 +89,4 @@ volumes:
 networks:
   test_network:
     driver: bridge
+

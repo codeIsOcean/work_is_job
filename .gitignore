@@ -144,6 +144,33 @@ secrets/
 *.secret
 *.private
 
+# Документация с конфиденциальной информацией
+docs/
+BOT_TROUBLESHOOTING_GUIDE.md
+PROBLEM_ANALYSIS.md
+SYNC_LOCAL_SERVER.md
+SYNC_CHECKLIST.md
+SSH_SETUP_INSTRUCTIONS.md
+
+# Docker Compose файлы с паролями (используйте .example версии в репозитории)
+docker-compose.yml
+docker-compose.dev.yml
+docker-compose.test.yml
+docker-compose.prod.yml
+
+# Dockerfile может содержать конфиденциальную информацию
+Dockerfile
+Dockerfile.dev
+Dockerfile.test
+Dockerfile.prod
+
+# Nginx конфиги могут содержать пути к сертификатам
+nginx/
+
+# .example файлы - проверяем что пароли замаскированы
+# Если в .example файлах есть реальные пароли - добавляем их сюда
+# env.test.example - проверяем что пароли замаскированы (уже исправлено)
+
 # Test files
 test_*.py
 *_test.py
