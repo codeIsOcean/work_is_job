@@ -114,11 +114,13 @@ jobs:
         username: ${{ secrets.TEST_SERVER_USER }}
         key: ${{ secrets.TEST_SERVER_SSH_KEY }}
         script: |
-          cd /opt/telegram-bot
+          cd /opt/jobs_inDubai_testBot
+          git pull origin test || echo "Git pull failed, continuing..."
           docker-compose -f docker-compose.test.yml down
           docker-compose -f docker-compose.test.yml pull
           docker-compose -f docker-compose.test.yml up -d
           docker system prune -f
+          echo "✅ Тестовый бот успешно обновлен!"
 
   build-and-deploy-prod:
     runs-on: ubuntu-latest
