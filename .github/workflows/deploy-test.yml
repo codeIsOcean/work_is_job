@@ -59,8 +59,9 @@ jobs:
           # Pull latest changes (if using git on server)
           git pull origin test || echo "Git pull failed, continuing with deployed files..."
           
-          # Rebuild and restart containers
-          docker compose -f docker-compose.test.yml build bot_test || docker-compose -f docker-compose.test.yml build bot_test
+          # Pull latest image from registry and restart containers
+          docker compose -f docker-compose.test.yml down || docker-compose -f docker-compose.test.yml down
+          docker compose -f docker-compose.test.yml pull bot_test || docker-compose -f docker-compose.test.yml pull bot_test
           docker compose -f docker-compose.test.yml up -d || docker-compose -f docker-compose.test.yml up -d
           
           # Wait for services to be ready
