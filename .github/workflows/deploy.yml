@@ -72,8 +72,7 @@ jobs:
 
   build-and-deploy-test:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/test'
-    needs: test
+    if: github.ref == 'refs/heads/test' && github.event_name == 'push'
     
     steps:
     - uses: actions/checkout@v4
