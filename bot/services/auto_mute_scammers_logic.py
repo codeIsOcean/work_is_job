@@ -181,7 +181,23 @@ async def auto_mute_scammer_on_join(bot: Bot, event: ChatMemberUpdated) -> bool:
             # Если это скаммер (свежий аккаунт/подозрительное поведение) - мутим автоматически
             # Ручной мут и автомут работают параллельно, не блокируя друг друга
             
-            # Проверяем возраст аккаунта - свежие аккаунты (≤30 дней) мутим автоматически
+            # ПРИОРИТЕТ 1: Проверяем флаг автомута из Redis (устанавливается при анализе капчи)
+            auto_mute_flag = await redis.get(f"auto_mute_scammer:{user.id}:{chat_id}")
+            logger.info(f"🔍 [AUTO_MUTE_DEBUG] Флаг автомута из Redis для пользователя @{user.username or user.first_name or user.id} [{user.id}]: {auto_mute_flag}")
+            
+            # ПРИОРИТЕТ 2: Проверяем уровень скама в БД
+            scam_level = None
+            async with get_session() as session:
+                result = await session.execute(
+                    select(ScammerTracker.scammer_level).where(
+                        ScammerTracker.user_id == user.id,
+                        ScammerTracker.chat_id == chat_id
+                    )
+                )
+                scam_level = result.scalar_one_or_none()
+            logger.info(f"🔍 [AUTO_MUTE_DEBUG] Уровень скама из БД для пользователя @{user.username or user.first_name or user.id} [{user.id}]: {scam_level}")
+            
+            # ПРИОРИТЕТ 3: Проверяем возраст аккаунта - свежие аккаунты (≤30 дней) мутим автоматически
             from bot.services.account_age_estimator import account_age_estimator
             age_info = account_age_estimator.get_detailed_age_info(user.id)
             age_days = age_info["age_days"]
@@ -189,26 +205,26 @@ async def auto_mute_scammer_on_join(bot: Bot, event: ChatMemberUpdated) -> bool:
             
             logger.info(f"🔍 [AUTO_MUTE_DEBUG] Возраст аккаунта @{user.username or user.first_name or user.id} [{user.id}]: {age_days} дней, риск: {age_risk_score}/100")
             
-            # Если аккаунт свежий (≤30 дней) - мутим автоматически
-            if age_days <= 30:
-                logger.info(f"🔍 [AUTO_MUTE_DEBUG] Свежий аккаунт @{user.username or user.first_name or user.id} [{user.id}] ({age_days} дней) - мутим автоматически")
-            else:
-                logger.info(f"🔍 [AUTO_MUTE_DEBUG] Старый аккаунт @{user.username or user.first_name or user.id} [{user.id}] ({age_days} дней) - проверяем уровень скама в БД")
-                # Для старых аккаунтов проверяем уровень скама в БД
-                async with get_session() as session:
-                    result = await session.execute(
-                        select(ScammerTracker.scammer_level).where(
-                            ScammerTracker.user_id == user.id,
-                            ScammerTracker.chat_id == chat_id
-                        )
-                    )
-                    scam_level = result.scalar_one_or_none()
-                    
-                    if scam_level is None or scam_level < 50:  # 50+ баллов = скаммер
-                        logger.info(f"🔍 [AUTO_MUTE_DEBUG] Пользователь @{user.username or user.first_name or user.id} [{user.id}] не является скаммером (уровень: {scam_level}), пропускаем")
-                        return False
+            # РЕШЕНИЕ: Мутим если выполнено ЛЮБОЕ из условий:
+            # 1. Есть флаг автомута из Redis
+            # 2. Уровень скама >= 50
+            # 3. Возраст аккаунта <= 30 дней (включая отрицательные значения - новые аккаунты)
+            mute_reason = ""
             
-            logger.info(f"🔇 [AUTO_MUTE_DEBUG] Мутим скаммера @{user.username or user.first_name or user.id} [{user.id}] автоматически")
+            if auto_mute_flag == "1":
+                mute_reason = "Флаг автомута из Redis"
+                logger.info(f"🔍 [AUTO_MUTE_DEBUG] ✅ Флаг автомута установлен - мутим пользователя @{user.username or user.first_name or user.id} [{user.id}]")
+            elif scam_level is not None and scam_level >= 50:
+                mute_reason = f"Уровень скама {scam_level}/100"
+                logger.info(f"🔍 [AUTO_MUTE_DEBUG] ✅ Уровень скама {scam_level} >= 50 - мутим пользователя @{user.username or user.first_name or user.id} [{user.id}]")
+            elif age_days <= 30:
+                mute_reason = f"Свежий аккаунт ({age_days} дней)"
+                logger.info(f"🔍 [AUTO_MUTE_DEBUG] ✅ Свежий аккаунт ({age_days} дней) - мутим пользователя @{user.username or user.first_name or user.id} [{user.id}]")
+            else:
+                logger.info(f"🔍 [AUTO_MUTE_DEBUG] ❌ Пользователь @{user.username or user.first_name or user.id} [{user.id}] не соответствует критериям автомута (флаг: {auto_mute_flag}, уровень скама: {scam_level}, возраст: {age_days} дней)")
+                return False
+            
+            logger.info(f"🔇 [AUTO_MUTE_DEBUG] Мутим скаммера @{user.username or user.first_name or user.id} [{user.id}] автоматически (причина: {mute_reason})")
             
             # Применяем мут
             await bot.restrict_chat_member(
@@ -228,7 +244,12 @@ async def auto_mute_scammer_on_join(bot: Bot, event: ChatMemberUpdated) -> bool:
             )
             
             await asyncio.sleep(1)
-            logger.info(f"🔇 Скаммер @{user.username or user.first_name or user.id} [{user.id}] был автоматически замьючен")
+            logger.info(f"🔇 Скаммер @{user.username or user.first_name or user.id} [{user.id}] был автоматически замьючен (причина: {mute_reason})")
+            
+            # Удаляем флаг автомута из Redis после применения мута
+            if auto_mute_flag == "1":
+                await redis.delete(f"auto_mute_scammer:{user.id}:{chat_id}")
+                logger.info(f"🔍 [AUTO_MUTE_DEBUG] Удален флаг автомута из Redis для пользователя @{user.username or user.first_name or user.id} [{user.id}]")
             
             # ЛОГИРУЕМ АВТОМУТ СКАММЕРА через новую систему журнала
             try:
@@ -239,8 +260,8 @@ async def auto_mute_scammer_on_join(bot: Bot, event: ChatMemberUpdated) -> bool:
                         bot=bot,
                         user=user,
                         chat=event.chat,
-                        scammer_level=scam_level or 0,
-                        reason=f"Автоматический мут (возраст аккаунта: {age_days} дней)",
+                        scammer_level=scam_level or age_risk_score or 0,
+                        reason=f"Автоматический мут: {mute_reason}",
                         session=db_session
                     )
                 logger.info(f"📱 Отправлен лог об автомуте скаммера @{user.username or user.first_name or user.id} [{user.id}] в группе {chat_id}")

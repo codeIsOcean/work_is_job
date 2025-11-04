@@ -127,6 +127,16 @@ async def manually_mute_on_approval(event: ChatMemberUpdated):
                 logger.info(f"🔍 [MANUAL_MUTE_HANDLER] ✅ Функция mute_manually_approved_member_logic завершена")
             else:
                 logger.info(f"🔍 [MANUAL_MUTE_HANDLER] ❌ Мут отключен (глобально: {global_mute_enabled}, локально: {local_mute_enabled}) - не мутим")
+            
+            # ВАЖНО: Проверяем автомут скаммеров ПОСЛЕ ручного мута (они работают независимо)
+            try:
+                from bot.services.auto_mute_scammers_logic import auto_mute_scammer_on_join
+                logger.info(f"🔍 [MANUAL_MUTE_HANDLER] 🔍 Проверяем автомут скаммеров для пользователя @{event.new_chat_member.user.username or event.new_chat_member.user.first_name or event.new_chat_member.user.id}")
+                await auto_mute_scammer_on_join(event.bot, event)
+            except Exception as auto_mute_error:
+                logger.error(f"🔍 [MANUAL_MUTE_HANDLER] 💥 AUTO_MUTE ERROR: {str(auto_mute_error)}")
+                import traceback
+                logger.error(f"🔍 [MANUAL_MUTE_HANDLER] 💥 Traceback: {traceback.format_exc()}")
                 
         except Exception as e:
             logger.error(f"🔍 [MANUAL_MUTE_HANDLER] 💥 MUTE ERROR (variant 2 - manual chat_member): {str(e)}")
@@ -143,7 +153,7 @@ async def manually_mute_on_approval(event: ChatMemberUpdated):
                         bot=event.bot,
                         user=event.new_chat_member.user,
                         chat=event.chat,
-                        kicked_by=event.from_user if event.from_user.id != event.new_chat_member.user.id else None,
+                        initiator=event.from_user if event.from_user.id != event.new_chat_member.user.id else None,
                         session=session
                     )
                 elif new_status == "left":
