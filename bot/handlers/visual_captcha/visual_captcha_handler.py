@@ -560,13 +560,7 @@ async def process_captcha_answer(message: Message, state: FSMContext, session: A
             for mid in message_ids:
                 asyncio.create_task(delete_message_after_delay(message.bot, message.chat.id, mid, 5))
             
-            # Проверяем, нужно ли автоматически мутить скаммера
-            if decision.get("should_auto_mute", False):
-                # Устанавливаем флаг для автомута после одобрения
-                await redis.setex(f"auto_mute_scammer:{message.from_user.id}:{chat_id_for_analysis}", 300, "1")
-                logger.warning(f"🚨 Пользователь @{message.from_user.username or message.from_user.first_name or message.from_user.id} [{message.from_user.id}] помечен для автомута как скаммер")
-
-            # Определяем chat_id для approve
+            # Определяем chat_id для approve ДО установки флага автомута
             chat_id: Optional[int] = None
             if group_name.startswith("private_"):
                 chat_id = int(group_name.replace("private_", ""))
@@ -586,6 +580,16 @@ async def process_captcha_answer(message: Message, state: FSMContext, session: A
                 except ValueError:
                     logger.error(f"Не удалось преобразовать group_name в chat_id: {group_name}")
 
+            # Используем chat_id_for_db если chat_id не определен
+            final_chat_id = chat_id if chat_id else chat_id_for_db
+            
+            # Проверяем, нужно ли автоматически мутить скаммера
+            if decision.get("should_auto_mute", False) and final_chat_id:
+                # Устанавливаем флаг для автомута с увеличенным TTL (1 час вместо 5 минут)
+                # Это гарантирует, что флаг будет доступен когда пользователь вступит в группу
+                await redis.setex(f"auto_mute_scammer:{message.from_user.id}:{final_chat_id}", 3600, "1")
+                logger.warning(f"🚨 Пользователь @{message.from_user.username or message.from_user.first_name or message.from_user.id} [{message.from_user.id}] помечен для автомута как скаммер для группы {final_chat_id} (TTL: 3600s)")
+
             if chat_id:
                 # Пытаемся одобрить запрос
                 result = await approve_chat_join_request(message.bot, chat_id, message.from_user.id)
@@ -594,6 +598,11 @@ async def process_captcha_answer(message: Message, state: FSMContext, session: A
                     # Устанавливаем флаг, что пользователь прошел капчу
                     await redis.setex(f"captcha_passed:{message.from_user.id}:{chat_id}", 3600, "1")
                     logger.info(f"✅ Пользователь @{message.from_user.username or message.from_user.first_name or message.from_user.id} [{message.from_user.id}] прошел капчу для группы {chat_id}")
+                    
+                    # Убеждаемся, что флаг автомута установлен с правильным chat_id
+                    if decision.get("should_auto_mute", False):
+                        await redis.setex(f"auto_mute_scammer:{message.from_user.id}:{chat_id}", 3600, "1")
+                        logger.info(f"🔍 [AUTO_MUTE_SET] Флаг автомута установлен для пользователя {message.from_user.id} в группе {chat_id}")
                     
                     # Получаем реальное название группы
                     try:

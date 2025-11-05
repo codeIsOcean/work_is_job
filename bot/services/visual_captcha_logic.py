@@ -477,16 +477,22 @@ async def get_group_join_keyboard(group_link: Optional[str], group_display_name:
                                 
                                 logger.info(f"✅ Используем валидную ссылку: {final_url[:100]}... (тип: {type(final_url)}, длина: {len(final_url)})")
                                 
+                                # Финальная проверка - убеждаемся что final_url это строка
+                                if not isinstance(final_url, str):
+                                    raise ValueError(f"final_url не является строкой перед созданием кнопки: {type(final_url)}")
+                                
                                 # Создаем кнопку с дополнительной защитой
                                 try:
-                                    button = InlineKeyboardButton(text=title, url=final_url)
+                                    # Явно преобразуем в строку перед созданием кнопки
+                                    final_url_str = str(final_url).strip()
+                                    button = InlineKeyboardButton(text=title, url=final_url_str)
                                     
                                     # Дополнительная проверка после создания кнопки
                                     if hasattr(button, 'url') and button.url:
                                         if not isinstance(button.url, str):
                                             raise ValueError(f"button.url не является строкой после создания: {type(button.url)}")
                                         
-                                        logger.info(f"✅ Создана кнопка с URL: '{final_url[:50]}...' (тип URL в кнопке: {type(button.url)})")
+                                        logger.info(f"✅ Создана кнопка с URL: '{final_url_str[:50]}...' (тип URL в кнопке: {type(button.url)})")
                                         return InlineKeyboardMarkup(
                                             inline_keyboard=[[button]]
                                         )
@@ -496,6 +502,7 @@ async def get_group_join_keyboard(group_link: Optional[str], group_display_name:
                                     logger.error(f"❌ Ошибка при создании InlineKeyboardButton: {btn_error}, url='{final_url[:100]}', type={type(final_url)}")
                                     import traceback
                                     logger.error(traceback.format_exc())
+                                    raise  # Пробрасываем ошибку дальше для fallback
                                     
                             except Exception as validation_error:
                                 logger.error(f"❌ Ошибка валидации URL: {validation_error}, url='{group_link_str[:100]}'")

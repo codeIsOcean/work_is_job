@@ -183,7 +183,8 @@ async def auto_mute_scammer_on_join(bot: Bot, event: ChatMemberUpdated) -> bool:
             
             # ПРИОРИТЕТ 1: Проверяем флаг автомута из Redis (устанавливается при анализе капчи)
             auto_mute_flag = await redis.get(f"auto_mute_scammer:{user.id}:{chat_id}")
-            logger.info(f"🔍 [AUTO_MUTE_DEBUG] Флаг автомута из Redis для пользователя @{user.username or user.first_name or user.id} [{user.id}]: {auto_mute_flag}")
+            auto_mute_ttl = await redis.ttl(f"auto_mute_scammer:{user.id}:{chat_id}")
+            logger.info(f"🔍 [AUTO_MUTE_DEBUG] Флаг автомута из Redis для пользователя @{user.username or user.first_name or user.id} [{user.id}]: {auto_mute_flag} (TTL: {auto_mute_ttl}s)")
             
             # ПРИОРИТЕТ 2: Проверяем уровень скама в БД
             scam_level = None
@@ -206,21 +207,26 @@ async def auto_mute_scammer_on_join(bot: Bot, event: ChatMemberUpdated) -> bool:
             logger.info(f"🔍 [AUTO_MUTE_DEBUG] Возраст аккаунта @{user.username or user.first_name or user.id} [{user.id}]: {age_days} дней, риск: {age_risk_score}/100")
             
             # РЕШЕНИЕ: Мутим если выполнено ЛЮБОЕ из условий:
-            # 1. Есть флаг автомута из Redis
-            # 2. Уровень скама >= 50
+            # 1. Есть флаг автомута из Redis (самый приоритетный)
+            # 2. Уровень скама >= 50 (второй приоритет)
             # 3. Возраст аккаунта <= 30 дней (включая отрицательные значения - новые аккаунты)
             mute_reason = ""
+            should_mute = False
             
             if auto_mute_flag == "1":
-                mute_reason = "Флаг автомута из Redis"
+                mute_reason = f"Флаг автомута из Redis (TTL: {auto_mute_ttl}s)"
+                should_mute = True
                 logger.info(f"🔍 [AUTO_MUTE_DEBUG] ✅ Флаг автомута установлен - мутим пользователя @{user.username or user.first_name or user.id} [{user.id}]")
             elif scam_level is not None and scam_level >= 50:
-                mute_reason = f"Уровень скама {scam_level}/100"
+                mute_reason = f"Уровень скама {scam_level}/100 из БД"
+                should_mute = True
                 logger.info(f"🔍 [AUTO_MUTE_DEBUG] ✅ Уровень скама {scam_level} >= 50 - мутим пользователя @{user.username or user.first_name or user.id} [{user.id}]")
             elif age_days <= 30:
                 mute_reason = f"Свежий аккаунт ({age_days} дней)"
+                should_mute = True
                 logger.info(f"🔍 [AUTO_MUTE_DEBUG] ✅ Свежий аккаунт ({age_days} дней) - мутим пользователя @{user.username or user.first_name or user.id} [{user.id}]")
-            else:
+            
+            if not should_mute:
                 logger.info(f"🔍 [AUTO_MUTE_DEBUG] ❌ Пользователь @{user.username or user.first_name or user.id} [{user.id}] не соответствует критериям автомута (флаг: {auto_mute_flag}, уровень скама: {scam_level}, возраст: {age_days} дней)")
                 return False
             

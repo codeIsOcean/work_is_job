@@ -13,10 +13,50 @@ env:
   SERVER_HOST: ${{ secrets.PROD_SERVER_HOST }}
   SERVER_USER: ${{ secrets.PROD_SERVER_USER }}
   DEPLOY_PATH: /opt/jobs_inDubai_prod
+  REGISTRY: ghcr.io
+  IMAGE_NAME: codeiscean/work_is_job
 
 jobs:
+  build-and-push-image:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=sha,prefix=prod-
+    
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile.prod
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
   deploy-prod:
     runs-on: ubuntu-latest
+    needs: build-and-push-image
     if: github.ref == 'refs/heads/main'
     
     environment: production
@@ -61,8 +101,8 @@ jobs:
           # Pull latest changes (if using git on server)
           git pull origin main || echo "Git pull failed, continuing with deployed files..."
           
-          # Rebuild and restart containers
-          docker compose -f docker-compose.prod.yml build bot_prod || docker-compose -f docker-compose.prod.yml build bot_prod
+          # Pull latest image from registry and restart containers
+          docker compose -f docker-compose.prod.yml pull bot_prod || docker-compose -f docker-compose.prod.yml pull bot_prod || echo "Image pull failed, will use existing image"
           docker compose -f docker-compose.prod.yml up -d || docker-compose -f docker-compose.prod.yml up -d
           
           # Wait for services to be ready

@@ -175,10 +175,9 @@ jobs:
         username: ${{ secrets.PROD_SERVER_USER }}
         key: ${{ secrets.PROD_SERVER_SSH_KEY }}
         script: |
-          cd /opt/telegram-bot
+          cd /opt/jobs_inDubai_prod
           git pull origin main || echo "Git pull failed, continuing..."
-          docker compose -f docker-compose.prod.yml pull || docker-compose -f docker-compose.prod.yml pull
-          docker compose -f docker-compose.prod.yml down || docker-compose -f docker-compose.prod.yml down
-          docker compose -f docker-compose.prod.yml up -d --build || docker-compose -f docker-compose.prod.yml up -d --build
+          docker compose -f docker-compose.prod.yml pull bot_prod || docker-compose -f docker-compose.prod.yml pull bot_prod || echo "Image pull failed, will use existing image"
+          docker compose -f docker-compose.prod.yml up -d || docker-compose -f docker-compose.prod.yml up -d
           docker system prune -f
           echo "✅ Деплой завершен!"
