@@ -9,6 +9,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.exceptions import TelegramRetryAfter
 
 from bot.config import (
     BOT_TOKEN, WEBHOOK_URL, WEBHOOK_PATH, WEBHOOK_PORT,
@@ -116,57 +117,77 @@ async def create_app(bot: Bot = None, dp: Dispatcher = None) -> web.Application:
 
 async def setup_webhook(bot: Bot):
     """Настройка webhook для бота"""
-    try:
-        logger.info(f"📋 WEBHOOK_URL из конфига: {WEBHOOK_URL}")
-        
-        if not WEBHOOK_URL:
-            logger.error("❌ WEBHOOK_URL не установлен в конфигурации! Проверьте .env файл.")
-            raise ValueError("WEBHOOK_URL не установлен")
-        
-        # Удаляем старый webhook
-        logger.info("🔄 Удаление старого webhook...")
-        deleted = await bot.delete_webhook(drop_pending_updates=True)
-        logger.info(f"✅ Старый webhook удален: {deleted}")
+    if not WEBHOOK_URL:
+        logger.error("❌ WEBHOOK_URL не установлен в конфигурации! Проверьте .env файл.")
+        raise ValueError("WEBHOOK_URL не установлен")
 
-        # Устанавливаем новый webhook
-        logger.info(f"🔧 Установка webhook: {WEBHOOK_URL}")
-        set_result = await bot.set_webhook(
-            url=WEBHOOK_URL,
-            drop_pending_updates=True,
-            secret_token=None,  # Можно добавить секретный токен для безопасности
-            allowed_updates=["message", "callback_query", "chat_member", "my_chat_member", "chat_join_request"]
-        )
-        logger.info(f"📤 Результат set_webhook: {set_result}")
-        
-        # Проверяем статус webhook через API
-        logger.info("🔍 Проверка статуса webhook через get_webhook_info...")
-        webhook_info = await bot.get_webhook_info()
-        logger.info(f"📊 Информация о webhook:")
-        logger.info(f"   - URL: {webhook_info.url}")
-        logger.info(f"   - Pending updates: {webhook_info.pending_update_count}")
-        logger.info(f"   - Has custom cert: {webhook_info.has_custom_certificate}")
-        logger.info(f"   - Max connections: {webhook_info.max_connections}")
-        
-        if webhook_info.url == WEBHOOK_URL:
-            logger.info(f"✅ Webhook успешно установлен и проверен: {WEBHOOK_URL}")
-        else:
-            logger.warning(f"⚠️ Webhook установлен, но URL не совпадает!")
-            logger.warning(f"   Ожидалось: {WEBHOOK_URL}")
-            logger.warning(f"   Получено: {webhook_info.url}")
-        
-        if webhook_info.last_error_date:
-            logger.warning(f"⚠️ Последняя ошибка webhook:")
-            logger.warning(f"   - Дата: {webhook_info.last_error_date}")
-            logger.warning(f"   - Сообщение: {webhook_info.last_error_message}")
-        else:
-            logger.info("✅ Ошибок webhook не обнаружено")
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка настройки webhook: {e}")
-        import traceback
-        logger.error(f"📋 Трассировка ошибки:")
-        logger.error(traceback.format_exc())
-        raise
+    logger.info(f"📋 WEBHOOK_URL из конфига: {WEBHOOK_URL}")
+
+    max_attempts = 5
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # Удаляем старый webhook
+            logger.info("🔄 Удаление старого webhook...")
+            deleted = await bot.delete_webhook(drop_pending_updates=True)
+            logger.info(f"✅ Старый webhook удален: {deleted}")
+
+            # Небольшая задержка помогает избежать лимитов Telegram при частых обновлениях
+            await asyncio.sleep(1)
+
+            # Устанавливаем новый webhook
+            logger.info(f"🔧 Установка webhook: {WEBHOOK_URL}")
+            set_result = await bot.set_webhook(
+                url=WEBHOOK_URL,
+                drop_pending_updates=True,
+                secret_token=None,  # Можно добавить секретный токен для безопасности
+                allowed_updates=["message", "callback_query", "chat_member", "my_chat_member", "chat_join_request"]
+            )
+            logger.info(f"📤 Результат set_webhook: {set_result}")
+
+            # Проверяем статус webhook через API
+            logger.info("🔍 Проверка статуса webhook через get_webhook_info...")
+            webhook_info = await bot.get_webhook_info()
+            logger.info(f"📊 Информация о webhook:")
+            logger.info(f"   - URL: {webhook_info.url}")
+            logger.info(f"   - Pending updates: {webhook_info.pending_update_count}")
+            logger.info(f"   - Has custom cert: {webhook_info.has_custom_certificate}")
+            logger.info(f"   - Max connections: {webhook_info.max_connections}")
+
+            if webhook_info.url == WEBHOOK_URL:
+                logger.info(f"✅ Webhook успешно установлен и проверен: {WEBHOOK_URL}")
+            else:
+                logger.warning(f"⚠️ Webhook установлен, но URL не совпадает!")
+                logger.warning(f"   Ожидалось: {WEBHOOK_URL}")
+                logger.warning(f"   Получено: {webhook_info.url}")
+
+            if webhook_info.last_error_date:
+                logger.warning(f"⚠️ Последняя ошибка webhook:")
+                logger.warning(f"   - Дата: {webhook_info.last_error_date}")
+                logger.warning(f"   - Сообщение: {webhook_info.last_error_message}")
+            else:
+                logger.info("✅ Ошибок webhook не обнаружено")
+
+            return
+
+        except TelegramRetryAfter as e:
+            wait_seconds = max(int(getattr(e, "retry_after", 1)), 1)
+            logger.warning(
+                f"⚠️ Попытка {attempt}/{max_attempts} — Telegram вернул Flood control на set_webhook. "
+                f"Повтор через {wait_seconds} сек."
+            )
+            if attempt == max_attempts:
+                logger.error("❌ Достигнут лимит попыток установки webhook, прекращаем попытки.")
+                raise
+            await asyncio.sleep(wait_seconds)
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка настройки webhook на попытке {attempt}: {e}")
+            import traceback
+            logger.error(f"📋 Трассировка ошибки:")
+            logger.error(traceback.format_exc())
+            if attempt == max_attempts:
+                raise
+            await asyncio.sleep(2)
 
 
 async def run_webhook(bot: Bot = None, dp: Dispatcher = None):
