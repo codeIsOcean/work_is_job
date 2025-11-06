@@ -10,16 +10,15 @@ on:
       - '.gitignore'
 
 env:
-  SERVER_HOST: ${{ secrets.TEST_SERVER_HOST }}
-  SERVER_USER: ${{ secrets.TEST_SERVER_USER }}
-  DEPLOY_PATH: /opt/jobs_inDubai_testBot
   REGISTRY: ghcr.io
-  IMAGE_NAME: codeiscean/work_is_job
 
 jobs:
   build-and-push-image:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/test'
+    permissions:
+      contents: read
+      packages: write
     
     steps:
     - uses: actions/checkout@v4
@@ -34,11 +33,15 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     
+    - name: Set image name (lowercase)
+      id: test_image
+      run: echo "image_name_lower=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+    
     - name: Extract metadata
       id: meta
       uses: docker/metadata-action@v5
       with:
-        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        images: ${{ env.REGISTRY }}/${{ steps.test_image.outputs.image_name_lower }}
         tags: |
           type=ref,event=branch
           type=sha,prefix=test-
@@ -70,11 +73,11 @@ jobs:
     - name: Deploy to test server
       uses: appleboy/scp-action@v0.1.7
       with:
-        host: ${{ env.SERVER_HOST }}
-        username: ${{ env.SERVER_USER }}
+        host: ${{ secrets.TEST_SERVER_HOST }}
+        username: ${{ secrets.TEST_SERVER_USER }}
         key: ${{ secrets.TEST_SERVER_SSH_KEY }}
         source: "."
-        target: ${{ env.DEPLOY_PATH }}
+        target: /opt/jobs_inDubai_testBot
         strip_components: 0
         exclude: |
           .git
@@ -90,11 +93,11 @@ jobs:
     - name: Restart services on server
       uses: appleboy/ssh-action@v1.0.3
       with:
-        host: ${{ env.SERVER_HOST }}
-        username: ${{ env.SERVER_USER }}
+        host: ${{ secrets.TEST_SERVER_HOST }}
+        username: ${{ secrets.TEST_SERVER_USER }}
         key: ${{ secrets.TEST_SERVER_SSH_KEY }}
         script: |
-          cd ${{ env.DEPLOY_PATH }}
+          cd /opt/jobs_inDubai_testBot
           
           # Pull latest changes (if using git on server)
           git pull origin test || echo "Git pull failed, continuing with deployed files..."

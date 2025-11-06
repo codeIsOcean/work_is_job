@@ -7,12 +7,14 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build-and-deploy-prod:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
     
     steps:
     - uses: actions/checkout@v4
@@ -27,11 +29,15 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
+    - name: Set image name (lowercase)
+      id: prod_image
+      run: echo "image_name_lower=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
     - name: Extract metadata
       id: meta
       uses: docker/metadata-action@v5
       with:
-        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        images: ${{ env.REGISTRY }}/${{ steps.prod_image.outputs.image_name_lower }}
         tags: |
           type=ref,event=branch
           type=sha,prefix=prod-
@@ -54,9 +60,9 @@ jobs:
         username: ${{ secrets.PROD_SERVER_USER }}
         key: ${{ secrets.PROD_SERVER_SSH_KEY }}
         script: |
-          cd /opt/telegram-bot
+          cd /opt/jobs_inDubai_prod
           git pull origin main || echo "Git pull failed, continuing..."
-          docker compose -f docker-compose.prod.yml pull || docker-compose -f docker-compose.prod.yml pull
-          docker compose -f docker-compose.prod.yml up -d --build || docker-compose -f docker-compose.prod.yml up -d --build
+          docker compose -f docker-compose.prod.yml pull bot_prod || docker-compose -f docker-compose.prod.yml pull bot_prod || echo "Image pull failed, will use existing image"
+          docker compose -f docker-compose.prod.yml up -d || docker-compose -f docker-compose.prod.yml up -d
           docker system prune -f
 
