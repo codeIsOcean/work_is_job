@@ -1,0 +1,51 @@
+FROM python:3.11-slim
+
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    gcc \
+    python3-dev \
+    libpq-dev \
+    netcat-openbsd \
+    libgl1 \
+    libglib2.0-0 \
+    tesseract-ocr \
+    libtesseract-dev \
+    fonts-dejavu-core \
+    fonts-liberation \
+    curl && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set workdir
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy project files
+COPY . .
+
+# Environment variables for production
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV ENVIRONMENT=production
+
+# Create non-root user
+RUN useradd --create-home --shell /bin/bash app && \
+    chown -R app:app /app
+USER app
+
+# Default command
+CMD ["sh", "-c", "\
+    echo '🚀 Запуск в продакшн режиме...' && \
+    echo '⏳ Ждём PostgreSQL...' && \
+    until nc -z postgres_prod 5432; do sleep 1; done && \
+    echo '⏳ Ждём Redis...' && \
+    until nc -z redis_prod 6379; do sleep 1; done && \
+    echo '✅ Все сервисы готовы! Запускаем миграции...' && \
+    alembic upgrade head && \
+    echo '🚀 Запускаем бота в продакшн режиме...' && \
+    python main.py"]

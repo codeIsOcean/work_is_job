@@ -158,12 +158,6 @@ docker-compose.dev.yml
 docker-compose.test.yml
 docker-compose.prod.yml
 
-# Dockerfile может содержать конфиденциальную информацию
-Dockerfile
-Dockerfile.dev
-Dockerfile.test
-Dockerfile.prod
-
 # Nginx конфиги могут содержать пути к сертификатам
 nginx/
 
