@@ -100,7 +100,7 @@ jobs:
           cd /opt/jobs_inDubai_testBot
           git fetch --all
           git reset --hard origin/test
-          git clean -fd
+          git clean -fd -e '.env' -e '.env.*' -e 'ssl/'
           docker compose -f docker-compose.test.yml down || docker-compose -f docker-compose.test.yml down
           docker compose -f docker-compose.test.yml pull bot_test || docker-compose -f docker-compose.test.yml pull bot_test
           docker compose -f docker-compose.test.yml up -d || docker-compose -f docker-compose.test.yml up -d
