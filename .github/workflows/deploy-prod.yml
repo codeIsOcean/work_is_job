@@ -100,11 +100,9 @@ jobs:
         key: ${{ secrets.PROD_SERVER_SSH_KEY }}
         script: |
           cd /opt/jobs_inDubai_prod
-          
-          # Pull latest changes (if using git on server)
-          git pull origin main || echo "Git pull failed, continuing with deployed files..."
-          
-          # Pull latest image from registry and restart containers
+          git fetch --all
+          git reset --hard origin/main
+          git clean -fd
           docker compose -f docker-compose.prod.yml pull bot_prod || docker-compose -f docker-compose.prod.yml pull bot_prod || echo "Image pull failed, will use existing image"
           docker compose -f docker-compose.prod.yml up -d || docker-compose -f docker-compose.prod.yml up -d
           
