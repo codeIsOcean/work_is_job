@@ -1,6 +1,6 @@
 # services/bot_activity_journal/bot_activity_journal_logic.py
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from aiogram import Bot
 from aiogram.types import User, Chat
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -344,6 +344,9 @@ async def log_captcha_failed(
     user: User,
     chat: Chat,
     reason: str = "Неверный ответ",
+    attempt: Optional[int] = None,
+    risk_score: Optional[int] = None,
+    risk_factors: Optional[List[str]] = None,
     session: Optional[AsyncSession] = None
 ):
     """Логирует неудачное прохождение капчи"""
@@ -363,6 +366,9 @@ async def log_captcha_failed(
         
         additional_info = {
             "reason": reason,
+            "attempt": attempt,
+            "risk_score": risk_score,
+            "risk_factors": risk_factors or [],
         }
         
         await send_activity_log(

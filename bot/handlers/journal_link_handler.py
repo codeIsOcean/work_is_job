@@ -4,6 +4,7 @@ Handler для автоматической привязки журнала к �
 Паттерн: админ пересылает сообщение из канала журнала в группу с ботом.
 """
 import logging
+import html
 from datetime import datetime
 from aiogram import Router, F
 from aiogram.types import Message
@@ -151,10 +152,32 @@ async def handle_journal_link_forward(message: Message, session: AsyncSession):
             existing = await get_group_journal_channel(session, chat_id)
             if existing and existing.linked_at and (datetime.utcnow() - existing.linked_at).total_seconds() < 5:
                 # Это новая привязка (только что создана)
+                journal_link = None
+                if forward_from_chat.username:
+                    journal_link = f"https://t.me/{forward_from_chat.username}"
+                else:
+                    journal_link = getattr(forward_from_chat, "invite_link", None)
+
+                group_title = message.chat.title or f"ID: {message.chat.id}"
+                if message.chat.username:
+                    group_link = f"https://t.me/{message.chat.username}"
+                else:
+                    group_link = f"tg://openmessage?chat_id={message.chat.id}"
+
+                journal_title_text = html.escape(journal_title)
+                group_title_text = html.escape(group_title)
+
+                if journal_link:
+                    journal_title_display = f"<a href='{html.escape(journal_link)}'>{journal_title_text}</a>"
+                else:
+                    journal_title_display = f"<b>{journal_title_text}</b>"
+
+                group_title_display = f"<a href='{html.escape(group_link)}'>{group_title_text}</a>"
+
                 await message.reply(
                     f"✅ <b>Журнал привязан!</b>\n\n"
-                    f"📢 Канал журнала: <b>{journal_title}</b>\n"
-                    f"🏢 Группа: <b>{message.chat.title}</b>\n\n"
+                    f"📢 Канал журнала: {journal_title_display}\n"
+                    f"🏢 Группа: {group_title_display}\n\n"
                     f"Теперь все события этой группы будут логироваться в указанный канал.\n"
                     f"Для отвязки используйте /unlinkjournal",
                     parse_mode="HTML"

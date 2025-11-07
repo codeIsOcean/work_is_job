@@ -1,5 +1,6 @@
 # handlers/bot_activity_journal/bot_activity_journal.py
 import logging
+import html
 from aiogram import Router, Bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from typing import Optional, Dict, Any
@@ -116,15 +117,21 @@ async def format_activity_message(
     user_display += f" [{user_id}]"
     
     # Формируем информацию о группе
-    group_title = group_data.get('title', 'N/A')
-    group_username = group_data.get('username', '')
+    group_title = group_data.get('title')
+    group_username = group_data.get('username') or ''
     group_id = group_data.get('chat_id', 'N/A')
     
-    # Создаем кликабельную ссылку на группу
+    display_title = group_title or (f"@{group_username}" if group_username else f"ID: {group_id}")
+    
     if group_username:
-        group_display = f"<a href='https://t.me/{group_username}'>{group_title}</a> (https://t.me/{group_username}) [@{group_username}][{group_id}]"
+        group_link = f"https://t.me/{group_username}"
     else:
-        group_display = f"<b>{group_title}</b> [{group_id}]"
+        group_link = f"tg://openmessage?chat_id={group_id}"
+    
+    group_display = f"<a href='{html.escape(group_link)}'>{html.escape(display_title)}</a>"
+    if group_username:
+        group_display += f" [@{group_username}]"
+    group_display += f" [{group_id}]"
     
     # Определяем цвет статуса
     status_emoji = "🟢" if status == "success" else "🔴"
@@ -228,11 +235,28 @@ async def format_activity_message(
         message += f"#captcha #passed #user{user_id}"
     
     elif event_type == "CAPTCHA_FAILED":
-        reason = additional_info.get('reason', 'Не указано') if additional_info else 'Не указано'
+        if additional_info:
+            reason = additional_info.get('reason', 'Не указано')
+            attempt = additional_info.get('attempt')
+            risk_score = additional_info.get('risk_score')
+            risk_factors = additional_info.get('risk_factors') or []
+        else:
+            reason = 'Не указано'
+            attempt = None
+            risk_score = None
+            risk_factors = []
+        
+        risk_factors_text = ", ".join(map(str, risk_factors)) if risk_factors else "нет данных"
+        attempt_text = f"{attempt}/3" if attempt is not None else "—"
+        risk_score_text = f"{risk_score}/100" if risk_score is not None else "нет данных"
+        
         message = f"❌ <b>#КАПЧА_НЕ_ПРОЙДЕНА</b> {status_emoji}\n\n"
         message += f"👤 <b>Пользователь:</b> {user_display}\n"
         message += f"🏢 <b>Группа:</b> {group_display}\n"
         message += f"📝 <b>Причина:</b> {reason}\n"
+        message += f"🔄 <b>Попытка:</b> {attempt_text}\n"
+        message += f"📊 <b>Оценка риска:</b> {risk_score_text}\n"
+        message += f"🔍 <b>Факторы риска:</b> {risk_factors_text}\n"
         message += f"⏰ <b>Когда:</b> {current_time}\n"
         message += f"#captcha #failed #user{user_id}"
     
@@ -361,6 +385,26 @@ async def create_activity_keyboard(
             )
         ])
     
+    elif event_type == "CAPTCHA_FAILED":
+        user_id = user_data.get('user_id')
+        chat_id = group_data.get('chat_id')
+        buttons.append([
+            InlineKeyboardButton(
+                text="✅ Пропустить",
+                callback_data=f"captcha_skip_{user_id}_{chat_id}"
+            ),
+            InlineKeyboardButton(
+                text="🔇 Пропустить с мутом",
+                callback_data=f"captcha_skip_mute_{user_id}_{chat_id}"
+            )
+        ])
+        buttons.append([
+            InlineKeyboardButton(
+                text="❌ Отменить",
+                callback_data=f"captcha_cancel_{user_id}_{chat_id}"
+            )
+        ])
+    
     if buttons:
         return InlineKeyboardMarkup(inline_keyboard=buttons)
     
@@ -417,3 +461,39 @@ async def ban_user_callback(callback):
     except Exception as e:
         logger.error(f"Ошибка при бане пользователя: {e}")
         await callback.answer("❌ Ошибка при бане", show_alert=True)
+
+
+@bot_activity_journal_router.callback_query(lambda c: c.data.startswith("captcha_skip_mute_"))
+async def captcha_skip_mute_callback(callback):
+    """Обработчик кнопки 'Пропустить с мутом' после неудачной капчи"""
+    try:
+        user_id, group_id = map(int, callback.data.split("_")[-2:])
+        # TODO: добавить автоматическое добавление с мутом
+        await callback.answer("🔇 Пользователь добавлен и замьючен (TODO)", show_alert=True)
+    except Exception as e:
+        logger.error(f"Ошибка при обработке captcha_skip_mute: {e}")
+        await callback.answer("❌ Ошибка при обработке", show_alert=True)
+
+
+@bot_activity_journal_router.callback_query(lambda c: c.data.startswith("captcha_skip_") and not c.data.startswith("captcha_skip_mute_"))
+async def captcha_skip_callback(callback):
+    """Обработчик кнопки 'Пропустить' после неудачной капчи"""
+    try:
+        user_id, group_id = map(int, callback.data.split("_")[-2:])
+        # TODO: добавить автоматическое одобрение без мута
+        await callback.answer("✅ Пользователь пропущен (TODO)", show_alert=True)
+    except Exception as e:
+        logger.error(f"Ошибка при обработке captcha_skip: {e}")
+        await callback.answer("❌ Ошибка при обработке", show_alert=True)
+
+
+@bot_activity_journal_router.callback_query(lambda c: c.data.startswith("captcha_cancel_"))
+async def captcha_cancel_callback(callback):
+    """Обработчик кнопки 'Отменить' после неудачной капчи"""
+    try:
+        user_id, group_id = map(int, callback.data.split("_")[-2:])
+        # TODO: добавить отмену рассмотрения заявки
+        await callback.answer("⛔ Действие отменено (TODO)", show_alert=True)
+    except Exception as e:
+        logger.error(f"Ошибка при обработке captcha_cancel: {e}")
+        await callback.answer("❌ Ошибка при обработке", show_alert=True)

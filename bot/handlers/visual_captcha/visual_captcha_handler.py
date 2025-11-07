@@ -841,8 +841,10 @@ async def process_captcha_answer(message: Message, state: FSMContext, session: A
                         bot=message.bot,
                         user=message.from_user,
                         chat=chat_for_log,
-                        attempt=attempts,
                         reason=decision.get("reason", "Неверный ответ"),
+                        attempt=attempts,
+                        risk_score=decision.get("total_risk_score"),
+                        risk_factors=decision.get("risk_factors"),
                         session=session
                     )
                 except Exception as log_fail_error:
