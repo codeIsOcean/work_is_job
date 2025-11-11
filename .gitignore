@@ -156,7 +156,6 @@ SSH_SETUP_INSTRUCTIONS.md
 docker-compose.yml
 docker-compose.dev.yml
 docker-compose.test.yml
-docker-compose.prod.yml
 
 # Nginx конфиги могут содержать пути к сертификатам
 nginx/
