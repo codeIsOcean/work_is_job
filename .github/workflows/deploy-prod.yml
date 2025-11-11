@@ -34,6 +34,7 @@ jobs:
             --exclude "__pycache__" \
             --exclude "*.pyc" \
             --exclude ".env*" \
+            --exclude "docker-compose.prod.yml" \
             --exclude "docs" \
             --exclude "*.md" \
             --exclude ".gitignore" \
