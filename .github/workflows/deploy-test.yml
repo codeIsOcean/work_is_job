@@ -18,26 +18,28 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Prepare SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.TEST_SERVER_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.TEST_SERVER_HOST }}" >> ~/.ssh/known_hosts
+
       - name: Sync project to test server
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.TEST_SERVER_HOST }}
-          username: ${{ secrets.TEST_SERVER_USER }}
-          key: ${{ secrets.TEST_SERVER_SSH_KEY }}
-          source: "."
-          target: /opt/jobs_inDubai_testBot
-          strip_components: 0
-          overwrite: true
-          exclude: |
-            .git
-            .github
-            __pycache__
-            *.pyc
-            .env*
-            docs/
-            *.md
-            .gitignore
-            .DS_Store
+        run: |
+          rsync -az --delete \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude "__pycache__" \
+            --exclude "*.pyc" \
+            --exclude ".env*" \
+            --exclude "docs" \
+            --exclude "*.md" \
+            --exclude ".gitignore" \
+            --exclude ".DS_Store" \
+            -e "ssh -o StrictHostKeyChecking=no" \
+            ./ ${{ secrets.TEST_SERVER_USER }}@${{ secrets.TEST_SERVER_HOST }}:/opt/jobs_inDubai_testBot/
+          rm -f ~/.ssh/id_rsa
 
       - name: Deploy on test server
         uses: appleboy/ssh-action@v1.0.3
