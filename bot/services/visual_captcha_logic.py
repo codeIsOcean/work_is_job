@@ -342,7 +342,7 @@ async def schedule_captcha_reminder(bot: Bot, user_id: int, group_name: str, del
     """Планирует отправку напоминания о капче через указанное количество минут. Максимум 2 повтора."""
     await asyncio.sleep(delay_minutes * 60)  # Конвертируем минуты в секунды
     
-    # Проверяем, что пользователь все еще не решил капчу
+    # Проверяем, что пользователь все еще не решил капчу (не нажал на кнопку "Пройти капчу")
     captcha_data = await get_captcha_data(user_id)
     if captcha_data and captcha_data["group_name"] == group_name:
         # Отправляем напоминание
@@ -352,9 +352,114 @@ async def schedule_captcha_reminder(bot: Bot, user_id: int, group_name: str, del
         if reminder_count < 1:  # 0 = первое напоминание, 1 = второе (итого 2)
             # Планируем следующее напоминание через 2 минуты
             asyncio.create_task(schedule_captcha_reminder(bot, user_id, group_name, 2, reminder_count + 1))
+        else:
+            # Это было финальное напоминание (reminder_count == 1)
+            # Пользователь так и не нажал на кнопку "Пройти капчу"
+            # Планируем финальную обработку через 2 минуты
+            asyncio.create_task(handle_captcha_timeout_final(bot, user_id, group_name))
         
         return reminder_msg_id
     return None
+
+
+async def handle_captcha_timeout_final(bot: Bot, user_id: int, group_name: str):
+    """
+    Обработка финального таймаута - пользователь не нажал на "Пройти капчу".
+    Удаляет все сообщения и отправляет лог в журнал.
+    """
+    await asyncio.sleep(2 * 60)  # Ждем 2 минуты после последнего напоминания
+    
+    # Проверяем, что пользователь ВСЕ ЕЩЕ не нажал на кнопку (есть данные капчи в Redis)
+    captcha_data = await get_captcha_data(user_id)
+    if not captcha_data or captcha_data["group_name"] != group_name:
+        # Пользователь уже нажал на кнопку и начал проходить капчу - не нужно ничего делать
+        logger.info(f"✅ Пользователь {user_id} нажал на кнопку 'Пройти капчу', таймаут отменен")
+        return
+    
+    logger.warning(f"⏱️ Пользователь {user_id} НЕ нажал на кнопку 'Пройти капчу' за 6 минут. Удаляем сообщения и отправляем лог")
+    
+    try:
+        # 1. Удаляем все сообщения от бота
+        # Удаляем напоминания
+        reminder_key = f"captcha_reminder_msgs:{user_id}"
+        reminder_msgs = await redis.get(reminder_key)
+        if reminder_msgs:
+            reminder_str = reminder_msgs.decode('utf-8') if isinstance(reminder_msgs, bytes) else str(reminder_msgs)
+            for reminder_id in reminder_str.split(","):
+                try:
+                    await bot.delete_message(chat_id=user_id, message_id=int(reminder_id))
+                except Exception as e:
+                    if "message to delete not found" not in str(e).lower():
+                        logger.warning(f"Не удалось удалить напоминание {reminder_id}: {e}")
+            await redis.delete(reminder_key)
+        
+        # Удаляем первоначальное сообщение с кнопкой "Пройти капчу"
+        user_messages = await redis.get(f"user_messages:{user_id}")
+        if user_messages:
+            msg_ids = user_messages.decode('utf-8') if isinstance(user_messages, bytes) else str(user_messages)
+            for msg_id in msg_ids.split(","):
+                try:
+                    await bot.delete_message(chat_id=user_id, message_id=int(msg_id))
+                except Exception as e:
+                    if "message to delete not found" not in str(e).lower():
+                        logger.warning(f"Не удалось удалить сообщение {msg_id}: {e}")
+            await redis.delete(f"user_messages:{user_id}")
+        
+        # Очищаем данные капчи
+        await redis.delete(f"captcha:{user_id}")
+        
+        # 2. Отправляем лог в журнал с кнопками
+        # Определяем chat_id группы
+        chat_id = None
+        if group_name.startswith("private_"):
+            chat_id = int(group_name.replace("private_", ""))
+        elif group_name.startswith("-") and group_name[1:].isdigit():
+            chat_id = int(group_name)
+        else:
+            # Публичная группа - получаем chat_id из Redis
+            chat_id_from_redis = await redis.get(f"join_request:{user_id}:{group_name}")
+            if chat_id_from_redis:
+                chat_id_str = chat_id_from_redis.decode('utf-8') if isinstance(chat_id_from_redis, bytes) else str(chat_id_from_redis)
+                chat_id = int(chat_id_str)
+        
+        if chat_id:
+            # Получаем информацию о пользователе и группе
+            try:
+                from aiogram.types import User as TgUser
+                chat = await bot.get_chat(chat_id)
+                
+                # Получаем информацию о пользователе (если возможно)
+                try:
+                    # Пытаемся получить информацию о пользователе через get_chat_member
+                    member_info = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+                    user = member_info.user
+                except Exception:
+                    # Если не получилось - создаем минимальный объект User
+                    user = TgUser(id=user_id, is_bot=False, first_name=f"User {user_id}")
+                
+                # Отправляем лог в журнал
+                from bot.services.bot_activity_journal.bot_activity_journal_logic import log_captcha_timeout
+                from bot.database.session import get_session
+                
+                async with get_session() as session:
+                    await log_captcha_timeout(
+                        bot=bot,
+                        user=user,
+                        chat=chat,
+                        session=session
+                    )
+                
+                logger.info(f"✅ Лог о таймауте капчи отправлен в журнал для user_id={user_id}, chat_id={chat_id}")
+                
+            except Exception as log_error:
+                logger.error(f"❌ Ошибка при отправке лога в журнал: {log_error}")
+        else:
+            logger.warning(f"⚠️ Не удалось определить chat_id для group_name={group_name}")
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка в handle_captcha_timeout_final: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 
 async def save_join_request(user_id: int, chat_id: int, group_id: str) -> None:

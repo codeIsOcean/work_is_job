@@ -1,0 +1,52 @@
+FROM python:3.11-slim
+
+# Install system dependencies required by the application
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    gcc \
+    python3-dev \
+    libpq-dev \
+    netcat-openbsd \
+    libgl1 \
+    libglib2.0-0 \
+    tesseract-ocr \
+    libtesseract-dev \
+    fonts-dejavu-core \
+    fonts-liberation \
+    curl && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set workdir
+WORKDIR /app
+
+# Install Python dependencies first for better layer caching
+COPY requirements.txt .
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy project files
+COPY . .
+
+# Environment configuration for testing
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV ENVIRONMENT=testing
+
+# Create non-root user
+RUN useradd --create-home --shell /bin/bash app && \
+    chown -R app:app /app
+USER app
+
+# Default command for the test environment
+CMD ["sh", "-c", "\
+    echo 'Starting in testing mode...' && \
+    echo 'Waiting for PostgreSQL...' && \
+    until nc -z postgres_test 5432; do sleep 1; done && \
+    echo 'Waiting for Redis...' && \
+    until nc -z redis_test 6379; do sleep 1; done && \
+    echo 'Services are ready! Running migrations...' && \
+    alembic upgrade head && \
+    echo 'Launching bot in testing mode...' && \
+    python main.py"]
+

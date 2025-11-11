@@ -99,8 +99,8 @@ class StructuredLoggingMiddleware(BaseMiddleware):
                     "username": cm.from_user.username if cm.from_user else None,
                     "first_name": cm.from_user.first_name if cm.from_user else None,
                 },
-                "old_status": cm.old_chat_member.status.value if cm.old_chat_member else None,
-                "new_status": cm.new_chat_member.status.value if cm.new_chat_member else None,
+                "old_status": cm.old_chat_member.status if isinstance(cm.old_chat_member.status, str) else cm.old_chat_member.status.value if cm.old_chat_member else None,
+                "new_status": cm.new_chat_member.status if isinstance(cm.new_chat_member.status, str) else cm.new_chat_member.status.value if cm.new_chat_member else None,
                 "user": {
                     "id": cm.new_chat_member.user.id if cm.new_chat_member else None,
                     "username": cm.new_chat_member.user.username if cm.new_chat_member else None,

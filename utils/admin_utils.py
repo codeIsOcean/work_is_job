@@ -11,21 +11,21 @@ async def get_visual_captcha_status(chat_id: int) -> bool:
     async with _cache_lock:
         if chat_id in _captcha_status_cache:
             return _captcha_status_cache[chat_id]
-
+    
     # Здесь должен быть запрос к базе данных
     # status = await db.get_visual_captcha_status(chat_id)
     status = False  # Заглушка
-
+    
     async with _cache_lock:
         _captcha_status_cache[chat_id] = status
-
+    
     return status
 
 async def update_visual_captcha_status(chat_id: int, status: bool):
     """Обновить статус визуальной капчи для группы"""
     # Обновляем в базе данных
     # await db.update_visual_captcha_status(chat_id, status)
-
+    
     # Обновляем кэш
     async with _cache_lock:
         _captcha_status_cache[chat_id] = status

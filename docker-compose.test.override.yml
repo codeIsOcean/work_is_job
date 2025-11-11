@@ -1,0 +1,95 @@
+version: '3.8'
+
+services:
+  postgres_test:
+    image: postgres:15
+    container_name: postgres_test
+    environment:
+      POSTGRES_USER: jobs_inDubai_testBot
+      POSTGRES_PASSWORD: test_password
+      POSTGRES_DB: jobs_inDubai_testBot
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobs_inDubai_testBot -d jobs_inDubai_testBot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - test_network
+
+  redis_test:
+    image: redis:7
+    container_name: redis_test
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_test_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - test_network
+
+  bot_test:
+    image: ghcr.io/codeisocean/work_is_job:main
+    container_name: bot_test
+    pull_policy: always
+    env_file:
+      - .env.test
+    environment:
+      ENVIRONMENT: testing
+      ENV_PATH: .env.test
+      PYTHONPATH: /app
+    depends_on:
+      postgres_test:
+        condition: service_healthy
+      redis_test:
+        condition: service_healthy
+    command: >
+      sh -c "echo 'рџ§Є Р—Р°РїСѓСЃРє РІ С‚РµСЃС‚РѕРІРѕРј СЂРµР¶РёРјРµ...' && \
+             echo 'вЏі Р–РґС‘Рј PostgreSQL...' && \
+             until nc -z postgres_test 5432; do sleep 1; done && \
+             echo 'вЏі Р–РґС‘Рј Redis...' && \
+             until nc -z redis_test 6379; do sleep 1; done && \
+             echo 'вњ… Р’СЃРµ СЃРµСЂРІРёСЃС‹ РіРѕС‚РѕРІС‹! Р—Р°РїСѓСЃРєР°РµРј РјРёРіСЂР°С†РёРё...' && \
+             alembic upgrade head && \
+             echo 'рџ§Є Р—Р°РїСѓСЃРєР°РµРј Р±РѕС‚Р° РІ С‚РµСЃС‚РѕРІРѕРј СЂРµР¶РёРјРµ...' && \
+             python main.py"
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/app
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    restart: unless-stopped
+    networks:
+      - test_network
+
+  nginx_test:
+    image: nginx:alpine
+    container_name: nginx_test
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.test.conf:/etc/nginx/nginx.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      - bot_test
+    restart: unless-stopped
+    networks:
+      - test_network
+
+volumes:
+  postgres_test_data:
+  redis_test_data:
+
+networks:
+  test_network:
+    driver: bridge

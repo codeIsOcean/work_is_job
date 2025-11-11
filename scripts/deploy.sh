@@ -11,7 +11,7 @@ if [ -z "$1" ]; then
 fi
 
 SERVER=$1
-SERVER_PATH="/opt/telegram-bot"
+SERVER_PATH="/opt/jobs_inDubai_prod"
 
 echo "🚀 Начинаю деплой на сервер $SERVER..."
 
@@ -24,7 +24,7 @@ scp -r nginx "$SERVER:$SERVER_PATH/" || echo "⚠️ Nginx уже существ
 # Подключаемся к серверу и запускаем деплой
 echo "🔧 Запуск на сервере..."
 ssh "$SERVER" << 'EOF'
-cd /opt/telegram-bot
+cd /opt/jobs_inDubai_prod
 
 # Проверяем, что .env.prod существует
 if [ ! -f .env.prod ]; then

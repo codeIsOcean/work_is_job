@@ -822,36 +822,6 @@ async def process_captcha_answer(message: Message, state: FSMContext, session: A
         attempts += 1
         await state.update_data(attempts=attempts)
         
-        # ЛОГИРУЕМ НЕУДАЧНУЮ ПОПЫТКУ КАПЧИ
-        try:
-            chat_id_for_log_failed = 0
-            if group_name.startswith("private_"):
-                chat_id_for_log_failed = int(group_name.replace("private_", ""))
-            elif group_name.startswith("-") and group_name[1:].isdigit():
-                chat_id_for_log_failed = int(group_name)
-            else:
-                chat_id_from_redis = await redis.get(f"join_request:{message.from_user.id}:{group_name}")
-                if chat_id_from_redis:
-                    chat_id_for_log_failed = int(chat_id_from_redis)
-            
-            if chat_id_for_log_failed != 0:
-                try:
-                    chat_for_log = await message.bot.get_chat(chat_id_for_log_failed)
-                    await log_captcha_failed(
-                        bot=message.bot,
-                        user=message.from_user,
-                        chat=chat_for_log,
-                        reason=decision.get("reason", "Неверный ответ"),
-                        attempt=attempts,
-                        risk_score=decision.get("total_risk_score"),
-                        risk_factors=decision.get("risk_factors"),
-                        session=session
-                    )
-                except Exception as log_fail_error:
-                    logger.error(f"Ошибка при логировании неудачной капчи: {log_fail_error}")
-        except Exception as e:
-            logger.error(f"Ошибка при получении chat_id для логирования неудачи: {e}")
-        
         # Если пользователь заблокирован как подозрительный (только для очень высокого риска)
         if not decision["approved"] and decision["total_risk_score"] >= 100:
             blocked_msg = await message.answer(
@@ -963,11 +933,23 @@ async def process_captcha_answer(message: Message, state: FSMContext, session: A
                 if chat_id_for_timeout != 0:
                     try:
                         chat_for_timeout = await message.bot.get_chat(chat_id_for_timeout)
+                        # ЛОГИРУЕМ ТАЙМАУТ (превышение попыток - 3/3)
                         await log_captcha_timeout(
                             bot=message.bot,
                             user=message.from_user,
                             chat=chat_for_timeout,
-                            attempts=attempts,
+                            session=session
+                        )
+                        
+                        # ЛОГИРУЕМ ФИНАЛЬНУЮ НЕУДАЧНУЮ ПОПЫТКУ КАПЧИ (3/3)
+                        await log_captcha_failed(
+                            bot=message.bot,
+                            user=message.from_user,
+                            chat=chat_for_timeout,
+                            reason="Превышено количество попыток",
+                            attempt=attempts,
+                            risk_score=decision.get("total_risk_score"),
+                            risk_factors=decision.get("risk_factors"),
                             session=session
                         )
                     except Exception as timeout_log_error:

@@ -11,9 +11,6 @@ on:
       - main
       - test
 
-env:
-  REGISTRY: ghcr.io
-
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -72,129 +69,108 @@ jobs:
   build-and-deploy-test:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/test' && github.event_name == 'push'
-    permissions:
-      contents: read
-      packages: write
-    
+
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      - name: Sync project to test server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.TEST_SERVER_HOST }}
+          username: ${{ secrets.TEST_SERVER_USER }}
+          key: ${{ secrets.TEST_SERVER_SSH_KEY }}
+          source: "."
+          target: /opt/jobs_inDubai_testBot
+          strip_components: 0
+          overwrite: true
+          exclude: |
+            .git
+            .github
+            __pycache__
+            *.pyc
+            .env*
+            docs/
+            *.md
+            .gitignore
+            .DS_Store
 
-    - name: Log in to Container Registry
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Deploy to test server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.TEST_SERVER_HOST }}
+          username: ${{ secrets.TEST_SERVER_USER }}
+          key: ${{ secrets.TEST_SERVER_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/jobs_inDubai_testBot
 
-    - name: Set image name (lowercase)
-      id: test_image
-      run: echo "image_name_lower=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+            if [ ! -f .env.test ]; then
+              echo ".env.test is missing. Create it from env.test.example before deploying."
+              exit 1
+            fi
 
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.REGISTRY }}/${{ steps.test_image.outputs.image_name_lower }}
-        tags: |
-          type=ref,event=branch
-          type=sha,prefix=test-
+            if docker compose version >/dev/null 2>&1; then
+              COMPOSE="docker compose"
+            else
+              COMPOSE="docker-compose"
+            fi
 
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./Dockerfile.test
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-    
-    - name: Set image to public (if needed)
-      run: |
-        echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin || true
-        # Note: Image visibility should be set in GitHub package settings
-
-    - name: Deploy to test server
-      uses: appleboy/ssh-action@v1.0.3
-      with:
-        host: ${{ secrets.TEST_SERVER_HOST }}
-        username: ${{ secrets.TEST_SERVER_USER }}
-        key: ${{ secrets.TEST_SERVER_SSH_KEY }}
-        script: |
-          cd /opt/jobs_inDubai_testBot
-          git fetch --all
-          git reset --hard origin/test
-          git clean -fd -e '.env' -e '.env.*' -e 'ssl/'
-          docker-compose -f docker-compose.test.yml down || docker compose -f docker-compose.test.yml down || true
-          docker-compose -f docker-compose.test.yml pull bot_test || docker compose -f docker-compose.test.yml pull bot_test || echo "Image pull failed, will use existing image"
-          docker-compose -f docker-compose.test.yml up -d || docker compose -f docker-compose.test.yml up -d
-          docker system prune -f
-          echo "✅ Тестовый бот успешно обновлен!"
+            $COMPOSE -f docker-compose.test.yml down --remove-orphans || true
+            $COMPOSE -f docker-compose.test.yml up -d --build
+            $COMPOSE -f docker-compose.test.yml ps
+            docker ps --filter "name=bot_test" --format "table {{.Names}}\t{{.Status}}"
 
   build-and-deploy-prod:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
-    permissions:
-      contents: read
-      packages: write
-    
     environment: production
-    
+
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      - name: Sync project to production server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.PROD_SERVER_HOST }}
+          username: ${{ secrets.PROD_SERVER_USER }}
+          key: ${{ secrets.PROD_SERVER_SSH_KEY }}
+          source: "."
+          target: /opt/jobs_inDubai_prod
+          strip_components: 0
+          overwrite: true
+          exclude: |
+            .git
+            .github
+            __pycache__
+            *.pyc
+            .env*
+            docs/
+            *.md
+            .gitignore
+            .DS_Store
 
-    - name: Log in to Container Registry
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Deploy to production server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PROD_SERVER_HOST }}
+          username: ${{ secrets.PROD_SERVER_USER }}
+          key: ${{ secrets.PROD_SERVER_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/jobs_inDubai_prod
 
-    - name: Set image name (lowercase)
-      id: prod_image
-      run: echo "image_name_lower=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+            if [ ! -f .env.prod ]; then
+              echo ".env.prod is missing. Create it from env.prod.example before deploying."
+              exit 1
+            fi
 
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.REGISTRY }}/${{ steps.prod_image.outputs.image_name_lower }}
-        tags: |
-          type=ref,event=branch
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=sha,prefix=prod-
+            if docker compose version >/dev/null 2>&1; then
+              COMPOSE="docker compose"
+            else
+              COMPOSE="docker-compose"
+            fi
 
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./Dockerfile.prod
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-    - name: Deploy to production server
-      uses: appleboy/ssh-action@v1.0.3
-      with:
-        host: ${{ secrets.PROD_SERVER_HOST }}
-        username: ${{ secrets.PROD_SERVER_USER }}
-        key: ${{ secrets.PROD_SERVER_SSH_KEY }}
-        script: |
-          cd /opt/jobs_inDubai_prod
-          git fetch --all
-          git reset --hard origin/main
-          git clean -fd -e '.env' -e '.env.*' -e 'ssl/'
-          docker compose -f docker-compose.prod.yml pull bot_prod || docker-compose -f docker-compose.prod.yml pull bot_prod || echo "Image pull failed, will use existing image"
-          docker compose -f docker-compose.prod.yml up -d || docker-compose -f docker-compose.prod.yml up -d
-          docker system prune -f
-          echo "✅ Деплой завершен!"
+            $COMPOSE -f docker-compose.prod.yml down --remove-orphans || true
+            $COMPOSE -f docker-compose.prod.yml up -d --build
+            $COMPOSE -f docker-compose.prod.yml ps
+            docker ps --filter "name=bot_prod" --format "table {{.Names}}\t{{.Status}}"
