@@ -41,6 +41,10 @@ jobs:
             --exclude ".DS_Store" \
             -e "ssh -o StrictHostKeyChecking=no" \
             ./ ${{ secrets.PROD_SERVER_USER }}@${{ secrets.PROD_SERVER_HOST }}:/opt/jobs_inDubai_prod/
+          # ФИКС: Убеждаемся, что nginx конфиг синхронизирован
+          rsync -az \
+            -e "ssh -o StrictHostKeyChecking=no" \
+            ./nginx/nginx.prod.conf ${{ secrets.PROD_SERVER_USER }}@${{ secrets.PROD_SERVER_HOST }}:/opt/jobs_inDubai_prod/nginx/nginx.prod.conf || true
           rm -f ~/.ssh/id_rsa
 
       - name: Deploy on production server
@@ -64,14 +68,26 @@ jobs:
               COMPOSE="docker-compose"
             fi
 
+            # ФИКС: Проверяем наличие nginx конфига
+            if [ ! -f nginx/nginx.prod.conf ]; then
+              echo "ERROR: nginx/nginx.prod.conf is missing!"
+              echo "Creating nginx directory if needed..."
+              mkdir -p nginx
+              echo "Please ensure nginx/nginx.prod.conf exists on the server"
+              exit 1
+            fi
+            
             # ФИКС: Принудительно останавливаем и удаляем контейнеры
             $COMPOSE -f docker-compose.prod.yml down --remove-orphans || true
             
             # ФИКС: Удаляем контейнеры вручную, если они остались
-            docker rm -f postgres_prod redis_prod bot_prod 2>/dev/null || true
+            docker rm -f postgres_prod redis_prod bot_prod nginx_prod 2>/dev/null || true
             
             # ФИКС: Удаляем сеть, если она осталась
             docker network rm jobs_indubai_prod_prod_network 2>/dev/null || true
+            
+            # ФИКС: Ждем полного удаления контейнеров
+            sleep 2
             
             # Запускаем контейнеры заново
             $COMPOSE -f docker-compose.prod.yml up -d --build
