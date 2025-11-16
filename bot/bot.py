@@ -13,10 +13,10 @@ from aiogram.fsm.storage.redis import RedisStorage
 # При инициализации бота добавьте параметр timeout
 from aiogram.client.session.aiohttp import AiohttpSession
 
-#from bot.handlers import handlers_router
+# ВАЖНО: сначала загружаем конфиг (.env), потом инициализируем Redis
+from bot.config import BOT_TOKEN, USE_WEBHOOK, WEBHOOK_URL
 from bot.services.redis_conn import test_connection
 
-from bot.config import BOT_TOKEN, USE_WEBHOOK, WEBHOOK_URL
 from bot.database.session import engine, async_session
 from bot.database.models import Base
 from bot.middleware.db_session import DbSessionMiddleware  # Добавляем импорт DbSessionMiddleware
@@ -77,9 +77,11 @@ async def main():
     # ✅ (Опционально) создаём таблицы в БД на основе моделей (если они не существуют)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
     # ✅ Создание бота по токену из .env
     session = AiohttpSession(timeout=60.0)
     bot = Bot(token=BOT_TOKEN, session=session)
+
     # ✅ Создание диспетчера с хранилищем состояний и sessionmaker
     dp = Dispatcher(storage=storage)
 
@@ -95,6 +97,82 @@ async def main():
     # ✅ Подключение всех маршрутов (хендлеров), которые ты заранее определил
     dp.include_router(handlers_router)
     print(f"Подключен: {handlers_router}")
+    
+    # ФИКС №2: Восстановление состояния групп после перезапуска
+    try:
+        from bot.database.session import get_session
+        from bot.database.models import Group, UserGroup
+        from sqlalchemy import select, delete
+        
+        async with get_session() as session:
+            result = await session.execute(select(Group))
+            groups = result.scalars().all()
+            bot_me = await bot.me()
+            
+            logging.info(f"🔄 Начинаем восстановление {len(groups)} групп...")
+            
+            for group in groups:
+                # БАГ #4 ФИКС: пропускаем служебную запись группы с chat_id=0
+                if group.chat_id == 0:
+                    logging.info("ℹ️ Пропуск служебной записи группы с chat_id=0 при восстановлении")
+                    continue
+                try:
+                    # Проверяем, что бот всё ещё в группе
+                    try:
+                        member = await bot.get_chat_member(group.chat_id, bot_me.id)
+                        if member.status in ("member", "administrator", "creator"):
+                            logging.info(f"✅ Бот восстановлен в группе {group.title} (ID: {group.chat_id})")
+                            
+                            # Обновляем информацию о группе (title может измениться)
+                            try:
+                                chat = await bot.get_chat(group.chat_id)
+                                group.title = chat.title
+                                await session.flush()
+                            except Exception as e:
+                                logging.warning(f"⚠️ Не удалось обновить название группы {group.chat_id}: {e}")
+                            
+                            # Восстанавливаем права админов в группе
+                            try:
+                                admins = await bot.get_chat_administrators(group.chat_id)
+                                for admin_member in admins:
+                                    if admin_member.status in ("administrator", "creator"):
+                                        admin_user_id = admin_member.user.id
+                                        # Проверяем, есть ли связь в БД
+                                        ug_result = await session.execute(
+                                            select(UserGroup).where(
+                                                UserGroup.user_id == admin_user_id,
+                                                UserGroup.group_id == group.chat_id,
+                                            )
+                                        )
+                                        if not ug_result.scalar_one_or_none():
+                                            # Создаем связь если её нет
+                                            session.add(UserGroup(user_id=admin_user_id, group_id=group.chat_id))
+                                            logging.info(f"✅ Восстановлена связь админа {admin_user_id} с группой {group.chat_id}")
+                                await session.flush()
+                            except Exception as e:
+                                logging.warning(f"⚠️ Не удалось восстановить права админов для группы {group.chat_id}: {e}")
+                        else:
+                            logging.warning(f"⚠️ Бот не является участником группы {group.title} (ID: {group.chat_id})")
+                    except Exception as e:
+                        # Бот не в группе или группа удалена - чистим связи
+                        error_str = str(e).lower()
+                        if "chat not found" in error_str or "user not found" in error_str:
+                            logging.warning(f"⚠️ Группа {group.chat_id} не найдена, удаляем связи")
+                            await session.execute(
+                                delete(UserGroup).where(UserGroup.group_id == group.chat_id)
+                            )
+                            await session.flush()
+                        else:
+                            logging.warning(f"⚠️ Не удалось проверить группу {group.chat_id}: {e}")
+                except Exception as e:
+                    logging.error(f"❌ Ошибка при обработке группы {group.chat_id}: {e}")
+            
+            await session.commit()
+            logging.info(f"✅ Восстановление групп завершено")
+    except Exception as e:
+        logging.error(f"❌ Ошибка при восстановлении групп: {e}")
+        import traceback
+        logging.error(traceback.format_exc())
     
     # ✅ Выбираем режим запуска: webhook или polling
     if USE_WEBHOOK:

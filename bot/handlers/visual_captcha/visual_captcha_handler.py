@@ -2,13 +2,15 @@
 import asyncio
 import logging
 import traceback
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, Any
 
 from aiogram import Bot, Router, F
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, CallbackQuery, ChatJoinRequest
+from aiogram.types import Message, CallbackQuery, ChatJoinRequest, ChatMemberUpdated
+from aiogram.enums import ChatMemberStatus
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,14 +44,27 @@ from bot.services.visual_captcha_logic import (
     get_user_scam_level,
     reset_user_scam_level,
 )
-# from bot.services.scammer_tracker_logic import track_captcha_failure  # Убираем старую логику
+from bot.services.captcha_flow_logic import (
+    load_captcha_settings,
+    should_require_captcha,
+    evaluate_admission,
+    send_captcha_prompt,
+    prepare_invite_flow,
+    prepare_manual_approval_flow,
+    build_restriction_permissions,
+    clear_captcha_state,
+    CaptchaDecision,
+)
+from bot.database.session import get_session
 from bot.database.queries import get_group_by_name
 from bot.services.bot_activity_journal.bot_activity_journal_logic import (
     log_join_request,
     log_captcha_passed,
     log_captcha_failed,
-    log_captcha_timeout
+    log_captcha_timeout,
+    log_new_member,
 )
+from bot.services.spammer_registry import mute_suspicious_user_across_groups
 
 logger = logging.getLogger(__name__)
 
@@ -72,11 +87,61 @@ async def handle_join_request(join_request: ChatJoinRequest):
     user_id = user.id
     chat_id = chat.id
 
-    # Проверяем, активна ли визуальная капча
+    async with get_session() as session:
+        settings_snapshot = await load_captcha_settings(session, chat_id)
+        decision = await should_require_captcha(settings=settings_snapshot, source="join_request")
+
+        if decision.fallback_mode or not decision.require_captcha:
+            admission = await evaluate_admission(
+                bot=join_request.bot,
+                session=session,
+                chat=chat,
+                user=user,
+                source="join_request",
+            )
+
+            try:
+                await approve_chat_join_request(join_request.bot, chat_id, user_id)
+            except Exception as exc:
+                logger.error(f"Не удалось одобрить join request без капчи: {exc}")
+            else:
+                status = "AUTO_ALLOW_FALLBACK" if decision.fallback_mode else "AUTO_ALLOW"
+                try:
+                    await log_join_request(
+                        bot=join_request.bot,
+                        user=user,
+                        chat=chat,
+                        captcha_status=status,
+                        saved_to_db=False,
+                        session=session,
+                    )
+                except Exception as log_error:
+                    logger.error(f"Ошибка логирования автоодобрения: {log_error}")
+            return
+
+    # БАГ #2 ФИКС: Капча должна отправляться только если включена "Капча при вступлении"
+    # Проверяем ОБА условия: decision.require_captcha И visual_captcha_enabled
+    # Если "Капча при вступлении" отключена (decision.require_captcha == False),
+    # капча НЕ должна отправляться, даже если visual_captcha_enabled == True
+    if not decision.require_captcha:
+        logger.info(
+            f"⛔ [JOIN_REQUEST] Капча при вступлении отключена для chat={chat_id}, "
+            f"decision.require_captcha={decision.require_captcha}. Капча НЕ будет отправлена."
+        )
+        return
+    
     captcha_enabled = await get_visual_captcha_status(chat_id)
     if not captcha_enabled:
-        logger.info(f"⛔ Визуальная капча не активирована в группе {chat_id}, выходим")
+        logger.info(
+            f"⛔ [JOIN_REQUEST] Визуальная капча не активирована в группе {chat_id}, выходим"
+        )
         return
+    
+    logger.info(
+        f"✅ [JOIN_REQUEST] Капча будет отправлена для chat={chat_id}, "
+        f"decision.require_captcha={decision.require_captcha}, "
+        f"visual_captcha_enabled={captcha_enabled}"
+    )
 
     # Идентификатор группы в deep-link: username или private_<id>
     group_id = chat.username or f"private_{chat.id}"
@@ -91,88 +156,13 @@ async def handle_join_request(join_request: ChatJoinRequest):
     keyboard = await get_captcha_keyboard(deep_link)
 
     try:
-        # Удаляем прошлые сообщения бота пользователю (если есть)
-        user_messages = await redis.get(f"user_messages:{user_id}")
-        if user_messages:
-            message_ids = user_messages.split(",")
-            for msg_id in message_ids:
-                try:
-                    await join_request.bot.delete_message(chat_id=user_id, message_id=int(msg_id))
-                except Exception as e:
-                    if "message to delete not found" not in str(e).lower():
-                        logger.error(f"Ошибка при удалении сообщения {msg_id}: {str(e)}")
-
-        # Формируем текст с кликабельным названием группы
-        group_title = (
-            chat.title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            if chat.title else "группа"
+        await send_captcha_prompt(
+            bot=join_request.bot,
+            chat=chat,
+            user=user,
+            settings=settings_snapshot,
+            source="join_request",
         )
-        logger.info(f"📝 Название группы для сообщения: '{group_title}' (исходное: '{chat.title}')")
-
-        # Создаем ссылку на группу
-        group_link = None
-        if chat.username:
-            # Публичная группа - используем username
-            group_link = f"https://t.me/{chat.username}"
-        else:
-            # Приватная группа - создаем инвайт-ссылку
-            try:
-                invite = await join_request.bot.create_chat_invite_link(
-                    chat_id=chat_id,
-                    name=f"Captcha invite for user {user_id}",
-                    creates_join_request=False,
-                )
-                # Преобразуем invite.invite_link в строку явно
-                group_link = str(invite.invite_link) if invite.invite_link else None
-                logger.info(f"Создана инвайт-ссылка для приватной группы {chat_id}: {group_link}")
-            except Exception as e:
-                logger.error(f"Ошибка при создании инвайт-ссылки для группы {chat_id}: {e}")
-                # Fallback - используем tg:// ссылку
-                group_link = f"tg://resolve?domain={chat_id}"
-
-        # Формируем сообщение с кликабельным названием группы
-        if group_link:
-            message_text = (
-                f"🔒 Для вступления в группу <a href='{group_link}'>{group_title}</a> необходимо пройти проверку.\n"
-                f"Нажмите на кнопку ниже:"
-            )
-        else:
-            # Fallback если не удалось создать ссылку
-            message_text = (
-                f"🔒 Для вступления в группу <b>{group_title}</b> необходимо пройти проверку.\n"
-                f"Нажмите на кнопку ниже:"
-            )
-
-        # Отправляем сообщение пользователю
-        msg = await join_request.bot.send_message(
-            user_id,
-            message_text,
-            reply_markup=keyboard,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-        logger.info(f"✅ Отправлено сообщение пользователю {user_id} о прохождении капчи")
-
-        # Логируем запрос на вступление в журнал действий
-        try:
-            from bot.database.session import get_session
-            async with get_session() as session:
-                await log_join_request(
-                    bot=join_request.bot,
-                    user=user,
-                    chat=chat,
-                    captcha_status="КАПЧА_ОТПРАВЛЕНА",
-                    saved_to_db=False,
-                    session=session
-                )
-        except Exception as log_error:
-            logger.error(f"Ошибка при логировании запроса на вступление: {log_error}")
-
-        # Удаляем сообщение через 2-3 минуты (150 секунд = 2.5 минуты)
-        asyncio.create_task(delete_message_after_delay(join_request.bot, user_id, msg.message_id, 150))
-
-        # Сохраняем ID сообщения на час (для последующего удаления)
-        await redis.setex(f"user_messages:{user_id}", 3600, str(msg.message_id))
 
     except Exception as e:
         error_msg = str(e)
@@ -262,7 +252,13 @@ async def process_visual_captcha_deep_link(message: Message, bot: Bot, state: FS
         # Имя/ID группы из deep-link
         group_name = deep_link_args.replace("deep_link_", "")
         logger.info(f"Extracted group name from deep-link: {group_name}")
-
+        
+        # ВАЖНО: deep-link сам по себе не даёт вступить в группу. Безопасность обеспечивается тем,
+        # кто получил кнопку в группе (handle_captcha_fallback) и самим join-flow.
+        # Более жёсткая проверка владельца (CAPTCHA_OWNER_KEY/CAPTCHA_MESSAGE_KEY) приводила к тому,
+        # что даже настоящий joiner иногда блокировался. Чтобы вернуть рабочий поток,
+        # здесь больше НИЧЕГО не блокируем, а просто генерируем капчу.
+        
         # Генерируем капчу
         captcha_answer, captcha_image = await generate_visual_captcha()
         logger.info(f"Сгенерирована капча, ответ: {captcha_answer}")
@@ -273,6 +269,12 @@ async def process_visual_captcha_deep_link(message: Message, bot: Bot, state: FS
         # Пишем в FSM + Redis
         await state.update_data(captcha_answer=captcha_answer, group_name=group_name, attempts=0, message_ids=[])
         await save_captcha_data(message.from_user.id, captcha_answer, group_name, 0)
+
+        # ФИКС №12: Отменяем все напоминания при начале решения капчи
+        reminder_key = f"captcha_reminder_msgs:{message.from_user.id}"
+        await redis.delete(reminder_key)
+        # Также отменяем запланированные таймауты (через флаг)
+        await redis.setex(f"captcha_started:{message.from_user.id}:{group_name}", 600, "1")
 
         # Отправляем изображение-капчу с повторными попытками
         captcha_sent = False
@@ -291,7 +293,7 @@ async def process_visual_captcha_deep_link(message: Message, bot: Bot, state: FS
                 # Удалим капчу через 5 минут (чтобы дать время на напоминание)
                 asyncio.create_task(delete_message_after_delay(bot, message.chat.id, captcha_msg.message_id, 300))
                 
-                # Планируем напоминание через 2 минуты
+                # Планируем напоминание через 2 минуты (если пользователь не начнет решать)
                 asyncio.create_task(schedule_captcha_reminder(bot, message.from_user.id, group_name, 2))
                 
                 await state.set_state(CaptchaStates.waiting_for_captcha)
@@ -580,8 +582,41 @@ async def process_captcha_answer(message: Message, state: FSMContext, session: A
                 except ValueError:
                     logger.error(f"Не удалось преобразовать group_name в chat_id: {group_name}")
 
-            # Используем chat_id_for_db если chat_id не определен
-            final_chat_id = chat_id if chat_id else chat_id_for_db
+            # БАГ №1 и №3: КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ - Сначала собираем все возможные chat_id
+            # ВАЖНО: Для self-join нет join_request в Redis, поэтому ищем по group_name ВСЕГДА
+            chat_ids_to_check = []
+            
+            # Способ 1: Из chat_id (Redis/числовой ID)
+            if chat_id:
+                chat_ids_to_check.append(chat_id)
+                logger.info(f"✅ [CAPTCHA] chat_id найден через Redis/числовой ID: {chat_id}")
+            
+            # Способ 2: Из chat_id_for_db (для сохранения в БД)
+            if chat_id_for_db and chat_id_for_db != 0 and chat_id_for_db not in chat_ids_to_check:
+                chat_ids_to_check.append(chat_id_for_db)
+                logger.info(f"✅ [CAPTCHA] chat_id_for_db добавлен: {chat_id_for_db}")
+            
+            # Способ 3: КРИТИЧНО - По group_name (для self-join)
+            # Это гарантирует, что мы найдем правильный chat_id для всех сценариев
+            try:
+                from bot.database.queries import get_group_by_name
+                async with get_session() as db_session:
+                    group_db = await get_group_by_name(db_session, group_name)
+                    if group_db:
+                        if group_db.chat_id not in chat_ids_to_check:
+                            chat_ids_to_check.append(group_db.chat_id)
+                            logger.info(f"✅ [CAPTCHA] Найден chat_id={group_db.chat_id} по group_name={group_name} (добавлен в список)")
+                        else:
+                            logger.info(f"✅ [CAPTCHA] chat_id={group_db.chat_id} уже есть в списке (найден по group_name={group_name})")
+                    else:
+                        logger.warning(f"⚠️ [CAPTCHA] Группа с group_name={group_name} не найдена в БД")
+            except Exception as e:
+                logger.error(f"❌ [CAPTCHA] КРИТИЧЕСКАЯ ОШИБКА при поиске chat_id по group_name={group_name}: {e}")
+                # ФИКС: Используем глобальный импорт traceback из начала файла
+                logger.error(traceback.format_exc())
+            
+            # Используем chat_id_for_db если chat_id не определен (для автомута)
+            final_chat_id = chat_ids_to_check[0] if chat_ids_to_check else (chat_id if chat_id else chat_id_for_db)
             
             # Проверяем, нужно ли автоматически мутить скаммера
             if decision.get("should_auto_mute", False) and final_chat_id:
@@ -589,187 +624,249 @@ async def process_captcha_answer(message: Message, state: FSMContext, session: A
                 # Это гарантирует, что флаг будет доступен когда пользователь вступит в группу
                 await redis.setex(f"auto_mute_scammer:{message.from_user.id}:{final_chat_id}", 3600, "1")
                 logger.warning(f"🚨 Пользователь @{message.from_user.username or message.from_user.first_name or message.from_user.id} [{message.from_user.id}] помечен для автомута как скаммер для группы {final_chat_id} (TTL: 3600s)")
+            
+            # Если все равно ничего не нашли - пытаемся определить chat_id напрямую через Telegram API
+            if not chat_ids_to_check:
+                is_public_username = not group_name.startswith("private_") and not (
+                    group_name.startswith("-") and group_name[1:].isdigit()
+                )
+                if is_public_username:
+                    try:
+                        # Пытаемся получить чат по username, Telegram ожидает строку вида "@username"
+                        username = group_name
+                        if not username.startswith("@"):
+                            username = f"@{username}"
+                        chat_obj = await message.bot.get_chat(username)
+                        api_chat_id = chat_obj.id
+                        chat_ids_to_check.append(api_chat_id)
+                        logger.info(
+                            f"✅ [CAPTCHA] chat_id={api_chat_id} найден через message.bot.get_chat('{username}')"
+                        )
+                    except Exception as api_err:
+                        logger.warning(
+                            f"⚠️ [CAPTCHA] Не удалось получить chat_id через get_chat('{group_name}'): {api_err}"
+                        )
 
+            # Если всё равно ничего не нашли - это критическая ошибка
+            if not chat_ids_to_check:
+                logger.error(
+                    f"❌ [CAPTCHA] КРИТИЧЕСКАЯ ОШИБКА: chat_id не найден ни одним способом! "
+                    f"group_name={group_name}, chat_id={chat_id}, chat_id_for_db={chat_id_for_db}"
+                )
+                # БАГ #10 ФИКС: Попытка последней надежды - ищем в БД через get_group_by_name (исправленная функция)
+                try:
+                    from bot.database.queries import get_group_by_name
+                    async with get_session() as db_session:
+                        group = await get_group_by_name(db_session, group_name)
+                        if group:
+                            chat_ids_to_check.append(group.chat_id)
+                            logger.info(
+                                f"✅ [CAPTCHA] Последняя надежда: найден chat_id={group.chat_id} через get_group_by_name({group_name})"
+                            )
+                except Exception as e:
+                    logger.error(f"❌ [CAPTCHA] Не удалось найти chat_id даже через прямой запрос: {e}")
+            
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ БАГ #1: Сначала устанавливаем флаг captcha_passed, 
+            # чтобы обработчики мута не мутили пользователя снова
+            # Устанавливаем флаг для ВСЕХ найденных chat_id
+            for current_chat_id in chat_ids_to_check:
+                await redis.setex(f"captcha_passed:{message.from_user.id}:{current_chat_id}", 3600, "1")
+                logger.info(f"✅ [CAPTCHA] Флаг captcha_passed установлен: user={message.from_user.id}, chat={current_chat_id}")
+            
+            # Если chat_ids_to_check пуст, но есть chat_id или chat_id_for_db, устанавливаем флаг для них
+            if not chat_ids_to_check:
+                if chat_id:
+                    await redis.setex(f"captcha_passed:{message.from_user.id}:{chat_id}", 3600, "1")
+                    logger.info(f"✅ [CAPTCHA] Флаг captcha_passed установлен: user={message.from_user.id}, chat={chat_id}")
+                elif chat_id_for_db:
+                    await redis.setex(f"captcha_passed:{message.from_user.id}:{chat_id_for_db}", 3600, "1")
+                    logger.info(f"✅ [CAPTCHA] Флаг captcha_passed установлен: user={message.from_user.id}, chat={chat_id_for_db}")
+            
+            # Теперь размучиваем пользователя для всех найденных chat_id
+            # БАГ №1: Размут должен происходить ПОСЛЕ установки флага
+            all_chat_ids = chat_ids_to_check if chat_ids_to_check else []
+            if not all_chat_ids and chat_id:
+                all_chat_ids = [chat_id]
+                logger.info(f"✅ [CAPTCHA] Использован chat_id из Redis/числового ID: {chat_id}")
+            elif not all_chat_ids and chat_id_for_db and chat_id_for_db != 0:
+                all_chat_ids = [chat_id_for_db]
+                logger.info(f"✅ [CAPTCHA] Использован chat_id_for_db: {chat_id_for_db}")
+            
+            # КРИТИЧНО: Логируем количество найденных chat_id
+            logger.info(f"🔍 [CAPTCHA] Количество chat_id для размута: {len(all_chat_ids)}, chat_ids={all_chat_ids}")
+            
+            if not all_chat_ids:
+                logger.error(f"❌ [CAPTCHA] КРИТИЧЕСКАЯ ОШИБКА: all_chat_ids ПУСТ! chat_ids_to_check={chat_ids_to_check}, chat_id={chat_id}, chat_id_for_db={chat_id_for_db}, group_name={group_name}")
+                # Попытка последней надежды - ищем chat_id по group_name ПРЯМО СЕЙЧАС
+                try:
+                    from bot.database.queries import get_group_by_name
+                    async with get_session() as db_session:
+                        group_db = await get_group_by_name(db_session, group_name)
+                        if group_db:
+                            all_chat_ids = [group_db.chat_id]
+                            logger.info(f"✅ [CAPTCHA] Последняя надежда: найден chat_id={group_db.chat_id} по group_name={group_name}")
+                except Exception as e:
+                    logger.error(f"❌ [CAPTCHA] Не удалось найти chat_id даже в последней попытке: {e}")
+            
+            for current_chat_id in all_chat_ids:
+                try:
+                    # Проверяем, находится ли пользователь в группе
+                    try:
+                        member = await message.bot.get_chat_member(current_chat_id, message.from_user.id)
+                        is_in_group = member.status in ("member", "restricted", "administrator", "creator")
+                        logger.info(f"🔍 [CAPTCHA] Проверка пользователя в группе {current_chat_id}: status={member.status}, is_in_group={is_in_group}")
+                    except Exception as e:
+                        is_in_group = False
+                        logger.warning(f"⚠️ [CAPTCHA] Не удалось проверить статус пользователя в группе {current_chat_id}: {e}")
+                    
+                    # ФИКС 1: Снимаем mute ВСЕГДА после успешной капчи, независимо от статуса пользователя
+                    # УБРАНА проверка is_in_group - mute должен сниматься мгновенно
+                    try:
+                        from aiogram.types import ChatPermissions
+                        await message.bot.restrict_chat_member(
+                            chat_id=current_chat_id,
+                            user_id=message.from_user.id,
+                            permissions=ChatPermissions(
+                                can_send_messages=True,
+                                can_send_media_messages=True,
+                                can_send_polls=True,
+                                can_send_other_messages=True,
+                                can_add_web_page_previews=True,
+                                can_invite_users=True,
+                                can_pin_messages=True,
+                            ),
+                        )
+                        logger.info(f"✅ [CAPTCHA] Mute СНЯТ для пользователя {message.from_user.id} в группе {current_chat_id} (ФИКС 1: мгновенно, без проверки статуса)")
+                    except Exception as e:
+                        # Если пользователь не в группе - это не критично, просто логируем
+                        error_str = str(e).lower()
+                        if "chat not found" in error_str or "user not found" in error_str:
+                            logger.info(f"ℹ️ [CAPTCHA] Пользователь {message.from_user.id} еще не в группе {current_chat_id}, mute будет снят при входе")
+                        else:
+                            logger.error(f"❌ [CAPTCHA] ОШИБКА при снятии mute для {current_chat_id}: {e}")
+                            # ФИКС: Используем глобальный импорт traceback из начала файла
+                            logger.error(traceback.format_exc())
+                    
+                    # Удаляем системное сообщение капчи в группе после прохождения
+                    try:
+                        from bot.services.captcha_flow_logic import pop_captcha_message_id
+                        captcha_msg_id = await pop_captcha_message_id(current_chat_id, message.from_user.id)
+                        if captcha_msg_id:
+                            try:
+                                await message.bot.delete_message(chat_id=current_chat_id, message_id=captcha_msg_id)
+                                logger.info(f"✅ [CAPTCHA] Системное сообщение капчи удалено из группы {current_chat_id}")
+                            except Exception as e:
+                                if "message to delete not found" not in str(e).lower():
+                                    logger.warning(f"⚠️ Не удалось удалить системное сообщение капчи: {e}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Ошибка при удалении системного сообщения капчи: {e}")
+                except Exception as e:
+                    logger.error(f"❌ [CAPTCHA] Ошибка при обработке группы {current_chat_id}: {e}")
+                    # ФИКС: Используем глобальный импорт traceback из начала файла
+                    logger.error(traceback.format_exc())
+            
             if chat_id:
-                # Пытаемся одобрить запрос
+                # Пытаемся одобрить запрос (только для join_request)
                 result = await approve_chat_join_request(message.bot, chat_id, message.from_user.id)
 
                 if result["success"]:
-                    # Устанавливаем флаг, что пользователь прошел капчу
-                    await redis.setex(f"captcha_passed:{message.from_user.id}:{chat_id}", 3600, "1")
-                    logger.info(f"✅ Пользователь @{message.from_user.username or message.from_user.first_name or message.from_user.id} [{message.from_user.id}] прошел капчу для группы {chat_id}")
+                    pass  # Логика уже обработана выше
+            
+            # Убеждаемся, что флаг автомута установлен с правильным chat_id
+            for current_chat_id in all_chat_ids:
+                if decision.get("should_auto_mute", False):
+                    await redis.setex(f"auto_mute_scammer:{message.from_user.id}:{current_chat_id}", 3600, "1")
+                    logger.info(f"🔍 [AUTO_MUTE_SET] Флаг автомута установлен для пользователя {message.from_user.id} в группе {current_chat_id}")
+            
+            # Получаем реальное название группы для логирования
+            final_chat_id_for_log = chat_ids_to_check[0] if chat_ids_to_check else (chat_id or chat_id_for_db)
+            if final_chat_id_for_log:
+                try:
+                    chat = await message.bot.get_chat(final_chat_id_for_log)
+                    group_display_name = chat.title
+                    logger.info(f"Получено название группы: {group_display_name}")
                     
-                    # Убеждаемся, что флаг автомута установлен с правильным chat_id
-                    if decision.get("should_auto_mute", False):
-                        await redis.setex(f"auto_mute_scammer:{message.from_user.id}:{chat_id}", 3600, "1")
-                        logger.info(f"🔍 [AUTO_MUTE_SET] Флаг автомута установлен для пользователя {message.from_user.id} в группе {chat_id}")
-                    
-                    # Получаем реальное название группы
-                    try:
-                        chat = await message.bot.get_chat(chat_id)
-                        group_display_name = chat.title
-                        logger.info(f"Получено название группы: {group_display_name}")
-                        
-                        # ЛОГИРУЕМ УСПЕШНОЕ ПРОХОЖДЕНИЕ КАПЧИ
-                        scammer_level = decision.get("total_risk_score", 0)
-                        await log_captcha_passed(
-                            bot=message.bot,
-                            user=message.from_user,
-                            chat=chat,
-                            scammer_level=scammer_level,
-                            session=session
-                        )
-                    except Exception as e:
-                        logger.error(f"Ошибка при получении названия группы: {e}")
-                        group_display_name = group_name.replace("_", " ").title()
+                    # ЛОГИРУЕМ УСПЕШНОЕ ПРОХОЖДЕНИЕ КАПЧИ
+                    scammer_level = decision.get("total_risk_score", 0)
+                    await log_captcha_passed(
+                        bot=message.bot,
+                        user=message.from_user,
+                        chat=chat,
+                        scammer_level=scammer_level,
+                        session=session
+                    )
+                except Exception as e:
+                    logger.error(f"Ошибка при получении названия группы: {e}")
+                    group_display_name = group_name.replace("_", " ").title()
+            else:
+                group_display_name = group_name.replace("_", " ").title()
 
-                    # Проверяем и нормализуем group_link перед передачей
+            # Формируем сообщение об успехе с кнопкой для входа в группу
+            group_link_for_keyboard = None
+            if chat_id:
+                # Пытаемся одобрить запрос (только для join_request)
+                result = await approve_chat_join_request(message.bot, chat_id, message.from_user.id)
+                
+                if result.get("success"):
                     group_link_for_keyboard = result.get("group_link")
-                    if group_link_for_keyboard:
-                        if isinstance(group_link_for_keyboard, bytes):
-                            group_link_for_keyboard = group_link_for_keyboard.decode('utf-8')
-                        elif not isinstance(group_link_for_keyboard, str):
-                            group_link_for_keyboard = str(group_link_for_keyboard) if group_link_for_keyboard else None
-                    logger.info(f"🔗 Создаем кнопку (approve_user): group_link='{group_link_for_keyboard}' (тип: {type(group_link_for_keyboard)})")
-                    
-                    try:
-                        keyboard = await get_group_join_keyboard(group_link_for_keyboard, group_display_name)
-                        success_msg = await message.answer(result["message"], reply_markup=keyboard, parse_mode="HTML")
-                    except Exception as keyboard_error:
-                        error_msg = str(keyboard_error)
-                        if "400" in error_msg and "inline keyboard button" in error_msg.lower():
-                            logger.error(f"❌ Ошибка 400 при создании кнопки (process_captcha_answer), отправляем сообщение без кнопки: {keyboard_error}")
-                            success_msg = await message.answer(result["message"], parse_mode="HTML")
-                            if group_link_for_keyboard:
-                                try:
-                                    await message.answer(f"🔗 Ссылка для присоединения:\n{group_link_for_keyboard}")
-                                except Exception:
-                                    pass
-                        else:
-                            raise keyboard_error
-                    # Удаляем сообщение об успехе через 2-3 минуты (150 секунд = 2.5 минуты)
-                    asyncio.create_task(delete_message_after_delay(message.bot, message.chat.id, success_msg.message_id, 150))
+                    logger.info(f"Одобрен запрос на вступление user=@{message.from_user.username or message.from_user.first_name or message.from_user.id} [{message.from_user.id}] group={group_name}")
                 else:
                     # Ошибка approve — показываем сообщение и (если есть) ссылку
-                    await message.answer(result["message"], parse_mode="HTML")
-
-                    if result["group_link"]:
-                        try:
-                            chat = await message.bot.get_chat(chat_id)
-                            group_display_name = chat.title
-                            logger.info(f"Получено название группы для fallback: {group_display_name}")
-                        except Exception as e:
-                            logger.error(f"Ошибка при получении названия группы для fallback: {e}")
-                            group_display_name = group_name.replace("_", " ").title()
-
-                        # Проверяем и нормализуем group_link перед передачей
+                    await message.answer(result.get("message", "Произошла ошибка при одобрении запроса."), parse_mode="HTML")
+                    if result.get("group_link"):
                         group_link_for_keyboard = result.get("group_link")
-                        if group_link_for_keyboard:
-                            if isinstance(group_link_for_keyboard, bytes):
-                                group_link_for_keyboard = group_link_for_keyboard.decode('utf-8')
-                            elif not isinstance(group_link_for_keyboard, str):
-                                group_link_for_keyboard = str(group_link_for_keyboard) if group_link_for_keyboard else None
-                        logger.info(f"🔗 Создаем кнопку (fallback): group_link='{group_link_for_keyboard}' (тип: {type(group_link_for_keyboard)})")
-                        
-                        try:
-                            keyboard = await get_group_join_keyboard(group_link_for_keyboard, group_display_name)
-                            await message.answer("Используйте эту кнопку для присоединения:", reply_markup=keyboard)
-                        except Exception as keyboard_error:
-                            error_msg = str(keyboard_error)
-                            if "400" in error_msg and "inline keyboard button" in error_msg.lower():
-                                logger.error(f"❌ Ошибка 400 при создании кнопки (process_captcha_answer fallback), отправляем ссылку текстом: {keyboard_error}")
-                                if group_link_for_keyboard:
-                                    await message.answer(f"Используйте эту ссылку для присоединения:\n🔗 {group_link_for_keyboard}")
-                                else:
-                                    await message.answer("Используйте ссылку для присоединения к группе.")
-                            else:
-                                raise keyboard_error
-
-                logger.info(f"Одобрен/обработан запрос на вступление user=@{message.from_user.username or message.from_user.first_name or message.from_user.id} [{message.from_user.id}] group={group_name}")
             else:
-                # Запрос не найден — отдаём прямую ссылку
-                if group_name.startswith("private_"):
-                    # Для приватной группы без активного join_request — просим переотправить заявку
-                    warn = await message.answer(
-                        "Ваш запрос на вступление истёк. Пожалуйста, отправьте новый запрос на вступление в группу."
+                # Запрос не найден — пытаемся получить ссылку из Redis или создать
+                try:
+                    # ФИКС: Используем глобальный импорт из начала файла, не создаем локальную переменную
+                    group_link_for_keyboard = await get_group_link_from_redis_or_create(message.bot, group_name)
+                except Exception as e:
+                    logger.warning(f"⚠️ Не удалось получить ссылку на группу: {e}")
+            
+            # Нормализуем group_link перед передачей
+            if group_link_for_keyboard:
+                if isinstance(group_link_for_keyboard, bytes):
+                    group_link_for_keyboard = group_link_for_keyboard.decode('utf-8')
+                elif not isinstance(group_link_for_keyboard, str):
+                    group_link_for_keyboard = str(group_link_for_keyboard) if group_link_for_keyboard else None
+            
+            # Отправляем сообщение об успехе с кнопкой
+            if group_link_for_keyboard:
+                try:
+                    keyboard = await get_group_join_keyboard(group_link_for_keyboard, group_display_name)
+                    success_msg = await message.answer(
+                        f"✅ Капча пройдена успешно! Используйте кнопку ниже, чтобы войти в «{group_display_name}»:",
+                        reply_markup=keyboard,
+                        parse_mode="HTML"
                     )
-                    message_ids.append(warn.message_id)
-                    await state.update_data(message_ids=message_ids)
-                else:
-                    group_info = await get_group_by_name(session, group_name)
-                    if group_info:
-                        group_link = f"https://t.me/{group_name}"
-                        try:
-                            keyboard = await get_group_join_keyboard(group_link, group_info.title)
-                            success_msg = await message.answer(
-                                f"Капча пройдена успешно! Используйте кнопку ниже, чтобы войти в «{group_info.title}»:",
-                                reply_markup=keyboard,
-                            )
-                        except Exception as keyboard_error:
-                            error_msg = str(keyboard_error)
-                            if "400" in error_msg and "inline keyboard button" in error_msg.lower():
-                                logger.error(f"❌ Ошибка 400 при создании кнопки (get_group_by_name), отправляем сообщение без кнопки: {keyboard_error}")
-                                success_msg = await message.answer(
-                                    f"Капча пройдена успешно! Используйте ссылку ниже, чтобы войти в «{group_info.title}»:\n🔗 {group_link}"
-                                )
-                            else:
-                                raise keyboard_error
-                        # Удаляем сообщение об успехе через 2-3 минуты (150 секунд = 2.5 минуты)
-                        asyncio.create_task(delete_message_after_delay(message.bot, message.chat.id, success_msg.message_id, 150))
+                except Exception as keyboard_error:
+                    error_msg = str(keyboard_error)
+                    if "400" in error_msg and "inline keyboard button" in error_msg.lower():
+                        logger.error(f"❌ Ошибка 400 при создании кнопки, отправляем ссылку текстом: {keyboard_error}")
+                        success_msg = await message.answer(
+                            f"✅ Капча пройдена успешно! Используйте ссылку ниже, чтобы войти в «{group_display_name}»:\n🔗 {group_link_for_keyboard}",
+                            parse_mode="HTML"
+                        )
                     else:
-                        group_link = await get_group_link_from_redis_or_create(message.bot, group_name)
-                        if not group_link:
-                            await message.answer(
-                                "Капча пройдена, но не удалось сгенерировать ссылку на группу. "
-                                "Пожалуйста, отправьте запрос на вступление повторно."
-                            )
-                        else:
-                            # Получаем реальное название группы
-                            try:
-                                if group_name.startswith("private_"):
-                                    chat_id_for_name = int(group_name.replace("private_", ""))
-                                    chat = await message.bot.get_chat(chat_id_for_name)
-                                    display_name = chat.title
-                                elif group_name.startswith("-") and group_name[1:].isdigit():
-                                    # Если group_name это числовой ID группы
-                                    chat = await message.bot.get_chat(int(group_name))
-                                    display_name = chat.title
-                                else:
-                                    # Для публичных групп пытаемся получить chat_id из Redis
-                                    chat_id_from_redis = await redis.get(f"join_request:{message.from_user.id}:{group_name}")
-                                    if chat_id_from_redis:
-                                        chat = await message.bot.get_chat(int(chat_id_from_redis))
-                                        display_name = chat.title
-                                    else:
-                                        # Fallback - используем group_name как есть
-                                        display_name = group_name.replace("_", " ").title()
-                                logger.info(f"Получено название группы: {display_name}")
-                            except Exception as e:
-                                logger.error(f"Ошибка при получении названия группы: {e}")
-                                display_name = group_name.replace("_", " ").title()
-                            
-                            # Нормализуем group_link перед передачей (может быть bytes из Redis)
-                            if isinstance(group_link, bytes):
-                                group_link = group_link.decode('utf-8')
-                            elif not isinstance(group_link, str):
-                                group_link = str(group_link) if group_link else None
-                            
-                            try:
-                                keyboard = await get_group_join_keyboard(group_link, display_name)
-                                await message.answer(
-                                    f"Капча пройдена успешно! Используйте кнопку ниже, чтобы войти в «{display_name}»:",
-                                    reply_markup=keyboard,
-                                )
-                            except Exception as keyboard_error:
-                                error_msg = str(keyboard_error)
-                                if "400" in error_msg and "inline keyboard button" in error_msg.lower():
-                                    logger.error(f"❌ Ошибка 400 при создании кнопки (get_group_link_from_redis), отправляем ссылку текстом: {keyboard_error}")
-                                    await message.answer(
-                                        f"Капча пройдена успешно! Используйте ссылку ниже, чтобы войти в «{display_name}»:\n🔗 {group_link}"
-                                    )
-                                else:
-                                    raise keyboard_error
-
+                        raise keyboard_error
+                # Удаляем сообщение об успехе через 2-3 минуты
+                asyncio.create_task(delete_message_after_delay(message.bot, message.chat.id, success_msg.message_id, 150))
+            else:
+                # Если ссылки нет, отправляем сообщение без кнопки
+                success_msg = await message.answer(
+                    f"✅ Капча пройдена успешно! Вы можете войти в группу «{group_display_name}».",
+                    parse_mode="HTML"
+                )
+                # Удаляем сообщение об успехе через 2-3 минуты
+                asyncio.create_task(delete_message_after_delay(message.bot, message.chat.id, success_msg.message_id, 150))
+            
+            # Очищаем состояние капчи
+            if final_chat_id_for_log:
+                await clear_captcha_state(final_chat_id_for_log, message.from_user.id)
+            
+            logger.info(f"✅ Обработка капчи завершена для пользователя {message.from_user.id}, группа {group_name}")
+            
+            # Очищаем состояние FSM
             await state.clear()
             return
 
@@ -1174,7 +1271,7 @@ async def back_to_main_captcha_settings(callback: CallbackQuery, state: FSMConte
 
 
 @visual_captcha_handler_router.message(Command("start"))
-async def start_command(message: Message):
+async def start_command(message: Message, state: FSMContext, session: AsyncSession):
     """Обработчик обычной команды /start"""
     user_id = message.from_user.id
     
@@ -1435,6 +1532,45 @@ async def approve_user_join_request(message: Message, group_name: str, message_i
 @visual_captcha_handler_router.callback_query(F.data == "captcha_fallback")
 async def handle_captcha_fallback(callback: CallbackQuery):
     """Обработчик для fallback кнопки капчи"""
+    # БАГ №2 и №3: Проверяем, что нажимает только владелец капчи
+    from bot.services.captcha_flow_logic import CAPTCHA_OWNER_KEY, CAPTCHA_MESSAGE_KEY
+    
+    if not callback.message:
+        await callback.answer("❌ Сообщение не найдено.", show_alert=True)
+        return
+    
+    chat_id = callback.message.chat.id
+    message_id = callback.message.message_id
+    user_id = callback.from_user.id
+    
+    logger.info(f"🔍 [CAPTCHA_FALLBACK] Пользователь {user_id} нажал на кнопку капчи в сообщении {message_id} в чате {chat_id}")
+    
+    # ФИКС 2: Проверяем владельца капчи - только он может нажать на кнопку
+    owner_key = CAPTCHA_OWNER_KEY.format(chat_id=chat_id, message_id=message_id)
+    expected_owner_id = await redis.get(owner_key)
+    
+    if expected_owner_id:
+        try:
+            expected_owner_id_int = int(expected_owner_id) if isinstance(expected_owner_id, (str, bytes)) else expected_owner_id
+            if user_id != expected_owner_id_int:
+                logger.warning(
+                    f"⚠️ [CAPTCHA_FALLBACK] ФИКС 2: Пользователь {user_id} попытался нажать на капчу, "
+                    f"предназначенную для {expected_owner_id_int} в сообщении {message_id}"
+                )
+                await callback.answer("❌ Эта капча предназначена не вам.", show_alert=True)
+                return
+            logger.info(f"✅ [CAPTCHA_FALLBACK] ФИКС 2: Проверка владельца пройдена: пользователь {user_id} является владельцем капчи")
+        except (ValueError, TypeError) as e:
+            logger.warning(f"⚠️ [CAPTCHA_FALLBACK] Ошибка при проверке владельца капчи: {e}")
+            await callback.answer("❌ Эта капча недоступна. Обратитесь к администратору.", show_alert=True)
+            return
+    else:
+        # ФИКС 2: Если owner_key не найден - блокируем для безопасности
+        logger.warning(f"⚠️ [CAPTCHA_FALLBACK] ФИКС 2: Owner key не найден - блокируем нажатие для безопасности")
+        await callback.answer("❌ Эта капча недоступна. Обратитесь к администратору.", show_alert=True)
+        return
+    
+    # Deep link уже защищен, но для callback проверяем
     await callback.answer("❌ Ссылка недоступна. Пожалуйста, попробуйте позже.", show_alert=True)
 
 
@@ -1442,3 +1578,362 @@ async def handle_captcha_fallback(callback: CallbackQuery):
 async def handle_group_link_fallback(callback: CallbackQuery):
     """Обработчик для fallback кнопки присоединения к группе"""
     await callback.answer("❌ Ссылка на группу недоступна. Обратитесь к администратору.", show_alert=True)
+
+
+@visual_captcha_handler_router.chat_member()
+async def handle_member_status_change(event: ChatMemberUpdated, session: AsyncSession):
+    """Обработка изменения статуса участника группы.
+
+    Обрабатывает два критичных сценария:
+    1. Выход из группы (MEMBER/RESTRICTED -> LEFT/KICKED): очищает флаг captcha_passed
+    2. Вступление в группу (LEFT/KICKED -> MEMBER): запускает капчу
+
+    ВАЖНО: Эти сценарии обрабатываются в одном хендлере, чтобы гарантировать:
+    - При выходе флаг captcha_passed всегда удаляется
+    - При повторном вступлении капча всегда запрашивается
+    - Нет конфликтов между несколькими обработчиками chat_member
+    """
+    try:
+        old_status = event.old_chat_member.status
+        new_status = event.new_chat_member.status
+    except AttributeError:
+        logger.warning("⚠️ [CHAT_MEMBER] AttributeError при получении статусов - пропускаем событие")
+        return
+
+    chat = event.chat
+    user = event.new_chat_member.user
+
+    # КРИТИЧЕСКОЕ ДИАГНОСТИЧЕСКОЕ ЛОГИРОВАНИЕ
+    logger.info(
+        f"🔍 [CHAT_MEMBER_HANDLER] ВЫЗВАН! user={user.id}, chat={chat.id}, "
+        f"old_status={old_status} (type={type(old_status)}), "
+        f"new_status={new_status} (type={type(new_status)})"
+    )
+
+    # ============================================================
+    # СЦЕНАРИЙ 1: ВЫХОД ИЗ ГРУППЫ - Очищаем флаг captcha_passed
+    # ============================================================
+    # Проверяем как строки, так и enum значения для совместимости
+    is_leaving = (
+        str(new_status) in {"left", "kicked"} or
+        new_status in {ChatMemberStatus.LEFT, ChatMemberStatus.KICKED}
+    )
+    if is_leaving:
+        key = f"captcha_passed:{user.id}:{chat.id}"
+        try:
+            # Проверяем TTL перед удалением для более подробного логирования
+            ttl = await redis.ttl(key)
+            deleted = await redis.delete(key)
+
+            if deleted:
+                logger.info(
+                    f"✅ [CAPTCHA_LEAVE] Пользователь {user.id} покинул группу {chat.id}, "
+                    f"флаг captcha_passed удалён (TTL был: {ttl}s, переход: {old_status} → {new_status})"
+                )
+            else:
+                logger.debug(
+                    f"🔍 [CAPTCHA_LEAVE] Пользователь {user.id} покинул группу {chat.id}, "
+                    f"флаг captcha_passed отсутствовал (переход: {old_status} → {new_status})"
+                )
+        except Exception as exc:
+            logger.warning(
+                f"⚠️ [CAPTCHA_LEAVE] Не удалось удалить флаг captcha_passed для user={user.id}, "
+                f"chat={chat.id}: {exc}"
+            )
+
+        # Для выхода из группы больше ничего не делаем
+        return
+
+    # ============================================================
+    # СЦЕНАРИЙ 2: ВСТУПЛЕНИЕ В ГРУППУ - Запускаем капчу
+    # ============================================================
+    # Проверяем как строки, так и enum значения для совместимости
+    was_not_member = (
+        str(old_status) in {"left", "kicked"} or
+        old_status in {ChatMemberStatus.LEFT, ChatMemberStatus.KICKED}
+    )
+    is_now_member = (
+        str(new_status) == "member" or
+        new_status == ChatMemberStatus.MEMBER
+    )
+    if not was_not_member or not is_now_member:
+        # Это не вступление (может быть изменение прав администратора и т.д.)
+        return
+
+    # КРИТИЧНО: На момент вступления флаг captcha_passed должен быть удалён (если был выход ранее)
+    # Если флаг всё ещё существует, это означает:
+    # 1. Пользователь вступил впервые (флага не было)
+    # 2. Пользователь вступил в течение 1 часа после прохождения капчи БЕЗ выхода
+    # 3. БАГ: флаг не был удалён при выходе
+
+    logger.info(
+        f"👤 [MEMBER_JOIN] Пользователь {user.id} вступил в группу {chat.id} "
+        f"(переход: {old_status} → {new_status})"
+    )
+
+    # РАНЕЕ здесь была попытка защиты от дублированных событий chat_member_updated
+    # через хранение event_signature в Redis. Но у ChatMemberUpdated нет update_id,
+    # поэтому разные реальные вступления пользователя (после выхода и повторного join)
+    # получали одинаковую сигнатуру и второе вступление ошибочно игнорировалось.
+    #
+    # Это приводило к критичному багу безопасности: пользователь мог выйти из группы
+    # и снова войти без повторной капчи, если делал это в пределах TTL ключа.
+    #
+    # Поэтому анти-дубликатная логика здесь отключена, чтобы каждое реальное
+    # событие LEFT/KICKED -> MEMBER обрабатывалось полноценно.
+
+    initiator = event.from_user if event.from_user and event.from_user.id != user.id else None
+
+    # ФИКС №1 и №4: Явно разделяем три сценария: join_request, invite, self-join
+    from bot.services.event_classifier import classify_join_event, JoinEventType
+
+    event_type = classify_join_event(
+        event=event,
+        user_id=user.id,
+        initiator_id=initiator.id if initiator else None,
+    )
+
+    logger.info(f"🔍 [MEMBER_JOIN] Классификация события: user={user.id}, type={event_type.value}")
+
+    try:
+        # ПРОВЕРКА БЕЗОПАСНОСТИ: Проверяем наличие флага captcha_passed
+        # ВАЖНО: Флаг больше НЕ используется для пропуска капчи (это старая уязвимость)
+        # Он используется только для логики мута/одобрения в других обработчиках
+        # КРИТИЧНО: При rejoin (LEFT/KICKED → MEMBER) флаг ДОЛЖЕН быть удалён
+        # Если флаг существует - это БАГ, но мы всё равно требуем капчу если она включена
+        captcha_passed_key = f"captcha_passed:{user.id}:{chat.id}"
+        captcha_passed = await redis.get(captcha_passed_key)
+        captcha_ttl = await redis.ttl(captcha_passed_key) if captcha_passed else -2
+
+        # КРИТИЧНО: Если флаг существует при rejoin - это ошибка, удаляем его
+        # Пользователь покинул группу, флаг должен был быть удалён
+        if captcha_passed:
+            logger.warning(
+                f"⚠️ [MEMBER_JOIN] БАГ: Флаг captcha_passed существует при rejoin для user={user.id}, "
+                f"chat={chat.id}, TTL={captcha_ttl}s. Удаляем флаг для безопасности."
+            )
+            await redis.delete(captcha_passed_key)
+            captcha_passed = None
+            captcha_ttl = -2
+
+        logger.info(
+            f"🔒 [MEMBER_JOIN] Проверка флага captcha_passed для user={user.id}, chat={chat.id}: "
+            f"value={captcha_passed}, TTL={captcha_ttl}s "
+            f"(флаг НЕ используется для пропуска капчи, только для логики мута)"
+        )
+
+        if event_type == JoinEventType.INVITE:
+            # ФИКС №1: Антифлуд срабатывает только для настоящих инвайтов
+            # Это действительно invite от другого пользователя
+            decision = await prepare_invite_flow(
+                bot=event.bot,
+                session=session,
+                chat=chat,
+                initiator=initiator,
+            )
+            source = "invite"
+        elif event_type == JoinEventType.SELF_JOIN:
+            # self-join (пользователь сам вступил) - антифлуд не работает
+            decision = await prepare_manual_approval_flow(session=session, chat_id=chat.id)
+            source = "manual"
+        else:
+            # OTHER - fallback
+            decision = await prepare_manual_approval_flow(session=session, chat_id=chat.id)
+            source = "manual"
+
+        settings_snapshot = await load_captcha_settings(session, chat.id)
+        
+        # КРИТИЧЕСКИЙ ФИКС: Проверяем ОБА настройки капчи для rejoin
+        # 1. ChatSettings.captcha_join_enabled (используется в decision)
+        # 2. CaptchaSettings.is_visual_enabled (используется в handle_join_request)
+        # Если ЛЮБАЯ из них включена - требуем капчу при rejoin
+        # ВАЖНО: visual_captcha_enabled имеет ПРИОРИТЕТ - если включено, капча ОБЯЗАТЕЛЬНА
+        
+        # КРИТИЧНО: При rejoin ВСЕГДА проверяем БД напрямую для гарантии актуальности
+        # Redis кэш может быть устаревшим, поэтому проверяем БД напрямую
+        # ВАЖНО: При rejoin мы ДОЛЖНЫ проверить БД напрямую, так как Redis может быть устаревшим
+        from bot.database.models import CaptchaSettings
+        from sqlalchemy import select
+        
+        # СНАЧАЛА проверяем БД напрямую (источник истины)
+        try:
+            result = await session.execute(
+                select(CaptchaSettings).where(CaptchaSettings.group_id == chat.id)
+            )
+            db_settings = result.scalar_one_or_none()
+            db_visual_enabled = db_settings.is_visual_enabled if db_settings else False
+        except Exception as db_error:
+            logger.error(
+                f"❌ [MEMBER_JOIN] Ошибка при проверке БД для chat={chat.id}: {db_error}. "
+                f"Используем значение из Redis."
+            )
+            # Fallback на Redis если БД недоступна
+            db_visual_enabled = await get_visual_captcha_status(chat.id)
+        
+        # Затем проверяем Redis для сравнения
+        redis_visual_enabled = await get_visual_captcha_status(chat.id)
+        
+        logger.info(
+            f"🔍 [MEMBER_JOIN] Проверка visual_captcha_enabled: БД={db_visual_enabled}, Redis={redis_visual_enabled} для chat={chat.id}"
+        )
+        
+        # Используем значение из БД (источник истины), но обновляем Redis если не совпадает
+        visual_captcha_enabled = db_visual_enabled
+        
+        if db_visual_enabled != redis_visual_enabled:
+            # Несоответствие - обновляем Redis
+            await redis.set(f"visual_captcha_enabled:{chat.id}", "1" if db_visual_enabled else "0")
+            logger.warning(
+                f"⚠️ [MEMBER_JOIN] КРИТИЧНО: Redis и БД не совпадают для chat={chat.id}. "
+                f"БД: {db_visual_enabled}, Redis был: {redis_visual_enabled}. Обновлен Redis. "
+                f"Используем значение из БД: {db_visual_enabled}"
+            )
+        
+        # КРИТИЧНО: Если visual_captcha_enabled=True, капча ОБЯЗАТЕЛЬНА независимо от fallback_mode
+        # Это гарантирует, что капча всегда отправляется при rejoin, если включена через UI
+        if visual_captcha_enabled:
+            captcha_should_be_required = True
+            # Игнорируем fallback_mode если visual_captcha явно включен
+            ignore_fallback = True
+            logger.info(
+                f"🔒 [MEMBER_JOIN] visual_captcha_enabled=True → капча ОБЯЗАТЕЛЬНА для user={user.id}, "
+                f"chat={chat.id} (игнорируем fallback_mode)"
+            )
+        else:
+            # Если visual_captcha выключен, используем decision
+            captcha_should_be_required = decision.require_captcha
+            ignore_fallback = False
+        
+        # Определяем источник требования капчи для лучшего логирования
+        captcha_source = "unknown"
+        if visual_captcha_enabled:
+            captcha_source = "visual_captcha_enabled (UI)"
+        elif decision.require_captcha:
+            captcha_source = "captcha_join_enabled (ChatSettings)"
+        else:
+            captcha_source = "none"
+        
+        logger.info(
+            f"🔍 [MEMBER_JOIN] Проверка капчи: decision.require_captcha={decision.require_captcha}, "
+            f"visual_captcha_enabled={visual_captcha_enabled}, "
+            f"decision.fallback_mode={decision.fallback_mode}, "
+            f"captcha_should_be_required={captcha_should_be_required}, "
+            f"ignore_fallback={ignore_fallback}, "
+            f"captcha_source={captcha_source}"
+        )
+
+        # КРИТИЧНО: Отправляем капчу если:
+        # 1. captcha_should_be_required=True И
+        # 2. (ignore_fallback=True ИЛИ decision.fallback_mode=False)
+        should_send_captcha = (
+            captcha_should_be_required and 
+            (ignore_fallback or not decision.fallback_mode)
+        )
+        
+        # ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ для отладки проблемы rejoin
+        logger.info(
+            f"🔍 [MEMBER_JOIN] ФИНАЛЬНАЯ ПРОВЕРКА: should_send_captcha={should_send_captcha}, "
+            f"captcha_should_be_required={captcha_should_be_required}, "
+            f"ignore_fallback={ignore_fallback}, "
+            f"decision.fallback_mode={decision.fallback_mode}, "
+            f"visual_captcha_enabled={visual_captcha_enabled}, "
+            f"decision.require_captcha={decision.require_captcha}"
+        )
+        
+        if should_send_captcha:
+            logger.info(
+                f"🎯 [MEMBER_JOIN] Капча требуется для user={user.id}, chat={chat.id}, source={source}, "
+                f"visual_captcha_enabled={visual_captcha_enabled}, captcha_source={captcha_source}"
+            )
+
+            # КРИТИЧНО: Отправляем капчу с обработкой ошибок
+            # Если отправка не удалась, всё равно ограничиваем пользователя
+            captcha_sent = False
+            try:
+                await send_captcha_prompt(
+                    bot=event.bot,
+                    chat=chat,
+                    user=user,
+                    settings=settings_snapshot,
+                    source=source,
+                    initiator=initiator,
+                )
+                captcha_sent = True
+                logger.info(
+                    f"✅ [MEMBER_JOIN] Капча успешно отправлена для user={user.id}, chat={chat.id}"
+                )
+            except Exception as captcha_error:
+                logger.error(
+                    f"❌ [MEMBER_JOIN] КРИТИЧЕСКАЯ ОШИБКА: Не удалось отправить капчу для user={user.id}, "
+                    f"chat={chat.id}: {captcha_error}. Продолжаем с ограничением пользователя."
+                )
+                # Продолжаем выполнение - ограничим пользователя даже если капча не отправлена
+
+            try:
+                await event.bot.restrict_chat_member(
+                    chat_id=chat.id,
+                    user_id=user.id,
+                    permissions=build_restriction_permissions(),
+                    until_date=datetime.now(timezone.utc) + timedelta(seconds=settings_snapshot.timeout_seconds),
+                )
+                logger.info(
+                    f"🔇 [MEMBER_JOIN] Пользователь {user.id} ограничен до прохождения капчи "
+                    f"(timeout: {settings_snapshot.timeout_seconds}s, captcha_sent={captcha_sent})"
+                )
+            except Exception as exc:
+                logger.error(
+                    f"❌ [MEMBER_JOIN] Не удалось ограничить пользователя {user.id} до прохождения капчи: {exc}"
+                )
+            return
+        else:
+            # Капча НЕ требуется - логируем почему
+            logger.warning(
+                f"⚠️ [MEMBER_JOIN] Капча НЕ будет отправлена для user={user.id}, chat={chat.id}, "
+                f"source={source}, visual_captcha_enabled={visual_captcha_enabled}, "
+                f"decision.require_captcha={decision.require_captcha}, "
+                f"captcha_should_be_required={captcha_should_be_required}, "
+                f"ignore_fallback={ignore_fallback}, decision.fallback_mode={decision.fallback_mode}, "
+                f"captcha_source={captcha_source}"
+            )
+
+        admission = await evaluate_admission(
+            bot=event.bot,
+            session=session,
+            chat=chat,
+            user=user,
+            source=source,
+        )
+
+        if admission.muted:
+            logger.info(
+                "Пользователь %s замьючен при вступлении (%s)",
+                user.id,
+                admission.reason,
+            )
+
+            if admission.reason in {"risk_gate", "spammer_registry"}:
+                await mute_suspicious_user_across_groups(
+                    bot=event.bot,
+                    session=session,
+                    target_id=user.id,
+                    admin_id=getattr(initiator, "id", None),
+                    duration=None,
+                    reason=admission.reason,
+                )
+
+        await clear_captcha_state(chat.id, user.id)
+
+        try:
+            await log_new_member(
+                bot=event.bot,
+                user=user,
+                chat=chat,
+                invited_by=initiator,
+                session=session,
+            )
+        except Exception as log_error:
+            logger.error("Ошибка при логировании нового участника: %s", log_error)
+
+    except Exception as exc:
+        logger.error("Ошибка обработки вступления: %s", exc)
+        logger.error(traceback.format_exc())

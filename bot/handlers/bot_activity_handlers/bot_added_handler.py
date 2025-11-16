@@ -20,7 +20,6 @@ from bot.services.bot_added_handler_logic import (
     build_private_chat_link,
     safe_send
 )
-from bot.services.bot_activity_journal.bot_activity_journal_logic import log_bot_added_to_group
 
 logger = logging.getLogger(__name__)
 
@@ -130,10 +129,15 @@ async def on_my_status_change(
 
         # Логируем добавление бота в канал журнала
         try:
+            # Локальный импорт, чтобы избежать циклического импорта на уровне модулей
+            from bot.services.bot_activity_journal.bot_activity_journal_logic import (
+                log_bot_added_to_group,
+            )
+
             await log_bot_added_to_group(
                 bot=bot,
                 chat=chat,
-                added_by=event.from_user
+                added_by=event.from_user,
             )
         except Exception as log_error:
             logger.error(f"Ошибка при логировании добавления бота: {log_error}")

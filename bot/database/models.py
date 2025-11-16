@@ -1,9 +1,13 @@
 from sqlalchemy import Column, Integer, String, BigInteger, ForeignKey, DateTime, Boolean, Index, UniqueConstraint
 from sqlalchemy.orm import relationship
-from sqlalchemy.ext.declarative import declarative_base
-from datetime import datetime
+from sqlalchemy.orm import declarative_base
+from datetime import datetime, timezone
 
 Base = declarative_base()
+
+
+def utcnow():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 # 👤 Пользователи
@@ -25,8 +29,8 @@ class User(Base):
     supports_inline_queries = Column(Boolean, default=False)
     can_connect_to_business = Column(Boolean, default=False)
     has_main_web_app = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
     groups = relationship("Group", back_populates="creator", foreign_keys="Group.creator_user_id")
     added_groups = relationship("Group", back_populates="added_by", foreign_keys="Group.added_by_user_id")
@@ -76,7 +80,7 @@ class CaptchaSettings(Base):
 
     group_id = Column(BigInteger, ForeignKey("groups.chat_id"), primary_key=True)
     is_enabled = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
     # добавлен на 07.06.25 для включения капчи
     is_visual_enabled = Column(Boolean, default=False)
 
@@ -120,7 +124,7 @@ class TimeoutMessageId(Base):
     user_id = Column(BigInteger)
     chat_id = Column(BigInteger)
     message_id = Column(BigInteger)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
 
 
 class GroupUsers(Base):
@@ -132,8 +136,8 @@ class GroupUsers(Base):
     username = Column(String, nullable=True)
     first_name = Column(String, nullable=True)
     last_name = Column(String, nullable=True)
-    joined_at = Column(DateTime, default=datetime.utcnow)
-    last_activity = Column(DateTime, default=datetime.utcnow)
+    joined_at = Column(DateTime, default=utcnow)
+    last_activity = Column(DateTime, default=utcnow)
     is_admin = Column(Boolean, default=False)
     is_creator = Column(Boolean, default=False)  # Является ли создателем группы
     can_view_admins = Column(Boolean, default=True)  # Право просмотра администраторов
@@ -152,12 +156,24 @@ class ChatSettings(Base):
     __tablename__ = "chat_settings"
 
     chat_id = Column(BigInteger, ForeignKey("groups.chat_id", ondelete="CASCADE"), primary_key=True)
+    # Username публичной группы (для поиска по deep link). Может быть NULL для приватных чатов.
+    username = Column(String, nullable=True)
     enable_photo_filter = Column(Boolean, default=False)
     admins_bypass_photo_filter = Column(Boolean, default=False)
     photo_filter_mute_minutes = Column(Integer, default=60)
     mute_new_members = Column(Boolean, default=False)
     auto_mute_scammers = Column(Boolean, default=True)  # Автомут скаммеров
     global_mute_enabled = Column(Boolean, default=False)  # Глобальный мут для всех групп
+    reaction_mute_enabled = Column(Boolean, default=False)
+    reaction_mute_announce_enabled = Column(Boolean, default=True)
+    captcha_join_enabled = Column(Boolean, default=False)
+    captcha_invite_enabled = Column(Boolean, default=False)
+    captcha_timeout_seconds = Column(Integer, default=300)
+    captcha_message_ttl_seconds = Column(Integer, default=900)
+    captcha_flood_threshold = Column(Integer, default=5)
+    captcha_flood_window_seconds = Column(Integer, default=180)
+    captcha_flood_action = Column(String(16), default="warn")
+    system_mute_announcements_enabled = Column(Boolean, default=True)
 
     group = relationship("Group")
 
@@ -198,10 +214,10 @@ class ScammerTracker(Base):
     scammer_level = Column(Integer, default=0)  # Уровень скаммера (0-5)
     
     # Временные метки
-    first_violation_at = Column(DateTime, default=datetime.utcnow)
-    last_violation_at = Column(DateTime, default=datetime.utcnow)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    first_violation_at = Column(DateTime, default=utcnow)
+    last_violation_at = Column(DateTime, default=utcnow)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
     
     # Дополнительная информация
     notes = Column(String, nullable=True)  # Заметки администратора
@@ -229,7 +245,7 @@ class BotPermissions(Base):
     can_restrict_members = Column(Boolean, default=False)
     can_promote_members = Column(Boolean, default=False)
     can_invite_users = Column(Boolean, default=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
     group = relationship("Group")
 
@@ -249,7 +265,7 @@ class VisualCaptcha(Base):
     answer = Column(String(10), nullable=False)  # Правильный ответ
     message_id = Column(BigInteger, nullable=True)  # ID сообщения с капчей
     expires_at = Column(DateTime, nullable=False, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
 
     group = relationship("Group")
 
@@ -269,7 +285,7 @@ class GroupJournalChannel(Base):
     journal_type = Column(String(20), default="channel")  # channel или group
     journal_title = Column(String, nullable=True)  # Название канала для отображения
     is_active = Column(Boolean, default=True)
-    linked_at = Column(DateTime, default=datetime.utcnow)
+    linked_at = Column(DateTime, default=utcnow)
     linked_by_user_id = Column(BigInteger, nullable=True)  # Кто привязал
     last_event_at = Column(DateTime, nullable=True)  # Время последнего события
 
@@ -279,3 +295,8 @@ class GroupJournalChannel(Base):
         Index('ix_group_journal_group_id', 'group_id'),
         Index('ix_group_journal_channel_id', 'journal_channel_id'),
     )
+
+# Ensure additional models are registered with SQLAlchemy metadata
+import importlib
+
+importlib.import_module("bot.database.mute_models")

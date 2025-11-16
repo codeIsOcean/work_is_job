@@ -65,6 +65,13 @@ async def sync_group_and_admins(chat_id: int, title: str, bot_id: int, bot: Bot)
                 existing_group.title = title
                 existing_group.bot_id = bot_id
             else:
+                # БАГ #13 ФИКС: Валидация chat_id перед созданием группы
+                if not chat_id or chat_id == 0:
+                    # Используем модульный logger, не создавая локальную переменную,
+                    # чтобы избежать UnboundLocalError
+                    logger.error(f"БАГ #13: Попытка создать группу с невалидным chat_id: {chat_id}")
+                    raise ValueError(f"Невалидный chat_id: {chat_id}. chat_id не может быть 0 или None")
+                
                 # Создаем новую запись
                 group = Group(
                     chat_id=chat_id,

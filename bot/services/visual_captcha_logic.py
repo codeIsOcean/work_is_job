@@ -7,20 +7,59 @@ from io import BytesIO
 from typing import Dict, Optional, Any, Tuple
 
 from aiogram import Bot
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile, Chat, Message, CallbackQuery, ChatJoinRequest
 from aiogram.utils.deep_linking import create_start_link
 from PIL import Image, ImageDraw, ImageFont
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from bot.services.redis_conn import redis
 from bot.database.models import CaptchaSettings, User, ScammerTracker
 from datetime import datetime, timedelta
 import time
 from bot.services.enhanced_profile_analyzer import enhanced_profile_analyzer
+from bot.database.session import get_session
 
 logger = logging.getLogger(__name__)
+
+# БАГ #14 ФИКС: Кэширование шрифтов
+_FONT_CACHE = None
+
+def _load_fonts_cached():
+    """БАГ #14: Загружает шрифты один раз и кэширует результат"""
+    global _FONT_CACHE
+    if _FONT_CACHE is not None:
+        logger.debug("✅ Используем кэшированные шрифты")
+        return _FONT_CACHE
+    
+    # БАГ #14: Оптимизируем порядок проверки для Windows
+    font_paths = [
+        "C:\\Windows\\Fonts\\arial.ttf",  # Windows первым (раз бот на Windows)
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/System/Library/Fonts/Arial.ttf",  # macOS
+        "arial.ttf",
+        "Arial.ttf"
+    ]
+    
+    fonts = []
+    logger.info(f"🔍 [FONT_LOAD] Загрузка шрифтов из {len(font_paths)} путей")
+    
+    for i, path in enumerate(font_paths):
+        try:
+            fonts = [ImageFont.truetype(path, size) for size in (120, 130, 140, 150)]
+            logger.info(f"✅ [FONT_LOAD] Успешно загружен шрифт: {path}")
+            _FONT_CACHE = fonts
+            return fonts
+        except (IOError, OSError):
+            continue
+    
+    # Fallback на стандартный шрифт
+    logger.warning("⚠️ [FONT_LOAD] Не удалось загрузить системные шрифты, используем стандартный")
+    default_font = ImageFont.load_default()
+    _FONT_CACHE = [default_font] * 4
+    return _FONT_CACHE
 
 
 async def generate_visual_captcha() -> Tuple[str, BufferedInputFile]:
@@ -29,44 +68,11 @@ async def generate_visual_captcha() -> Tuple[str, BufferedInputFile]:
     img = Image.new("RGB", (width, height), color=(255, 255, 255))
     d = ImageDraw.Draw(img)
 
-    # Создаем крупный шрифт программно
+    # БАГ #14 ФИКС: Используем кэшированные шрифты вместо загрузки каждый раз
     try:
-        # Пробуем загрузить системные шрифты
-        font_paths = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", 
-            "/System/Library/Fonts/Arial.ttf",  # macOS
-            "C:\\Windows\\Fonts\\arial.ttf",  # Windows
-            "arial.ttf",
-            "Arial.ttf"
-        ]
-        
-        fonts = []
-        logger.info(f"🔍 [DEBUG] Начинаем загрузку шрифтов из {len(font_paths)} путей")
-        
-        for i, path in enumerate(font_paths):
-            logger.info(f"🔍 [DEBUG] Попытка {i+1}/{len(font_paths)}: {path}")
-            try:
-                fonts = [ImageFont.truetype(path, size) for size in (120, 130, 140, 150)]  # Еще крупнее
-                logger.info(f"✅ Успешно загружен шрифт: {path}, создано {len(fonts)} вариантов")
-                break
-            except (IOError, OSError) as e:
-                logger.info(f"❌ Не удалось загрузить {path}: {e}")
-                continue
-        
-        logger.info(f"🔍 [DEBUG] Результат загрузки: fonts={len(fonts) if fonts else 0}")
-        
-        # КРИТИЧЕСКАЯ ПРОВЕРКА
-        if not fonts or len(fonts) == 0:
-            logger.warning("⚠️ Не удалось загрузить ни один системный шрифт")
-            default_font = ImageFont.load_default()
-            fonts = [default_font] * 4  # Создаем 4 копии
-            logger.info(f"🔍 [DEBUG] Создан массив из стандартных шрифтов: {len(fonts)}")
-        
-        
-            
+        fonts = _load_fonts_cached()
     except Exception as e:
-        logger.error(f"Ошибка создания шрифта: {e}")
+        logger.error(f"Ошибка загрузки шрифтов: {e}")
         fonts = [ImageFont.load_default()]
 
     # Упрощаем капчу - делаем только простые и читаемые варианты
@@ -153,11 +159,15 @@ async def generate_visual_captcha() -> Tuple[str, BufferedInputFile]:
     spacing = width // (len(text_to_draw) + 2)
     x_offset = spacing
     
-    logger.info(f"🔍 [DEBUG] Начинаем отрисовку текста: '{text_to_draw}', длина={len(text_to_draw)}")
-    logger.info(f"🔍 [DEBUG] Массив шрифтов: длина={len(fonts)}, содержимое={[str(f) for f in fonts[:2]]}")
+    # БАГ #15 ФИКС: DEBUG логи только если LOG_LEVEL=DEBUG
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(f"🔍 [DEBUG] Начинаем отрисовку текста: '{text_to_draw}', длина={len(text_to_draw)}")
+        logger.debug(f"🔍 [DEBUG] Массив шрифтов: длина={len(fonts)}, содержимое={[str(f) for f in fonts[:2]]}")
     
     for i, ch in enumerate(text_to_draw):
-        logger.info(f"🔍 [DEBUG] Обрабатываем символ {i+1}/{len(text_to_draw)}: '{ch}'")
+        # БАГ #15 ФИКС: DEBUG логи только если LOG_LEVEL=DEBUG
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"🔍 [DEBUG] Обрабатываем символ {i+1}/{len(text_to_draw)}: '{ch}'")
         
         # Угол поворота до ±30 градусов (уменьшили для читаемости)
         angle = random.randint(-30, 30)
@@ -170,13 +180,17 @@ async def generate_visual_captcha() -> Tuple[str, BufferedInputFile]:
         
         # Безопасный выбор шрифта в цикле
         try:
-            logger.info(f"🔍 [DEBUG] Выбираем шрифт из массива длиной {len(fonts)}")
+            # БАГ #15 ФИКС: DEBUG логи только если LOG_LEVEL=DEBUG
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"🔍 [DEBUG] Выбираем шрифт из массива длиной {len(fonts)}")
             if fonts and len(fonts) > 0:
                 font = random.choice(fonts)
-                logger.info(f"🔍 [DEBUG] Выбран шрифт: {font}")
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(f"🔍 [DEBUG] Выбран шрифт: {font}")
             else:
                 font = ImageFont.load_default()
-                logger.info(f"🔍 [DEBUG] Используем стандартный шрифт")
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(f"🔍 [DEBUG] Используем стандартный шрифт")
         except (IndexError, ValueError) as e:
             logger.error(f"Ошибка при выборе шрифта: {e}")
             font = ImageFont.load_default()
@@ -342,6 +356,12 @@ async def schedule_captcha_reminder(bot: Bot, user_id: int, group_name: str, del
     """Планирует отправку напоминания о капче через указанное количество минут. Максимум 2 повтора."""
     await asyncio.sleep(delay_minutes * 60)  # Конвертируем минуты в секунды
     
+    # ФИКС №12: Проверяем, начал ли пользователь решать капчу
+    captcha_started = await redis.get(f"captcha_started:{user_id}:{group_name}")
+    if captcha_started:
+        logger.info(f"✅ Пользователь {user_id} начал решать капчу, напоминание отменено")
+        return None
+    
     # Проверяем, что пользователь все еще не решил капчу (не нажал на кнопку "Пройти капчу")
     captcha_data = await get_captcha_data(user_id)
     if captcha_data and captcha_data["group_name"] == group_name:
@@ -364,19 +384,38 @@ async def schedule_captcha_reminder(bot: Bot, user_id: int, group_name: str, del
 
 async def handle_captcha_timeout_final(bot: Bot, user_id: int, group_name: str):
     """
-    Обработка финального таймаута - пользователь не нажал на "Пройти капчу".
-    Удаляет все сообщения и отправляет лог в журнал.
+    ФИКС №7: Обработка финального таймаута - пользователь не решил капчу.
+    - Если join_request: отклоняем запрос
+    - Если уже в группе: кикаем пользователя
     """
     await asyncio.sleep(2 * 60)  # Ждем 2 минуты после последнего напоминания
     
-    # Проверяем, что пользователь ВСЕ ЕЩЕ не нажал на кнопку (есть данные капчи в Redis)
+    # ФИКС №12: Проверяем, что пользователь ВСЕ ЕЩЕ не решил капчу
     captcha_data = await get_captcha_data(user_id)
     if not captcha_data or captcha_data["group_name"] != group_name:
-        # Пользователь уже нажал на кнопку и начал проходить капчу - не нужно ничего делать
-        logger.info(f"✅ Пользователь {user_id} нажал на кнопку 'Пройти капчу', таймаут отменен")
+        # Пользователь уже решил капчу - отменяем таймаут
+        logger.info(f"✅ Пользователь {user_id} решил капчу, таймаут отменен")
         return
     
-    logger.warning(f"⏱️ Пользователь {user_id} НЕ нажал на кнопку 'Пройти капчу' за 6 минут. Удаляем сообщения и отправляем лог")
+    # Проверяем, прошел ли пользователь капчу
+    chat_id = None
+    if group_name.startswith("private_"):
+        chat_id = int(group_name.replace("private_", ""))
+    elif group_name.startswith("-") and group_name[1:].isdigit():
+        chat_id = int(group_name)
+    else:
+        chat_id_from_redis = await redis.get(f"join_request:{user_id}:{group_name}")
+        if chat_id_from_redis:
+            chat_id_str = chat_id_from_redis.decode('utf-8') if isinstance(chat_id_from_redis, bytes) else str(chat_id_from_redis)
+            chat_id = int(chat_id_str)
+    
+    if chat_id:
+        captcha_passed = await redis.get(f"captcha_passed:{user_id}:{chat_id}")
+        if captcha_passed:
+            logger.info(f"✅ Пользователь {user_id} прошел капчу, таймаут отменен")
+            return
+    
+    logger.warning(f"⏱️ Пользователь {user_id} НЕ решил капчу в срок. Обрабатываем таймаут")
     
     try:
         # 1. Удаляем все сообщения от бота
@@ -423,19 +462,49 @@ async def handle_captcha_timeout_final(bot: Bot, user_id: int, group_name: str):
                 chat_id = int(chat_id_str)
         
         if chat_id:
-            # Получаем информацию о пользователе и группе
+            # ФИКС №7: Определяем, нужно ли reject или kick
             try:
                 from aiogram.types import User as TgUser
                 chat = await bot.get_chat(chat_id)
                 
-                # Получаем информацию о пользователе (если возможно)
+                # Проверяем, есть ли активный join_request
+                join_request_key = f"join_request:{user_id}:{group_name}"
+                has_join_request = await redis.exists(join_request_key)
+                
+                # Получаем информацию о пользователе
+                user = None
+                is_in_group = False
                 try:
-                    # Пытаемся получить информацию о пользователе через get_chat_member
                     member_info = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
                     user = member_info.user
+                    is_in_group = member_info.status in ("member", "restricted", "administrator", "creator")
                 except Exception:
-                    # Если не получилось - создаем минимальный объект User
+                    # Пользователь не в группе
                     user = TgUser(id=user_id, is_bot=False, first_name=f"User {user_id}")
+                
+                # ФИКС №7: Если есть join_request - отклоняем
+                if has_join_request:
+                    try:
+                        await bot.decline_chat_join_request(chat_id=chat_id, user_id=user_id)
+                        logger.info(f"✅ Join request отклонен для пользователя {user_id} из-за таймаута капчи")
+                    except Exception as e:
+                        logger.error(f"❌ Не удалось отклонить join request: {e}")
+                # ФИКС №7: Если пользователь уже в группе - кикаем
+                elif is_in_group:
+                    try:
+                        await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+                        # Сразу разбаним, чтобы можно было повторить попытку
+                        await asyncio.sleep(1)
+                        await bot.unban_chat_member(chat_id=chat_id, user_id=user_id)
+                        logger.info(f"✅ Пользователь {user_id} кикнут из группы {chat_id} из-за таймаута капчи")
+                    except Exception as e:
+                        logger.error(f"❌ Не удалось кикнуть пользователя: {e}")
+                
+                # Очищаем состояние капчи
+                await redis.delete(f"captcha:{user_id}")
+                await redis.delete(join_request_key)
+                from bot.services.captcha_flow_logic import clear_captcha_state
+                await clear_captcha_state(chat_id, user_id)
                 
                 # Отправляем лог в журнал
                 from bot.services.bot_activity_journal.bot_activity_journal_logic import log_captcha_timeout
@@ -452,7 +521,7 @@ async def handle_captcha_timeout_final(bot: Bot, user_id: int, group_name: str):
                 logger.info(f"✅ Лог о таймауте капчи отправлен в журнал для user_id={user_id}, chat_id={chat_id}")
                 
             except Exception as log_error:
-                logger.error(f"❌ Ошибка при отправке лога в журнал: {log_error}")
+                logger.error(f"❌ Ошибка при обработке таймаута капчи: {log_error}")
         else:
             logger.warning(f"⚠️ Не удалось определить chat_id для group_name={group_name}")
             
@@ -465,6 +534,12 @@ async def handle_captcha_timeout_final(bot: Bot, user_id: int, group_name: str):
 async def save_join_request(user_id: int, chat_id: int, group_id: str) -> None:
     """Сохраняет информацию о join-request на 1 час."""
     await redis.setex(f"join_request:{user_id}:{group_id}", 3600, str(chat_id))
+
+
+async def clear_join_request_state(user_id: int, chat: Chat) -> None:
+    group_key = chat.username or f"private_{chat.id}"
+    await redis.delete(f"join_request:{user_id}:{group_key}")
+    await redis.delete(f"user_messages:{user_id}")
 
 
 async def create_deeplink_for_captcha(bot: Bot, group_id: str) -> str:
@@ -678,13 +753,35 @@ async def check_admin_rights(bot: Bot, chat_id: int, user_id: int) -> bool:
 
 
 async def set_visual_captcha_status(chat_id: int, enabled: bool) -> None:
-    """Включает/выключает визуальную капчу (флаг в Redis)."""
+    """Включает/выключает визуальную капчу."""
     await redis.set(f"visual_captcha_enabled:{chat_id}", "1" if enabled else "0")
+
+    async with get_session() as session:
+        result = await session.execute(
+            select(CaptchaSettings).where(CaptchaSettings.group_id == chat_id)
+        )
+        settings = result.scalar_one_or_none()
+        if settings:
+            settings.is_visual_enabled = enabled
+        else:
+            session.add(CaptchaSettings(group_id=chat_id, is_visual_enabled=enabled))
+        await session.commit()
 
 
 async def get_visual_captcha_status(chat_id: int) -> bool:
-    """Статус визуальной капчи из Redis."""
-    return (await redis.get(f"visual_captcha_enabled:{chat_id}")) == "1"
+    """Статус визуальной капчи."""
+    cached = await redis.get(f"visual_captcha_enabled:{chat_id}")
+    if cached is not None:
+        return cached == "1"
+
+    async with get_session() as session:
+        result = await session.execute(
+            select(CaptchaSettings).where(CaptchaSettings.group_id == chat_id)
+        )
+        settings = result.scalar_one_or_none()
+        enabled = bool(settings.is_visual_enabled) if settings else False
+        await redis.set(f"visual_captcha_enabled:{chat_id}", "1" if enabled else "0")
+        return enabled
 
 
 async def approve_chat_join_request(bot: Bot, chat_id: int, user_id: int) -> Dict[str, Any]:
@@ -725,6 +822,24 @@ async def approve_chat_join_request(bot: Bot, chat_id: int, user_id: int) -> Dic
                 break
             except Exception as e:
                 error_msg = str(e)
+
+                # Отдельно обрабатываем ситуацию, когда пользователь уже участник
+                if "USER_ALREADY_PARTICIPANT" in error_msg:
+                    logger.info(
+                        f"✅ Пользователь {user_id} уже является участником группы {chat_id} "
+                        f"(USER_ALREADY_PARTICIPANT). Считаем операцию успешной."
+                    )
+                    result["success"] = True
+                    result["message"] = (
+                        "🎉 <b>Капча пройдена успешно!</b>\n\n"
+                        "✅ Вы уже являетесь участником группы.\n"
+                        "🔗 <b>Нажмите на кнопку ниже, чтобы открыть группу.</b>"
+                    )
+                    # Попробуем сразу отдать ссылку на группу
+                    if chat.username:
+                        result["group_link"] = f"https://t.me/{chat.username}"
+                    break
+
                 if "429" in error_msg and attempt < max_retries - 1:
                     # Используем retry_after из ошибки, если есть, иначе увеличиваем задержку
                     if "retry_after" in error_msg:
@@ -786,7 +901,9 @@ async def approve_chat_join_request(bot: Bot, chat_id: int, user_id: int) -> Dic
 
     except Exception as e:
         logger.error(f"Ошибка approve_chat_join_request: {e}")
-        result["message"] = f"Капча пройдена, но не удалось автоматически добавить в группу: {e}"
+        # БАГ #1 ФИКС: Не показываем пользователю ненужное сообщение об ошибке
+        # Если пользователь уже в группе, это нормальная ситуация, не ошибка
+        # Просто пытаемся отдать ссылку на группу
 
         # Даже при ошибке попробуем отдать ссылку
         try:

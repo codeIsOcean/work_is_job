@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from calendar import error
 
 from aiogram import Router, types, F
@@ -11,8 +13,13 @@ from bot.services.groups_settings_in_private_logic import (
     get_group_by_chat_id,
     get_visual_captcha_status,
     toggle_visual_captcha,
-    get_mute_new_members_status
+    get_mute_new_members_status,
+    get_reaction_mute_settings,
+    set_reaction_mute_enabled,
+    set_reaction_mute_announce_enabled,
 )
+from bot.services.group_display import build_group_header
+from types import SimpleNamespace
 from bot.middleware.access_control import (
     ACCESS_CONTROL_ENABLED,
     enable_access_control,
@@ -20,10 +27,9 @@ from bot.middleware.access_control import (
     ALLOWED_USER_IDS,
     ALLOWED_USERNAMES,
 )
-from bot.services.bot_activity_journal.bot_activity_journal_logic import log_visual_captcha_toggle, log_mute_settings_toggle
 from bot.services.new_member_requested_to_join_mute_logic import (
     create_mute_settings_keyboard,
-    get_mute_settings_text
+    get_mute_settings_text,
 )
 import logging
 
@@ -161,7 +167,16 @@ async def manage_group_callback(callback: types.CallbackQuery, session: AsyncSes
             return
 
         # Отправляем меню управления группой
-        await send_group_management_menu(callback.message, session, group)
+        # БАГ #11 ФИКС: Передаем user_id напрямую из callback.from_user.id, а не из callback.message.from_user.id
+        # потому что callback.message - это сообщение от БОТА, а не от админа!
+        # Дополнительно передаём объект бота, чтобы корректно работать в тестах и при mock'ах.
+        await send_group_management_menu(
+            callback.message,
+            session,
+            group,
+            user_id=callback.from_user.id,
+            bot=callback.bot,
+        )
         await callback.answer()
 
     except Exception as e:
@@ -193,13 +208,17 @@ async def toggle_visual_captcha_callback(callback: types.CallbackQuery, session:
 
         # Логируем изменение настроек в журнал действий
         try:
+            # Локальный импорт, чтобы избежать циклического импорта модулей
+            from bot.services.bot_activity_journal.bot_activity_journal_logic import (
+                log_visual_captcha_toggle,
+            )
             # Получаем информацию о группе из Telegram API
             chat_info = await callback.bot.get_chat(chat_id)
             await log_visual_captcha_toggle(
                 bot=callback.bot,
                 user=callback.from_user,
                 chat=chat_info,
-                enabled=new_status
+                enabled=new_status,
             )
         except Exception as log_error:
             logger.error(f"Ошибка при логировании изменения визуальной капчи: {log_error}")
@@ -213,6 +232,109 @@ async def toggle_visual_captcha_callback(callback: types.CallbackQuery, session:
 
     except Exception as e:
         logger.error(f"Ошибка при переключении визуальной капчи: {e}")
+        await callback.answer("❌ Произошла ошибка", show_alert=True)
+
+
+@group_settings_router.callback_query(F.data.startswith("reaction_mute_settings:"))
+async def reaction_mute_settings_callback(callback: types.CallbackQuery, session: AsyncSession):
+    """Открывает меню настроек мьюта по реакциям."""
+    try:
+        chat_id = int(callback.data.split(":")[-1])
+        user_id = callback.from_user.id
+
+        if not await check_granular_permissions(callback.bot, user_id, chat_id, "restrict_members", session):
+            await callback.answer("❌ Недостаточно прав для управления мьютом по реакциям", show_alert=True)
+            return
+
+        enabled, announce_enabled = await get_reaction_mute_settings(session, chat_id)
+        keyboard = create_reaction_mute_keyboard(chat_id, enabled, announce_enabled)
+
+        status = "🟢 включен" if enabled else "🔴 выключен"
+        announce_status = "🔔 системные сообщения включены" if announce_enabled else "🔕 системные сообщения отключены"
+        text = (
+            "⚡ <b>Мьют по реакциям</b>\n\n"
+            f"Сейчас: {status}\n"
+            f"{announce_status}\n\n"
+            "Администраторы могут ставить реакции на сообщения участников, чтобы мгновенно выдать мьют.\n"
+            "• 👎 — 3 дня\n"
+            "• 🤢 — 7 дней\n"
+            "• 💩 — навсегда (+15 баллов)\n"
+            "• 😢 — предупреждение\n"
+        )
+
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        await callback.answer()
+    except Exception as exc:
+        logger.error(f"Ошибка при открытии настроек мьюта по реакциям: {exc}")
+        await callback.answer("❌ Произошла ошибка", show_alert=True)
+
+
+@group_settings_router.callback_query(F.data.startswith("reaction_mute_toggle:"))
+async def reaction_mute_toggle_callback(callback: types.CallbackQuery, session: AsyncSession):
+    """Переключает параметры мьюта по реакциям."""
+    try:
+        _, toggle_type, chat_id_str = callback.data.split(":")
+        chat_id = int(chat_id_str)
+        user_id = callback.from_user.id
+
+        if not await check_granular_permissions(callback.bot, user_id, chat_id, "restrict_members", session):
+            await callback.answer("❌ Недостаточно прав", show_alert=True)
+            return
+
+        enabled, announce_enabled = await get_reaction_mute_settings(session, chat_id)
+
+        if toggle_type == "enabled":
+            new_value = await set_reaction_mute_enabled(session, chat_id, not enabled)
+            message = "Система мьюта по реакциям включена" if new_value else "Система мьюта по реакциям выключена"
+        elif toggle_type == "announce":
+            new_value = await set_reaction_mute_announce_enabled(session, chat_id, not announce_enabled)
+            message = "Системные сообщения включены" if new_value else "Системные сообщения отключены"
+        else:
+            await callback.answer("Некорректный параметр", show_alert=True)
+            return
+
+        enabled, announce_enabled = await get_reaction_mute_settings(session, chat_id)
+        keyboard = create_reaction_mute_keyboard(chat_id, enabled, announce_enabled)
+
+        status = "🟢 включен" if enabled else "🔴 выключен"
+        announce_status = "🔔 системные сообщения включены" if announce_enabled else "🔕 системные сообщения отключены"
+        text = (
+            "⚡ <b>Мьют по реакциям</b>\n\n"
+            f"Сейчас: {status}\n"
+            f"{announce_status}\n\n"
+            "Администраторы могут ставить реакции на сообщения участников, чтобы мгновенно выдать мьют.\n"
+            "• 👎 — 3 дня\n"
+            "• 🤢 — 7 дней\n"
+            "• 💩 — навсегда (+15 баллов)\n"
+            "• 😢 — предупреждение\n"
+        )
+
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        await callback.answer(message, show_alert=True)
+    except Exception as exc:
+        logger.error(f"Ошибка при переключении настроек мьюта по реакциям: {exc}")
+        await callback.answer("❌ Произошла ошибка", show_alert=True)
+
+
+@group_settings_router.callback_query(F.data.startswith("reaction_mute_back:"))
+async def reaction_mute_back_callback(callback: types.CallbackQuery, session: AsyncSession):
+    """Возвращает к меню управления группой из настроек реакций."""
+    try:
+        chat_id = int(callback.data.split(":")[-1])
+        group = await get_group_by_chat_id(session, chat_id)
+        if group:
+            # БАГ #11 ФИКС: Передаем user_id напрямую из callback.from_user.id
+            # и объект бота для корректной работы в тестах/mocks
+            await send_group_management_menu(
+                callback.message,
+                session,
+                group,
+                user_id=callback.from_user.id,
+                bot=callback.bot,
+            )
+        await callback.answer()
+    except Exception as exc:
+        logger.error(f"Ошибка при возврате из настроек реакций: {exc}")
         await callback.answer("❌ Произошла ошибка", show_alert=True)
 
 
@@ -279,13 +401,17 @@ async def enable_mute_new_members_callback(callback: types.CallbackQuery, sessio
 
             # Логируем изменение настроек мута в журнал действий
             try:
+                # Локальный импорт, чтобы избежать циклического импорта модулей
+                from bot.services.bot_activity_journal.bot_activity_journal_logic import (
+                    log_mute_settings_toggle,
+                )
                 # Получаем информацию о группе из Telegram API
                 chat_info = await callback.bot.get_chat(chat_id)
                 await log_mute_settings_toggle(
                     bot=callback.bot,
                     user=callback.from_user,
                     chat=chat_info,
-                    enabled=True
+                    enabled=True,
                 )
             except Exception as log_error:
                 logger.error(f"Ошибка при логировании изменения настроек мута: {log_error}")
@@ -338,13 +464,17 @@ async def disable_mute_new_members_callback(callback: types.CallbackQuery, sessi
 
             # Логируем изменение настроек мута в журнал действий
             try:
+                # Локальный импорт, чтобы избежать циклического импорта модулей
+                from bot.services.bot_activity_journal.bot_activity_journal_logic import (
+                    log_mute_settings_toggle,
+                )
                 # Получаем информацию о группе из Telegram API
                 chat_info = await callback.bot.get_chat(chat_id)
                 await log_mute_settings_toggle(
                     bot=callback.bot,
                     user=callback.from_user,
                     chat=chat_info,
-                    enabled=False
+                    enabled=False,
                 )
             except Exception as log_error:
                 logger.error(f"Ошибка при логировании изменения настроек мута: {log_error}")
@@ -433,36 +563,81 @@ def create_groups_keyboard(groups):
     return keyboard
 
 
-async def send_group_management_menu(message: types.Message, session: AsyncSession, group):
-    """Отправляет меню управления группой"""
-    # Сохраняем привязку пользователя к группе в Redis
+async def send_group_management_menu(
+    message: types.Message,
+    session: AsyncSession,
+    group,
+    user_id: int = None,
+    bot=None,
+):
+    """Отправляет меню управления группой.
+
+    ВАЖНО: всегда сохраняем ID *админа*, а не бота.
+    """
     from bot.services.redis_conn import redis
-    user_id = message.from_user.id
+
+    # Если user_id не передан - пробуем взять из message.from_user.id
+    if user_id is None:
+        user_id = message.from_user.id
+        logger.warning(
+            f"⚠️ [GROUP_SETTINGS] user_id не передан, используется message.from_user.id={user_id}"
+        )
+
     group_id = str(group.chat_id)
-    
-    logger.info(f"🔍 [GROUP_SETTINGS] Сохранение привязки пользователя {user_id} к группе {group_id}")
-    
+
+    # Сначала сохраняем привязку в Redis — это главное для логики
+    logger.info(
+        f"🔍 [GROUP_SETTINGS] Сохранение привязки пользователя {user_id} к группе {group_id}"
+    )
+
     await redis.hset(f"user:{user_id}", "group_id", group_id)
     # TTL на всякий случай (30 минут)
     await redis.expire(f"user:{user_id}", 30 * 60)
-    
+
     # Проверяем что сохранилось
     saved_group_id = await redis.hget(f"user:{user_id}", "group_id")
-    logger.info(f"🔍 [GROUP_SETTINGS] Проверка сохранения: user:{user_id} -> group_id: {saved_group_id}")
-    
+    logger.info(
+        f"🔍 [GROUP_SETTINGS] Проверка сохранения: user:{user_id} -> group_id: {saved_group_id}"
+    )
+
     if saved_group_id != group_id:
-        logger.error(f"❌ [GROUP_SETTINGS] ОШИБКА: Не удалось сохранить group_id для пользователя {user_id}")
+        logger.error(
+            f"❌ [GROUP_SETTINGS] ОШИБКА: Не удалось сохранить group_id для пользователя {user_id}"
+        )
     else:
-        logger.info(f"✅ [GROUP_SETTINGS] Успешно сохранена привязка пользователя {user_id} к группе {group_id}")
-    
-    text = f"**Управление группой**\n\n"
-    text += f"**Название:** {group.title}\n"
-    text += f"**ID:** `{group.chat_id}`\n\n"
-    text += "**Доступные функции:**"
+        logger.info(
+            f"✅ [GROUP_SETTINGS] Успешно сохранена привязка пользователя {user_id} к группе {group_id}"
+        )
 
-    keyboard = await create_group_management_keyboard(session, group.chat_id)
+    # Всё, что ниже — только про красивое меню. Ошибки тут не должны ломать основную логику.
+    try:
+        if bot is None:
+            bot = getattr(message, "bot", None)
 
-    await message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+        if bot is None:
+            raise RuntimeError("Bot instance is not available for UI update")
+
+        chat_info = await bot.get_chat(group.chat_id)
+        header_source = SimpleNamespace(
+            title=group.title,
+            chat_id=group.chat_id,
+            username=getattr(chat_info, "username", None),
+        )
+        text = build_group_header(header_source)
+
+        keyboard = await create_group_management_keyboard(session, group.chat_id)
+
+        # БАГ №9: Убрать превью ссылки в названии группы
+        await message.edit_text(
+            text,
+            reply_markup=keyboard,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        logger.error(
+            f"⚠️ [GROUP_SETTINGS] Не удалось обновить меню управления группой: {e}"
+        )
 
 
 async def create_group_management_keyboard(session: AsyncSession, chat_id: int):
@@ -494,10 +669,17 @@ async def create_group_management_keyboard(session: AsyncSession, chat_id: int):
     auto_mute_status = await get_auto_mute_scammers_status(chat_id, session)
     auto_mute_text = "🤖 Настройки автомута скаммеров"
 
+    reaction_enabled, announce_enabled = await get_reaction_mute_settings(session, chat_id)
+    if reaction_enabled:
+        suffix = "🔕" if not announce_enabled else "✅"
+        reaction_text = f"⚡ Мьют по реакциям {suffix}"
+    else:
+        reaction_text = "⚡ Мьют по реакциям ❌"
+
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text=visual_captcha_text,
-            callback_data=f"toggle_visual_captcha_{chat_id}"
+            text="🛡️ Настройки капчи",
+            callback_data=f"captcha_settings:{chat_id}"
         )],
         [InlineKeyboardButton(
             text=mute_text,
@@ -506,6 +688,10 @@ async def create_group_management_keyboard(session: AsyncSession, chat_id: int):
         [InlineKeyboardButton(
             text=auto_mute_text,
             callback_data=f"auto_mute_scammers_settings:{chat_id}"
+        )],
+        [InlineKeyboardButton(
+            text=reaction_text,
+            callback_data=f"reaction_mute_settings:{chat_id}"
         )],
         [InlineKeyboardButton(
             text="📢 Рассылки",
@@ -518,6 +704,37 @@ async def create_group_management_keyboard(session: AsyncSession, chat_id: int):
     ])
 
     return keyboard
+
+
+def create_reaction_mute_keyboard(
+    chat_id: int,
+    enabled: bool,
+    announce_enabled: bool,
+) -> InlineKeyboardMarkup:
+    enabled_text = "✅ Включено" if enabled else "🟡 Включить"
+    announce_text = "🔔 Уведомления включены" if announce_enabled else "🔕 Уведомления выключены"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=enabled_text,
+                    callback_data=f"reaction_mute_toggle:enabled:{chat_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=announce_text,
+                    callback_data=f"reaction_mute_toggle:announce:{chat_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔙 Назад",
+                    callback_data=f"reaction_mute_back:{chat_id}",
+                )
+            ],
+        ]
+    )
 
 
 def create_access_control_keyboard():

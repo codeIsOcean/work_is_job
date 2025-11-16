@@ -55,7 +55,21 @@ services:
     restart: unless-stopped
     networks:
       - prod_network
-      - nginx_proxy
+
+  nginx_prod:
+    image: nginx:alpine
+    container_name: nginx_prod
+    depends_on:
+      - bot_prod
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.prod.conf:/etc/nginx/nginx.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    restart: unless-stopped
+    networks:
+      - prod_network
 
 volumes:
   postgres_prod_data:
@@ -64,7 +78,5 @@ volumes:
 networks:
   prod_network:
     driver: bridge
-  nginx_proxy:
-    external: true
-    name: jobs_indubai_testbot_test_network
+
 

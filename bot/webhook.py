@@ -108,9 +108,19 @@ async def create_app(bot: Bot = None, dp: Dispatcher = None) -> web.Application:
 
     app.router.add_get("/health", health_check)
 
-    # Установка webhook
+    # БАГ #12 ФИКС: НЕ устанавливаем webhook здесь, т.к. он уже установлен в bot.py
+    # Webhook устанавливается один раз при старте в bot.py
+    # Если bot и dp переданы из bot.py - webhook уже установлен
     if USE_WEBHOOK:
-        await setup_webhook(bot)
+        # Проверяем, установлен ли webhook (для информации)
+        try:
+            webhook_info = await bot.get_webhook_info()
+            if webhook_info.url:
+                logger.info(f"✅ Webhook уже установлен: {webhook_info.url}")
+            else:
+                logger.warning("⚠️ Webhook не установлен, но должен быть установлен в bot.py")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось проверить статус webhook: {e}")
 
     return app
 

@@ -173,9 +173,14 @@ async def auto_mute_scammer_on_join(bot: Bot, event: ChatMemberUpdated) -> bool:
             manual_mute_enabled = await get_mute_new_members_status(chat_id)
             logger.info(f"🔍 [AUTO_MUTE_DEBUG] Статус ручного мута для группы {chat_id}: {manual_mute_enabled}")
             
-            # Проверяем капчу для логирования
+            # БАГ #1 и #3: Проверяем капчу - если пройдена, не мутим автоматически
             captcha_passed = await redis.get(f"captcha_passed:{user.id}:{chat_id}")
             logger.info(f"🔍 [AUTO_MUTE_DEBUG] Проверка капчи для пользователя @{user.username or user.first_name or user.id} [{user.id}]: {captcha_passed}")
+            
+            # БАГ #1: Если капча пройдена, не мутим автоматически (пользователь уже прошел проверку)
+            if captcha_passed:
+                logger.info(f"🔍 [AUTO_MUTE_DEBUG] ✅ Пользователь @{user.username or user.first_name or user.id} [{user.id}] прошел капчу - автомут не применяется")
+                return False
             
             # ИСПРАВЛЕНИЕ: Автомут работает независимо от ручного мута
             # Если это скаммер (свежий аккаунт/подозрительное поведение) - мутим автоматически
@@ -260,7 +265,6 @@ async def auto_mute_scammer_on_join(bot: Bot, event: ChatMemberUpdated) -> bool:
             # ЛОГИРУЕМ АВТОМУТ СКАММЕРА через новую систему журнала
             try:
                 from bot.services.bot_activity_journal.bot_activity_journal_logic import log_auto_mute_scammer
-                from bot.database.session import get_session
                 async with get_session() as db_session:
                     await log_auto_mute_scammer(
                         bot=bot,

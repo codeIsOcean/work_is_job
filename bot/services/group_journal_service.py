@@ -9,9 +9,13 @@ from aiogram import Bot
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, delete
 from bot.database.models import GroupJournalChannel
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
+
+
+def _utcnow_naive():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 async def get_group_journal_channel(
@@ -78,7 +82,7 @@ async def link_journal_channel(
                     journal_type=journal_type,
                     journal_title=journal_title,
                     linked_by_user_id=linked_by_user_id,
-                    linked_at=datetime.utcnow(),
+                    linked_at=_utcnow_naive(),
                     is_active=True
                 )
             )
@@ -91,7 +95,7 @@ async def link_journal_channel(
                 journal_type=journal_type,
                 journal_title=journal_title,
                 linked_by_user_id=linked_by_user_id,
-                linked_at=datetime.utcnow(),
+                linked_at=_utcnow_naive(),
                 is_active=True
             )
             session.add(new_journal)
@@ -182,7 +186,7 @@ async def send_journal_event(
         await session.execute(
             update(GroupJournalChannel)
             .where(GroupJournalChannel.id == journal.id)
-            .values(last_event_at=datetime.utcnow())
+            .values(last_event_at=_utcnow_naive())
         )
         await session.commit()
         

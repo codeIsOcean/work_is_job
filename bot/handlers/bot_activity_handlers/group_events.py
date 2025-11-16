@@ -6,7 +6,7 @@ from aiogram.types import ChatJoinRequest
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 
-from bot.database.models import Group, User, GroupUsers, UserGroup
+from bot.database.models import Group, User, GroupUsers, UserGroup, ChatSettings
 from bot.services.visual_captcha_logic import (
     get_visual_captcha_status,
     generate_visual_captcha,
@@ -68,6 +68,11 @@ async def bot_added_to_group(event: types.ChatMemberUpdated, session: AsyncSessi
                     creator_id = admin.user.id
                     break
 
+            # БАГ #13 ФИКС: Валидация chat_id перед созданием группы
+            if not chat.id or chat.id == 0:
+                logger.error(f"БАГ #13: Попытка создать группу с невалидным chat_id: {chat.id}")
+                raise ValueError(f"Невалидный chat_id: {chat.id}. chat_id не может быть 0 или None")
+            
             group = Group(
                 chat_id=chat.id,
                 title=chat.title,
@@ -77,6 +82,10 @@ async def bot_added_to_group(event: types.ChatMemberUpdated, session: AsyncSessi
             session.add(group)
             await session.flush()
             logger.info(f"Создана новая группа: {chat.title}")
+
+            # Создаём/обновляем настройки чата и сохраняем username (для поиска по deep link)
+            chat_settings = ChatSettings(chat_id=chat.id, username=chat.username)
+            session.add(chat_settings)
 
             # Добавление всех админов в GroupUsers и UserGroup
             for admin in admins:
@@ -99,6 +108,15 @@ async def bot_added_to_group(event: types.ChatMemberUpdated, session: AsyncSessi
             # Обновление названия
             group.title = chat.title
             logger.info(f"Обновлена информация о группе: {chat.title}")
+
+            # Обновляем username в настройках, если группа уже существует
+            result = await session.execute(select(ChatSettings).where(ChatSettings.chat_id == chat.id))
+            chat_settings = result.scalar_one_or_none()
+            if not chat_settings:
+                chat_settings = ChatSettings(chat_id=chat.id, username=chat.username)
+                session.add(chat_settings)
+            else:
+                chat_settings.username = chat.username
 
         # 3. Добавление пользователя, добавившего бота, как админа
         # Сначала убеждаемся, что пользователь существует в таблице User

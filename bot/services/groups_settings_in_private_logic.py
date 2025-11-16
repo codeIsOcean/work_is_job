@@ -9,6 +9,22 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+async def _ensure_chat_settings(session: AsyncSession, chat_id: int) -> ChatSettings:
+    result = await session.execute(
+        select(ChatSettings).where(ChatSettings.chat_id == chat_id)
+    )
+    settings = result.scalar_one_or_none()
+    if settings is None:
+        settings = ChatSettings(chat_id=chat_id)
+        session.add(settings)
+        await session.commit()
+        result = await session.execute(
+            select(ChatSettings).where(ChatSettings.chat_id == chat_id)
+        )
+        settings = result.scalar_one()
+    return settings
+
+
 async def get_admin_groups(user_id: int, session: AsyncSession, bot: Bot = None) -> List[Group]:
     """Возвращает список групп, где пользователь сейчас является админом.
     Если bot не передан — возвращает группы по данным БД без онлайн-проверки.
@@ -332,6 +348,93 @@ async def get_mute_new_members_status(session: AsyncSession, chat_id: int) -> bo
         return False
 
 
+async def get_reaction_mute_settings(session: AsyncSession, chat_id: int) -> tuple[bool, bool]:
+    settings = await _ensure_chat_settings(session, chat_id)
+    return settings.reaction_mute_enabled, settings.reaction_mute_announce_enabled
+
+
+async def set_reaction_mute_enabled(session: AsyncSession, chat_id: int, enabled: bool) -> bool:
+    settings = await _ensure_chat_settings(session, chat_id)
+    settings.reaction_mute_enabled = enabled
+    await session.commit()
+    return settings.reaction_mute_enabled
+
+
+async def set_reaction_mute_announce_enabled(session: AsyncSession, chat_id: int, enabled: bool) -> bool:
+    settings = await _ensure_chat_settings(session, chat_id)
+    settings.reaction_mute_announce_enabled = enabled
+    await session.commit()
+    return settings.reaction_mute_announce_enabled
+
+
+async def get_captcha_settings(session: AsyncSession, chat_id: int) -> ChatSettings:
+    return await _ensure_chat_settings(session, chat_id)
+
+
+async def set_visual_captcha_enabled(session: AsyncSession, chat_id: int, enabled: bool) -> bool:
+    from bot.services.visual_captcha_logic import set_visual_captcha_status, get_visual_captcha_status
+
+    await set_visual_captcha_status(chat_id, enabled)
+    await session.commit()
+    return await get_visual_captcha_status(chat_id)
+
+
+async def set_captcha_join_enabled(session: AsyncSession, chat_id: int, enabled: bool) -> bool:
+    settings = await _ensure_chat_settings(session, chat_id)
+    settings.captcha_join_enabled = enabled
+    await session.commit()
+    return settings.captcha_join_enabled
+
+
+async def set_captcha_invite_enabled(session: AsyncSession, chat_id: int, enabled: bool) -> bool:
+    settings = await _ensure_chat_settings(session, chat_id)
+    settings.captcha_invite_enabled = enabled
+    await session.commit()
+    return settings.captcha_invite_enabled
+
+
+async def set_captcha_timeout(session: AsyncSession, chat_id: int, seconds: int) -> int:
+    settings = await _ensure_chat_settings(session, chat_id)
+    settings.captcha_timeout_seconds = seconds
+    await session.commit()
+    return settings.captcha_timeout_seconds
+
+
+async def set_captcha_message_ttl(session: AsyncSession, chat_id: int, seconds: int) -> int:
+    settings = await _ensure_chat_settings(session, chat_id)
+    settings.captcha_message_ttl_seconds = seconds
+    await session.commit()
+    return settings.captcha_message_ttl_seconds
+
+
+async def set_captcha_flood_threshold(session: AsyncSession, chat_id: int, threshold: int) -> int:
+    settings = await _ensure_chat_settings(session, chat_id)
+    settings.captcha_flood_threshold = threshold
+    await session.commit()
+    return settings.captcha_flood_threshold
+
+
+async def set_captcha_flood_window(session: AsyncSession, chat_id: int, seconds: int) -> int:
+    settings = await _ensure_chat_settings(session, chat_id)
+    settings.captcha_flood_window_seconds = seconds
+    await session.commit()
+    return settings.captcha_flood_window_seconds
+
+
+async def set_captcha_flood_action(session: AsyncSession, chat_id: int, action: str) -> str:
+    settings = await _ensure_chat_settings(session, chat_id)
+    settings.captcha_flood_action = action
+    await session.commit()
+    return settings.captcha_flood_action
+
+
+async def set_system_mute_announcements_enabled(session: AsyncSession, chat_id: int, enabled: bool) -> bool:
+    settings = await _ensure_chat_settings(session, chat_id)
+    settings.system_mute_announcements_enabled = enabled
+    await session.commit()
+    return settings.system_mute_announcements_enabled
+
+
 async def toggle_visual_captcha(session: AsyncSession, chat_id: int) -> bool:
     """Переключает визуальную капчу и возвращает новый статус"""
     try:
@@ -357,6 +460,14 @@ async def toggle_visual_captcha(session: AsyncSession, chat_id: int) -> bool:
             logger.info(f"Создана новая запись визуальной капчи для группы {chat_id}: {new_status}")
 
         await session.commit()
+        
+        # КРИТИЧЕСКИЙ ФИКС: Обновляем Redis после изменения в БД
+        # Это гарантирует, что get_visual_captcha_status() вернет актуальное значение
+        # БЕЗ этого фикса Redis кэш остается устаревшим и капча не отправляется при rejoin
+        from bot.services.visual_captcha_logic import set_visual_captcha_status
+        await set_visual_captcha_status(chat_id, new_status)
+        logger.info(f"✅ Redis обновлен для группы {chat_id}: visual_captcha_enabled={new_status}")
+        
         return new_status
 
     except Exception as e:

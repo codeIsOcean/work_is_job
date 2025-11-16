@@ -212,6 +212,102 @@ async def log_visual_captcha_toggle(
         logger.error(f"❌ Ошибка при логировании переключения визуальной капчи: {e}")
 
 
+async def log_captcha_setting_change(
+    *,
+    bot: Bot,
+    user: User,
+    chat: Chat,
+    setting: str,
+    value: Any,
+    session: Optional[AsyncSession] = None,
+) -> None:
+    try:
+        user_data = {
+            "user_id": user.id,
+            "username": user.username,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+        }
+
+        group_data = {
+            "chat_id": chat.id,
+            "title": chat.title,
+            "username": chat.username,
+        }
+
+        await send_activity_log(
+            bot=bot,
+            event_type="CAPTCHA_SETTING_UPDATE",
+            user_data=user_data,
+            group_data=group_data,
+            additional_info={
+                "setting": setting,
+                "value": value,
+            },
+            status="success",
+            session=session,
+        )
+    except Exception as exc:
+        logger.error("❌ Ошибка при логировании изменения настроек капчи: %s", exc)
+
+
+async def log_system_announcement_toggle(
+    *,
+    bot: Bot,
+    user: User,
+    chat: Chat,
+    enabled: bool,
+    session: Optional[AsyncSession] = None,
+) -> None:
+    await log_captcha_setting_change(
+        bot=bot,
+        user=user,
+        chat=chat,
+        setting="system_mute_announcements_enabled",
+        value="on" if enabled else "off",
+        session=session,
+    )
+
+
+async def log_captcha_manual_action(
+    *,
+    bot: Bot,
+    user: User,
+    target: Chat,
+    chat: Chat,
+    action: str,
+    result: str,
+    session: Optional[AsyncSession] = None,
+) -> None:
+    await send_activity_log(
+        bot=bot,
+        event_type="CAPTCHA_MANUAL_ACTION",
+        user_data={
+            "user_id": target.id,
+            "username": target.username,
+            "first_name": getattr(target, "first_name", None),
+            "last_name": getattr(target, "last_name", None),
+        },
+        group_data={
+            "chat_id": chat.id,
+            "title": chat.title,
+            "username": chat.username,
+        },
+        additional_info={
+            "action": action,
+            "result": result,
+            "admin": {
+                "user_id": user.id,
+                "username": user.username,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+            },
+        },
+        status="success",
+        session=session,
+    )
+
+
 async def log_mute_settings_toggle(
     bot: Bot,
     user: User,

@@ -1,19 +1,30 @@
 # handlers/bot_activity_journal/bot_activity_journal.py
 import logging
 import html
+from datetime import datetime, timezone
+from datetime import timezone as dt_timezone, timedelta
+from types import SimpleNamespace
+
 from aiogram import Router, Bot
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from typing import Optional, Dict, Any
-from datetime import datetime
-import pytz
+from bot.config import LOG_CHANNEL_ID
+from sqlalchemy.ext.asyncio import AsyncSession
+from bot.services.group_journal_service import send_journal_event
+from bot.services.group_display import format_group_link
+from bot.services.captcha_flow_logic import clear_captcha_state, build_restriction_permissions
+from bot.database.session import get_session
 
 logger = logging.getLogger(__name__)
 
 bot_activity_journal_router = Router()
 
-from bot.config import LOG_CHANNEL_ID
-from sqlalchemy.ext.asyncio import AsyncSession
-from bot.services.group_journal_service import send_journal_event
+from bot.services.visual_captcha_logic import (
+    get_group_settings_keyboard,
+    get_group_join_keyboard,
+    clear_join_request_state,
+)
 
 async def send_activity_log(
     bot: Bot,
@@ -101,9 +112,9 @@ async def format_activity_message(
 ) -> str:
     """Форматирует сообщение для журнала активности"""
     
-    # Получаем текущее время в GST
-    gst_tz = pytz.timezone('Asia/Dubai')
-    current_time = datetime.now(gst_tz).strftime("%d %B %Y г. %H:%M:%S GST")
+    # Получаем текущее время в UTC+4 (Asia/Dubai эквивалент)
+    dubai_timezone = dt_timezone(timedelta(hours=4))
+    current_time = datetime.now(dubai_timezone).strftime("%Y-%m-%d %H:%M:%S")
     
     # Формируем информацию о пользователе
     user_id = user_data.get('user_id', 'N/A')
@@ -463,37 +474,130 @@ async def ban_user_callback(callback):
         await callback.answer("❌ Ошибка при бане", show_alert=True)
 
 
-@bot_activity_journal_router.callback_query(lambda c: c.data.startswith("captcha_skip_mute_"))
-async def captcha_skip_mute_callback(callback):
-    """Обработчик кнопки 'Пропустить с мутом' после неудачной капчи"""
+def _format_user_link(entity) -> str:
+    username = getattr(entity, "username", None)
+    if username:
+        return f"@{username}"
+    full_name = getattr(entity, "full_name", None) or getattr(entity, "first_name", None) or getattr(entity, "last_name", None) or str(entity.id)
+    return f'<a href="tg://user?id={entity.id}">{html.escape(full_name)}</a>'
+
+
+def _build_action_message(admin, target, chat, action: str, result: str) -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    admin_link = _format_user_link(admin)
+    target_link = _format_user_link(target)
+    group_link = f"{format_group_link(chat)} ({chat.id})"
+    return (
+        "📝 <b>Действие администратора</b>\n\n"
+        f"👮 {admin_link}\n"
+        f"👤 {target_link}\n"
+        f"🏢 {group_link}\n"
+        f"⚙️ Действие: {html.escape(action)}\n"
+        f"📄 Результат: {html.escape(result)}\n"
+        f"⏰ {timestamp}"
+    )
+
+
+async def _approve_join(bot, chat_id: int, user_id: int) -> None:
+    try:
+        await bot.approve_chat_join_request(chat_id=chat_id, user_id=user_id)
+    except TelegramBadRequest as exc:
+        if "HIDE_REQUESTER_MISSING" not in str(exc):
+            raise
+
+
+async def _decline_join(bot, chat_id: int, user_id: int) -> None:
+    try:
+        await bot.decline_chat_join_request(chat_id=chat_id, user_id=user_id)
+    except TelegramBadRequest as exc:
+        if "HIDE_REQUESTER_MISSING" not in str(exc):
+            raise
+
+
+async def _handle_captcha_decision(callback, action: str, mute: bool = False, reject: bool = False):
     try:
         user_id, group_id = map(int, callback.data.split("_")[-2:])
-        # TODO: добавить автоматическое добавление с мутом
-        await callback.answer("🔇 Пользователь добавлен и замьючен (TODO)", show_alert=True)
-    except Exception as e:
-        logger.error(f"Ошибка при обработке captcha_skip_mute: {e}")
-        await callback.answer("❌ Ошибка при обработке", show_alert=True)
+        chat = await callback.bot.get_chat(group_id)
+        try:
+            member = await callback.bot.get_chat_member(group_id, user_id)
+            target = member.user
+        except TelegramBadRequest:
+            target = await callback.bot.get_chat(user_id)
+        except Exception:
+            target = SimpleNamespace(
+                id=user_id,
+                username=None,
+                first_name=None,
+                last_name=None,
+                full_name=None,
+            )
+
+        if reject:
+            await _decline_join(callback.bot, group_id, user_id)
+            result_text = "Заявка отклонена"
+        else:
+            await _approve_join(callback.bot, group_id, user_id)
+            result_text = "Пользователь допущен"
+            if mute:
+                try:
+                    await callback.bot.restrict_chat_member(
+                        chat_id=group_id,
+                        user_id=user_id,
+                        permissions=build_restriction_permissions(),
+                        until_date=None,
+                    )
+                    result_text = "Пользователь допущен и замьючен"
+                except TelegramBadRequest as exc:
+                    logger.warning("Не удалось применить мут при ручном действии: %s", exc)
+
+        await clear_captcha_state(chat_id=group_id, user_id=user_id)
+        await clear_join_request_state(user_id, chat)
+
+        from bot.services.bot_activity_journal.bot_activity_journal_logic import log_captcha_manual_action
+
+        async with get_session() as session:
+            await log_captcha_manual_action(
+                bot=callback.bot,
+                user=callback.from_user,
+                target=target,
+                chat=chat,
+                action=action,
+                result=result_text,
+                session=session,
+            )
+
+            message = _build_action_message(callback.from_user, target, chat, action, result_text)
+            await send_journal_event(
+                bot=callback.bot,
+                session=session,
+                group_id=group_id,
+                message_text=message,
+            )
+
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+        await callback.answer()
+    except Exception as exc:
+        logger.error("Ошибка при обработке действия журнала: %s", exc, exc_info=True)
+        try:
+            await callback.answer()
+        except Exception:
+            pass
+
+
+@bot_activity_journal_router.callback_query(lambda c: c.data.startswith("captcha_skip_mute_"))
+async def captcha_skip_mute_callback(callback):
+    await _handle_captcha_decision(callback, action="Пропустить с мьютом", mute=True)
 
 
 @bot_activity_journal_router.callback_query(lambda c: c.data.startswith("captcha_skip_") and not c.data.startswith("captcha_skip_mute_"))
 async def captcha_skip_callback(callback):
-    """Обработчик кнопки 'Пропустить' после неудачной капчи"""
-    try:
-        user_id, group_id = map(int, callback.data.split("_")[-2:])
-        # TODO: добавить автоматическое одобрение без мута
-        await callback.answer("✅ Пользователь пропущен (TODO)", show_alert=True)
-    except Exception as e:
-        logger.error(f"Ошибка при обработке captcha_skip: {e}")
-        await callback.answer("❌ Ошибка при обработке", show_alert=True)
+    await _handle_captcha_decision(callback, action="Пропустить", mute=False)
 
 
 @bot_activity_journal_router.callback_query(lambda c: c.data.startswith("captcha_cancel_"))
 async def captcha_cancel_callback(callback):
-    """Обработчик кнопки 'Отменить' после неудачной капчи"""
-    try:
-        user_id, group_id = map(int, callback.data.split("_")[-2:])
-        # TODO: добавить отмену рассмотрения заявки
-        await callback.answer("⛔ Действие отменено (TODO)", show_alert=True)
-    except Exception as e:
-        logger.error(f"Ошибка при обработке captcha_cancel: {e}")
-        await callback.answer("❌ Ошибка при обработке", show_alert=True)
+    await _handle_captcha_decision(callback, action="Отменить", reject=True)
