@@ -42,6 +42,9 @@ jobs:
             -e "ssh -o StrictHostKeyChecking=no" \
             ./ ${{ secrets.PROD_SERVER_USER }}@${{ secrets.PROD_SERVER_HOST }}:/opt/jobs_inDubai_prod/
           # ФИКС: Убеждаемся, что nginx конфиг синхронизирован
+          # Создаем директорию nginx на сервере, если её нет
+          ssh -o StrictHostKeyChecking=no ${{ secrets.PROD_SERVER_USER }}@${{ secrets.PROD_SERVER_HOST }} "mkdir -p /opt/jobs_inDubai_prod/nginx" || true
+          # Синхронизируем nginx конфиг
           rsync -az \
             -e "ssh -o StrictHostKeyChecking=no" \
             ./nginx/nginx.prod.conf ${{ secrets.PROD_SERVER_USER }}@${{ secrets.PROD_SERVER_HOST }}:/opt/jobs_inDubai_prod/nginx/nginx.prod.conf || true
@@ -70,11 +73,36 @@ jobs:
 
             # ФИКС: Проверяем наличие nginx конфига
             if [ ! -f nginx/nginx.prod.conf ]; then
-              echo "ERROR: nginx/nginx.prod.conf is missing!"
+              echo "WARNING: nginx/nginx.prod.conf is missing!"
               echo "Creating nginx directory if needed..."
               mkdir -p nginx
-              echo "Please ensure nginx/nginx.prod.conf exists on the server"
-              exit 1
+              echo "Attempting to create default nginx config..."
+              # Создаем базовый nginx конфиг, если файл отсутствует
+              cat > nginx/nginx.prod.conf << 'EOF'
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream bot_backend {
+        server bot_prod:8080;
+    }
+
+    server {
+        listen 80;
+        server_name _;
+
+        location / {
+            proxy_pass http://bot_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+}
+EOF
+              echo "Default nginx config created. Please update it if needed."
             fi
             
             # ФИКС: Принудительно останавливаем и удаляем контейнеры
