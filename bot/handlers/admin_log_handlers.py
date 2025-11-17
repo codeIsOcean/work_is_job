@@ -7,6 +7,7 @@ from aiogram.filters import Command
 from datetime import datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from bot.services.redis_conn import redis
 from bot.database.session import get_session
