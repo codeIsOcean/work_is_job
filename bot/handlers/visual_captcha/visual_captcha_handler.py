@@ -278,6 +278,7 @@ async def process_visual_captcha_deep_link(message: Message, bot: Bot, state: FS
 
         # Отправляем изображение-капчу с повторными попытками
         captcha_sent = False
+        network_error = None  # Инициализируем переменную для логирования
         for attempt in range(3):  # 3 попытки
             try:
                 captcha_msg = await message.answer_photo(
@@ -307,7 +308,8 @@ async def process_visual_captcha_deep_link(message: Message, bot: Bot, state: FS
                     continue
 
         if not captcha_sent:
-            logger.error(f"❌ Ошибка сети при отправке капчи: {network_error}")
+            error_msg = str(network_error) if network_error else "Неизвестная ошибка"
+            logger.error(f"❌ Ошибка сети при отправке капчи: {error_msg}")
             # Фолбэк — текстовый код
             try:
                 fallback_msg = await message.answer(
