@@ -44,10 +44,14 @@ jobs:
           # ФИКС: Убеждаемся, что nginx конфиг синхронизирован
           # Создаем директорию nginx на сервере, если её нет
           ssh -o StrictHostKeyChecking=no ${{ secrets.PROD_SERVER_USER }}@${{ secrets.PROD_SERVER_HOST }} "mkdir -p /opt/jobs_inDubai_prod/nginx" || true
+          # Удаляем nginx.prod.conf, если он существует как директория
+          ssh -o StrictHostKeyChecking=no ${{ secrets.PROD_SERVER_USER }}@${{ secrets.PROD_SERVER_HOST }} "if [ -d /opt/jobs_inDubai_prod/nginx/nginx.prod.conf ]; then rm -rf /opt/jobs_inDubai_prod/nginx/nginx.prod.conf; fi" || true
           # Синхронизируем nginx конфиг
           rsync -az \
             -e "ssh -o StrictHostKeyChecking=no" \
             ./nginx/nginx.prod.conf ${{ secrets.PROD_SERVER_USER }}@${{ secrets.PROD_SERVER_HOST }}:/opt/jobs_inDubai_prod/nginx/nginx.prod.conf || true
+          # Проверяем, что файл создан правильно
+          ssh -o StrictHostKeyChecking=no ${{ secrets.PROD_SERVER_USER }}@${{ secrets.PROD_SERVER_HOST }} "if [ ! -f /opt/jobs_inDubai_prod/nginx/nginx.prod.conf ]; then echo 'ERROR: nginx.prod.conf не создан как файл!'; exit 1; fi" || true
           rm -f ~/.ssh/id_rsa
 
       - name: Deploy on production server
@@ -71,12 +75,22 @@ jobs:
               COMPOSE="docker-compose"
             fi
 
-            # ФИКС: Проверяем наличие nginx конфига
+            # ФИКС: Проверяем и исправляем nginx конфиг
+            echo "🔍 Проверяем nginx конфиг..."
+            
+            # Если nginx/nginx.prod.conf существует как директория - удаляем её
+            if [ -d nginx/nginx.prod.conf ]; then
+              echo "⚠️ nginx/nginx.prod.conf существует как директория, удаляем..."
+              rm -rf nginx/nginx.prod.conf
+            fi
+            
+            # Создаем директорию nginx, если её нет
+            mkdir -p nginx
+            
+            # Проверяем наличие файла
             if [ ! -f nginx/nginx.prod.conf ]; then
               echo "WARNING: nginx/nginx.prod.conf is missing!"
-              echo "Creating nginx directory if needed..."
-              mkdir -p nginx
-              echo "Attempting to create default nginx config..."
+              echo "Creating default nginx config..."
               # Создаем базовый nginx конфиг, если файл отсутствует
               cat > nginx/nginx.prod.conf << 'EOF'
 events {
