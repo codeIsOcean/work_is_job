@@ -114,10 +114,26 @@ EOF
             # ФИКС: Удаляем сеть, если она осталась
             docker network rm jobs_indubai_prod_prod_network 2>/dev/null || true
             
-            # ФИКС: Ждем полного удаления контейнеров
+            # ФИКС: Очищаем неиспользуемые ресурсы Docker
+            docker system prune -f || true
+            
+            # ФИКС: Ждем полного удаления контейнеров и очистки
+            sleep 3
+            
+            # ФИКС: Убеждаемся, что все контейнеры удалены (безопасный способ)
+            for container in postgres_prod redis_prod bot_prod nginx_prod; do
+              docker rm -f $container 2>/dev/null || true
+            done
+            
+            # ФИКС: Ждем еще немного перед запуском
             sleep 2
             
             # Запускаем контейнеры заново
             $COMPOSE -f docker-compose.prod.yml up -d --build
+            
+            # ФИКС: Ждем запуска контейнеров
+            sleep 5
+            
+            # Проверяем статус
             $COMPOSE -f docker-compose.prod.yml ps
 
