@@ -170,14 +170,52 @@ EOF
             
             # ФИКС: Ждем еще немного перед запуском
             sleep 3
+            
+            # ФИКС: Проверяем и создаем volumes, если их нет
+            echo "📦 Проверяем volumes..."
+            docker volume ls | grep -q "jobs_indubai_prod_postgres_prod_data" || docker volume create jobs_indubai_prod_postgres_prod_data || true
+            docker volume ls | grep -q "jobs_indubai_prod_redis_prod_data" || docker volume create jobs_indubai_prod_redis_prod_data || true
+            echo "✅ Volumes готовы"
+            
             echo "✅ Очистка завершена, запускаем контейнеры..."
             
             # Запускаем контейнеры заново
+            echo "🚀 Запускаем контейнеры..."
             $COMPOSE -f docker-compose.prod.yml up -d --build
             
             # ФИКС: Ждем запуска контейнеров
-            sleep 5
+            echo "⏳ Ждем запуска контейнеров (10 секунд)..."
+            sleep 10
+            
+            # ФИКС: Проверяем логи контейнеров, если они завершились
+            echo "🔍 Проверяем статус контейнеров..."
+            for container in postgres_prod redis_prod; do
+              status=$(docker ps -a --filter "name=$container" --format "{{.Status}}" 2>/dev/null || echo "not found")
+              echo "  Контейнер $container: $status"
+              if echo "$status" | grep -q "Exited"; then
+                echo "  ⚠️ Контейнер $container завершился! Логи:"
+                docker logs --tail 50 $container 2>&1 || true
+              fi
+            done
             
             # Проверяем статус
+            echo "📊 Статус всех контейнеров:"
             $COMPOSE -f docker-compose.prod.yml ps
+            
+            # ФИКС: Проверяем, что контейнеры работают
+            echo "🔍 Детальная проверка контейнеров:"
+            docker ps --filter "name=prod" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" || true
+            
+            # ФИКС: Если контейнеры не запущены, показываем ошибки
+            if ! docker ps --filter "name=postgres_prod" --format "{{.Names}}" | grep -q "postgres_prod"; then
+              echo "❌ ОШИБКА: postgres_prod не запущен!"
+              docker logs postgres_prod --tail 100 2>&1 || true
+              exit 1
+            fi
+            
+            if ! docker ps --filter "name=redis_prod" --format "{{.Names}}" | grep -q "redis_prod"; then
+              echo "❌ ОШИБКА: redis_prod не запущен!"
+              docker logs redis_prod --tail 100 2>&1 || true
+              exit 1
+            fi
 
