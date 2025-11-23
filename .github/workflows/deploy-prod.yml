@@ -78,28 +78,28 @@ jobs:
               rm -rf /opt/jobs_inDubai_prod/nginx/nginx.prod.conf
               # Создаем базовый конфиг
               cat > /opt/jobs_inDubai_prod/nginx/nginx.prod.conf << 'NGINXEOF'
-events {
-    worker_connections 1024;
-}
+              events {
+                  worker_connections 1024;
+              }
 
-http {
-    upstream bot_backend {
-        server bot_prod:8080;
-    }
+              http {
+                  upstream bot_backend {
+                      server bot_prod:8080;
+                  }
 
-    server {
-        listen 80;
-        server_name _;
+                  server {
+                      listen 80;
+                      server_name _;
 
-        location / {
-            proxy_pass http://bot_backend;
-            proxy_set_header Host \$host;
-            proxy_set_header X-Real-IP \$remote_addr;
-            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto \$scheme;
-        }
-    }
-}
+                      location / {
+                          proxy_pass http://bot_backend;
+                          proxy_set_header Host \$host;
+                          proxy_set_header X-Real-IP \$remote_addr;
+                          proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                          proxy_set_header X-Forwarded-Proto \$scheme;
+                      }
+                  }
+              }
 NGINXEOF
             fi
             if [ ! -f /opt/jobs_inDubai_prod/nginx/nginx.prod.conf ]; then
@@ -190,59 +190,59 @@ NGINXEOF
             if [ ! -f nginx/nginx.prod.conf ]; then
               echo "📝 Создаем nginx.prod.conf..."
               cat > nginx/nginx.prod.conf << 'NGINXCONF'
-events {
-    worker_connections 1024;
-}
+              events {
+                  worker_connections 1024;
+              }
 
-http {
-    upstream bot_backend {
-        server bot_prod:8080;
-    }
+              http {
+                  upstream bot_backend {
+                      server bot_prod:8080;
+                  }
 
-    server {
-        listen 80;
-        server_name _;
+                  server {
+                      listen 80;
+                      server_name _;
 
-        location / {
-            proxy_pass http://bot_backend;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-        }
-    }
-}
+                      location / {
+                          proxy_pass http://bot_backend;
+                          proxy_set_header Host $host;
+                          proxy_set_header X-Real-IP $remote_addr;
+                          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                          proxy_set_header X-Forwarded-Proto $scheme;
+                      }
+                  }
+              }
 NGINXCONF
             fi
-            
+
             # ФИНАЛЬНАЯ проверка: убеждаемся, что это файл, а не директория
             if [ -d nginx/nginx.prod.conf ]; then
               echo "❌ КРИТИЧЕСКАЯ ОШИБКА: nginx.prod.conf все еще является директорией!"
               echo "Удаляем директорию и создаем файл..."
               rm -rf nginx/nginx.prod.conf
               cat > nginx/nginx.prod.conf << 'NGINXCONF2'
-events {
-    worker_connections 1024;
-}
+              events {
+                  worker_connections 1024;
+              }
 
-http {
-    upstream bot_backend {
-        server bot_prod:8080;
-    }
+              http {
+                  upstream bot_backend {
+                      server bot_prod:8080;
+                  }
 
-    server {
-        listen 80;
-        server_name _;
+                  server {
+                      listen 80;
+                      server_name _;
 
-        location / {
-            proxy_pass http://bot_backend;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-        }
-    }
-}
+                      location / {
+                          proxy_pass http://bot_backend;
+                          proxy_set_header Host $host;
+                          proxy_set_header X-Real-IP $remote_addr;
+                          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                          proxy_set_header X-Forwarded-Proto $scheme;
+                      }
+                  }
+              }
 NGINXCONF2
             fi
             
@@ -281,28 +281,28 @@ NGINXCONF2
               echo "Creating default nginx config..."
               # Создаем базовый nginx конфиг, если файл отсутствует
               cat > nginx/nginx.prod.conf << 'EOF'
-events {
-    worker_connections 1024;
-}
+              events {
+                  worker_connections 1024;
+              }
 
-http {
-    upstream bot_backend {
-        server bot_prod:8080;
-    }
+              http {
+                  upstream bot_backend {
+                      server bot_prod:8080;
+                  }
 
-    server {
-        listen 80;
-        server_name _;
+                  server {
+                      listen 80;
+                      server_name _;
 
-        location / {
-            proxy_pass http://bot_backend;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-        }
-    }
-}
+                      location / {
+                          proxy_pass http://bot_backend;
+                          proxy_set_header Host $host;
+                          proxy_set_header X-Real-IP $remote_addr;
+                          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                          proxy_set_header X-Forwarded-Proto $scheme;
+                      }
+                  }
+              }
 EOF
               echo "Default nginx config created. Please update it if needed."
             fi
