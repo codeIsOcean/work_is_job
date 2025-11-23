@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from aiogram import Bot
 from aiogram.types import Message, Chat, User as TgUser
 
-from bot.services.redis_conn import redis
+from bot.services import redis_conn
 
 
 @pytest.mark.asyncio
@@ -50,22 +50,22 @@ async def test_reminders_cancelled_on_start():
     
     # Сохраняем напоминание
     reminder_key = f"captcha_reminder_msgs:{user_id}"
-    await redis.setex(reminder_key, 600, "789,790")
+    await redis_conn.redis.setex(reminder_key, 600, "789,790")
     
     # Симулируем начало решения капчи
-    await redis.delete(reminder_key)
-    await redis.setex(f"captcha_started:{user_id}:{group_name}", 600, "1")
+    await redis_conn.redis.delete(reminder_key)
+    await redis_conn.redis.setex(f"captcha_started:{user_id}:{group_name}", 600, "1")
     
     # Проверяем, что напоминания удалены
-    reminder = await redis.get(reminder_key)
+    reminder = await redis_conn.redis.get(reminder_key)
     assert reminder is None
     
     # Проверяем, что флаг "начал решать" установлен
-    started = await redis.get(f"captcha_started:{user_id}:{group_name}")
+    started = await redis_conn.redis.get(f"captcha_started:{user_id}:{group_name}")
     assert started == "1"
     
     # Очистка
-    await redis.delete(f"captcha_started:{user_id}:{group_name}")
+    await redis_conn.redis.delete(f"captcha_started:{user_id}:{group_name}")
 
 
 @pytest.mark.asyncio
@@ -78,10 +78,10 @@ async def test_duplicate_events_ignored():
     # Первое событие
     event_key = f"chat_member_event:{chat_id}:{user_id}"
     event_signature = f"{update_id}:left:member"
-    await redis.setex(event_key, 60, event_signature)
+    await redis_conn.redis.setex(event_key, 60, event_signature)
     
     # Проверяем, что событие сохранено
-    stored = await redis.get(event_key)
+    stored = await redis_conn.redis.get(event_key)
     assert stored is not None
     assert stored.decode('utf-8') if isinstance(stored, bytes) else stored == event_signature
     
@@ -89,5 +89,5 @@ async def test_duplicate_events_ignored():
     # (в реальном коде проверка происходит в обработчике)
     
     # Очистка
-    await redis.delete(event_key)
+    await redis_conn.redis.delete(event_key)
 

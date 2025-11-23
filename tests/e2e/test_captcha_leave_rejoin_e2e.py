@@ -378,10 +378,14 @@ async def test_rejoin_captcha_with_real_redis_and_db(
     from bot.database.models import Group, ChatSettings, CaptchaSettings
     from bot.handlers.visual_captcha.visual_captcha_handler import handle_member_status_change
     from bot.services import redis_conn as redis_module
+    from bot.services import visual_captcha_logic as vc_logic
     
-    # Patch redis to use real Redis client
+    # Patch redis to use real Redis client consistently in all captcha logic
     original_redis = redis_module.redis
+    original_vc_redis = getattr(vc_logic, "redis", None)
     redis_module.redis = redis_client_e2e
+    if hasattr(vc_logic, "redis"):
+        vc_logic.redis = redis_client_e2e
     
     user_id = 999888
     chat_id = -1001234567890
@@ -506,5 +510,7 @@ async def test_rejoin_captcha_with_real_redis_and_db(
         # Restore patched redis
         try:
             redis_module.redis = original_redis
+            if original_vc_redis is not None:
+                vc_logic.redis = original_vc_redis
         except Exception:
             pass
