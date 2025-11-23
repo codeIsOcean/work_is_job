@@ -82,7 +82,7 @@ jobs:
           pytest tests/ -q --junitxml=reports/junit.xml
 
       - name: Build docker image
-        run: docker build -t work_is_job:ci .
+        run: docker build -t work_is_job:ci -f Dockerfile.test .
 
       - name: Upload test report
         uses: actions/upload-artifact@v4
