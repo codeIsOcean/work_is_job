@@ -73,7 +73,7 @@ jobs:
       - name: Run tests
         run: |
           mkdir -p reports
-          pytest -q --junitxml=reports/junit.xml
+          pytest tests/ -q --junitxml=reports/junit.xml
 
       - name: Build docker image
         run: docker build -t work_is_job:ci .
