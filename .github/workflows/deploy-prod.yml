@@ -42,16 +42,38 @@ jobs:
             -e "ssh -o StrictHostKeyChecking=no" \
             ./ ${{ secrets.PROD_SERVER_USER }}@${{ secrets.PROD_SERVER_HOST }}:/opt/jobs_inDubai_prod/
           # ФИКС: Убеждаемся, что nginx конфиг синхронизирован
+          echo "🔧 Исправляем nginx конфиг на сервере..."
           # Создаем директорию nginx на сервере, если её нет
           ssh -o StrictHostKeyChecking=no ${{ secrets.PROD_SERVER_USER }}@${{ secrets.PROD_SERVER_HOST }} "mkdir -p /opt/jobs_inDubai_prod/nginx" || true
-          # Удаляем nginx.prod.conf, если он существует как директория
-          ssh -o StrictHostKeyChecking=no ${{ secrets.PROD_SERVER_USER }}@${{ secrets.PROD_SERVER_HOST }} "if [ -d /opt/jobs_inDubai_prod/nginx/nginx.prod.conf ]; then rm -rf /opt/jobs_inDubai_prod/nginx/nginx.prod.conf; fi" || true
+          # КРИТИЧНО: Удаляем nginx.prod.conf, если он существует как директория ИЛИ как файл (пересоздадим)
+          ssh -o StrictHostKeyChecking=no ${{ secrets.PROD_SERVER_USER }}@${{ secrets.PROD_SERVER_HOST }} "
+            if [ -d /opt/jobs_inDubai_prod/nginx/nginx.prod.conf ]; then
+              echo 'Удаляем директорию nginx.prod.conf...'
+              rm -rf /opt/jobs_inDubai_prod/nginx/nginx.prod.conf
+            fi
+            if [ -f /opt/jobs_inDubai_prod/nginx/nginx.prod.conf ]; then
+              echo 'Удаляем старый файл nginx.prod.conf...'
+              rm -f /opt/jobs_inDubai_prod/nginx/nginx.prod.conf
+            fi
+          " || true
           # Синхронизируем nginx конфиг
+          echo "📤 Синхронизируем nginx конфиг..."
           rsync -az \
             -e "ssh -o StrictHostKeyChecking=no" \
-            ./nginx/nginx.prod.conf ${{ secrets.PROD_SERVER_USER }}@${{ secrets.PROD_SERVER_HOST }}:/opt/jobs_inDubai_prod/nginx/nginx.prod.conf || true
-          # Проверяем, что файл создан правильно
-          ssh -o StrictHostKeyChecking=no ${{ secrets.PROD_SERVER_USER }}@${{ secrets.PROD_SERVER_HOST }} "if [ ! -f /opt/jobs_inDubai_prod/nginx/nginx.prod.conf ]; then echo 'ERROR: nginx.prod.conf не создан как файл!'; exit 1; fi" || true
+            ./nginx/nginx.prod.conf ${{ secrets.PROD_SERVER_USER }}@${{ secrets.PROD_SERVER_HOST }}:/opt/jobs_inDubai_prod/nginx/nginx.prod.conf
+          # КРИТИЧНО: Проверяем, что файл создан правильно (БЕЗ || true, чтобы скрипт упал при ошибке)
+          echo "✅ Проверяем nginx конфиг..."
+          ssh -o StrictHostKeyChecking=no ${{ secrets.PROD_SERVER_USER }}@${{ secrets.PROD_SERVER_HOST }} "
+            if [ ! -f /opt/jobs_inDubai_prod/nginx/nginx.prod.conf ]; then
+              echo '❌ ОШИБКА: nginx.prod.conf не создан как файл!'
+              exit 1
+            fi
+            if [ -d /opt/jobs_inDubai_prod/nginx/nginx.prod.conf ]; then
+              echo '❌ ОШИБКА: nginx.prod.conf все еще является директорией!'
+              exit 1
+            fi
+            echo '✅ nginx.prod.conf создан правильно как файл'
+          "
           rm -f ~/.ssh/id_rsa
 
       - name: Deploy on production server
@@ -75,17 +97,23 @@ jobs:
               COMPOSE="docker-compose"
             fi
 
-            # ФИКС: Проверяем и исправляем nginx конфиг
-            echo "🔍 Проверяем nginx конфиг..."
+            # КРИТИЧНО: Проверяем и исправляем nginx конфиг ПЕРЕД запуском docker compose
+            echo "🔍 Проверяем nginx конфиг перед запуском..."
             
-            # Если nginx/nginx.prod.conf существует как директория - удаляем её
+            # Создаем директорию nginx, если её нет
+            mkdir -p nginx
+            
+            # КРИТИЧНО: Если nginx/nginx.prod.conf существует как директория - удаляем её
             if [ -d nginx/nginx.prod.conf ]; then
               echo "⚠️ nginx/nginx.prod.conf существует как директория, удаляем..."
               rm -rf nginx/nginx.prod.conf
             fi
             
-            # Создаем директорию nginx, если её нет
-            mkdir -p nginx
+            # КРИТИЧНО: Проверяем, что nginx.prod.conf - это файл, а не директория
+            if [ -d nginx/nginx.prod.conf ]; then
+              echo "❌ ОШИБКА: nginx/nginx.prod.conf все еще является директорией после удаления!"
+              exit 1
+            fi
             
             # Проверяем наличие файла
             if [ ! -f nginx/nginx.prod.conf ]; then
@@ -178,6 +206,43 @@ EOF
             echo "✅ Volumes готовы"
             
             echo "✅ Очистка завершена, запускаем контейнеры..."
+            
+            # КРИТИЧНО: Финальная проверка nginx конфига перед запуском
+            echo "🔍 Финальная проверка nginx конфига..."
+            if [ -d nginx/nginx.prod.conf ]; then
+              echo "❌ КРИТИЧЕСКАЯ ОШИБКА: nginx/nginx.prod.conf является директорией! Удаляем и создаем файл..."
+              rm -rf nginx/nginx.prod.conf
+              # Создаем базовый конфиг
+              cat > nginx/nginx.prod.conf << 'EOF'
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream bot_backend {
+        server bot_prod:8080;
+    }
+
+    server {
+        listen 80;
+        server_name _;
+
+        location / {
+            proxy_pass http://bot_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+}
+EOF
+            fi
+            if [ ! -f nginx/nginx.prod.conf ]; then
+              echo "❌ КРИТИЧЕСКАЯ ОШИБКА: nginx/nginx.prod.conf не существует как файл!"
+              exit 1
+            fi
+            echo "✅ nginx конфиг готов"
             
             # Запускаем контейнеры заново
             echo "🚀 Запускаем контейнеры..."
