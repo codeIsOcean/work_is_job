@@ -111,6 +111,42 @@ NGINXEOF
           "
           rm -f ~/.ssh/id_rsa
 
+      - name: Clean up Docker containers on server (BEFORE deploy)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PROD_SERVER_HOST }}
+          username: ${{ secrets.PROD_SERVER_USER }}
+          key: ${{ secrets.PROD_SERVER_SSH_KEY }}
+          script: |
+            echo "🧹 Очищаем Docker контейнеры на сервере ПЕРЕД деплоем..."
+            cd /opt/jobs_inDubai_prod || exit 1
+            
+            # ПРИНУДИТЕЛЬНО удаляем все конфликтующие контейнеры
+            for container in postgres_prod redis_prod bot_prod nginx_prod; do
+              echo "  Удаляем контейнер: $container"
+              docker stop $container 2>/dev/null || true
+              docker rm -f $container 2>/dev/null || true
+              
+              # Удаляем по ID, если контейнер все еще существует
+              container_ids=$(docker ps -a --filter "name=^${container}$" --format "{{.ID}}" 2>/dev/null || true)
+              if [ -n "$container_ids" ]; then
+                echo "    Найдены контейнеры с именем $container, удаляем по ID..."
+                for cid in $container_ids; do
+                  echo "      Удаляем контейнер ID: $cid"
+                  docker rm -f $cid 2>/dev/null || true
+                done
+              fi
+            done
+            
+            # Удаляем сеть
+            docker network rm jobs_indubai_prod_prod_network 2>/dev/null || true
+            
+            # Удаляем все мертвые контейнеры
+            docker container prune -f || true
+            
+            echo "✅ Очистка завершена"
+            sleep 2
+
       - name: Deploy on production server
         uses: appleboy/ssh-action@v1.0.3
         with:

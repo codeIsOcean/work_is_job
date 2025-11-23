@@ -9,6 +9,18 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+# КРИТИЧНО: Устанавливаем DATABASE_URL ДО импорта bot.config
+# чтобы избежать ошибки "DATABASE_URL не установлен!"
+if not os.getenv("DATABASE_URL"):
+    # Используем переменные из окружения или значения по умолчанию
+    host = os.getenv("POSTGRES_HOST", "127.0.0.1")
+    port = os.getenv("POSTGRES_PORT", "5432")
+    db_name = os.getenv("POSTGRES_DB", "testdb")
+    user = os.getenv("POSTGRES_USER", "testuser")
+    password = os.getenv("POSTGRES_PASSWORD", "testpass")
+    database_url = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{db_name}"
+    os.environ["DATABASE_URL"] = database_url
+
 # Гарантируем, что пакет bot доступен для импортов из тестов
 # (добавляем корень проекта в sys.path независимо от того, откуда запущен pytest).
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
