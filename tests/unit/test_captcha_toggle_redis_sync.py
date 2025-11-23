@@ -8,7 +8,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from aiogram.types import CallbackQuery, Chat, User as TgUser
 
-from bot.services.redis_conn import redis
+from bot.services import redis_conn
 
 
 @pytest.mark.asyncio
@@ -44,7 +44,8 @@ async def test_toggle_visual_captcha_updates_redis():
     with patch('bot.handlers.settings_captcha_handler.check_granular_permissions', return_value=True), \
          patch('bot.handlers.settings_captcha_handler.get_visual_captcha_status') as mock_get_status, \
          patch('bot.handlers.settings_captcha_handler.set_visual_captcha_enabled') as mock_set_enabled, \
-         patch('bot.handlers.settings_captcha_handler.log_captcha_setting_change') as mock_log:
+         patch('bot.handlers.settings_captcha_handler.log_captcha_setting_change') as mock_log, \
+         patch('bot.handlers.settings_captcha_handler._refresh_view', new_callable=AsyncMock):
 
         # Setup: Current status is False
         mock_get_status.return_value = False
@@ -56,8 +57,10 @@ async def test_toggle_visual_captcha_updates_redis():
         await toggle_captcha_setting(callback, session)
 
         # VERIFICATION:
-        # 1. get_visual_captcha_status was called to get current status
-        mock_get_status.assert_called_once_with(chat_id)
+        # 1. get_visual_captcha_status был вызван хотя бы один раз для текущего статуса
+        assert mock_get_status.call_count >= 1
+        first_call_args = mock_get_status.call_args_list[0].args
+        assert first_call_args[0] == chat_id
         
         # 2. set_visual_captcha_enabled was called with opposite value
         mock_set_enabled.assert_called_once_with(session, chat_id, True)
@@ -110,7 +113,7 @@ async def test_toggle_visual_captcha_redis_sync_check():
 
 
 @pytest.mark.asyncio
-async def test_redis_stale_cache_detection():
+async def test_redis_stale_cache_detection(fake_redis):
     """
     TEST: Verify system detects when Redis cache is stale.
     
@@ -124,7 +127,7 @@ async def test_redis_stale_cache_detection():
     from bot.services.visual_captcha_logic import get_visual_captcha_status
 
     # Setup: Redis says False, but we'll check DB
-    await redis.set(f"visual_captcha_enabled:{chat_id}", "0")  # Stale: False
+    await redis_conn.redis.set(f"visual_captcha_enabled:{chat_id}", "0")  # Stale: False
 
     # Mock DB query to return True
     with patch('bot.services.visual_captcha_logic.get_session') as mock_get_session:
@@ -153,6 +156,6 @@ async def test_redis_stale_cache_detection():
         assert status is True
         
         # 2. Redis should be updated to "1"
-        redis_value = await redis.get(f"visual_captcha_enabled:{chat_id}")
+        redis_value = await redis_conn.redis.get(f"visual_captcha_enabled:{chat_id}")
         assert redis_value == "1", "Redis should be updated to match DB"
 

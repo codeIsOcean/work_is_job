@@ -15,6 +15,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 
 from bot.services.redis_conn import redis
+import inspect
+
+
+async def _maybe_await(result):
+    """Helper to support both real AsyncSession and MagicMock in tests."""
+    if inspect.isawaitable(result):
+        return await result
+    return result
 from bot.database.models import CaptchaSettings, User, ScammerTracker
 from datetime import datetime, timedelta
 import time
@@ -769,18 +777,29 @@ async def set_visual_captcha_status(chat_id: int, enabled: bool) -> None:
 
 
 async def get_visual_captcha_status(chat_id: int) -> bool:
-    """Статус визуальной капчи."""
-    cached = await redis.get(f"visual_captcha_enabled:{chat_id}")
-    if cached is not None:
-        return cached == "1"
+    """Статус визуальной капчи с защитой от устаревшего Redis-кэша.
 
+    Если Redis говорит "выключено", мы дополнительно проверяем БД и при
+    расхождении приводим Redis в соответствие с БД (источником истины).
+    """
+    key = f"visual_captcha_enabled:{chat_id}"
+    cached = await redis.get(key)
+
+    # Если кэш явно говорит, что включено — считаем это актуальным
+    if cached == "1":
+        return True
+
+    # Если кэш говорит "выключено" или пустой – перепроверяем в БД
     async with get_session() as session:
-        result = await session.execute(
+        raw = session.execute(
             select(CaptchaSettings).where(CaptchaSettings.group_id == chat_id)
         )
+        result = await _maybe_await(raw)
         settings = result.scalar_one_or_none()
         enabled = bool(settings.is_visual_enabled) if settings else False
-        await redis.set(f"visual_captcha_enabled:{chat_id}", "1" if enabled else "0")
+
+        # Синхронизируем Redis с БД
+        await redis.set(key, "1" if enabled else "0")
         return enabled
 
 

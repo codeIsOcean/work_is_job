@@ -9,14 +9,21 @@ def _group_username(group) -> str | None:
 
 def build_group_header(group) -> str:
     parts = ["<b>Управление группой</b>", ""]
-    username = _group_username(group)
+    if group is None:
+        title = "Группа"
+        chat_id = "?"
+        username = None
+    else:
+        title = getattr(group, "title", "Группа")
+        chat_id = getattr(group, "chat_id", getattr(group, "id", "?"))
+        username = _group_username(group)
     if username:
         parts.append(
-            f'Название: <a href="https://t.me/{username}">{group.title}</a> (@{username})'
+            f'Название: <a href="https://t.me/{username}">{title}</a> (@{username})'
         )
     else:
-        parts.append(f"Название: {group.title} (username отсутствует)")
-    parts.append(f"ID: {group.chat_id}")
+        parts.append(f"Название: {title} (username отсутствует)")
+    parts.append(f"ID: {chat_id}")
     parts.append("")
     parts.append("Доступные функции:")
     return "\n".join(parts)

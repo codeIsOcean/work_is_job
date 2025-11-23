@@ -9,7 +9,6 @@ from aiogram.types import ChatPermissions, User, Chat, Message, ChatMember
 from aiogram.enums import ChatMemberStatus
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.services.redis_conn import redis
 
 
 @pytest.mark.asyncio

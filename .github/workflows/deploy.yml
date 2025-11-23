@@ -124,7 +124,8 @@ jobs:
 
   build-and-deploy-prod:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    # Отключено: продакшн-деплой теперь выполняется только через deploy-prod.yml
+    if: false
     environment: production
 
     steps:

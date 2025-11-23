@@ -51,7 +51,7 @@ async def test_get_mute_new_members_status_uses_db_and_caches(fake_redis, db_ses
 
 
 @pytest.mark.asyncio
-async def test_toggle_visual_captcha_creates_and_flips(db_session):
+async def test_toggle_visual_captcha_creates_and_flips(fake_redis, db_session):
     group = Group(chat_id=-3004, title="Captcha group")
     db_session.add(group)
     await db_session.commit()

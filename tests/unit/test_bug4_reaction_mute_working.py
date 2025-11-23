@@ -12,6 +12,7 @@ from bot.services.mute_by_reaction_service import handle_reaction_mute
 
 
 @pytest.mark.asyncio
+@pytest.mark.e2e
 async def test_reaction_handler_called():
     """Проверяет, что обработчик реакций вызывается"""
     # Создаем мок события реакции

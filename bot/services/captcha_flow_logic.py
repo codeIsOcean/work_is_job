@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import inspect
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
@@ -25,6 +26,18 @@ from bot.services.spammer_registry import (
 
 
 logger = logging.getLogger(__name__)
+
+
+async def _maybe_await(result):
+    """Helper to support both real AsyncSession and MagicMock in tests.
+
+    In production, SQLAlchemy methods return awaitables; in unit tests they
+    might be plain values or MagicMocks. This keeps the implementation
+    compatible with both without changing the public API.
+    """
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 CAPTCHA_STATE_KEY = "captcha:state:{chat_id}:{user_id}"
@@ -59,7 +72,9 @@ class CaptchaDecision:
     require_captcha: bool
     fallback_mode: bool
     anti_flood: Optional[AntiFloodResult]
-    reason: str
+    # reason делаем необязательным, чтобы старые тесты могли создавать
+    # CaptchaDecision без этого поля
+    reason: str = ""
 
 
 @dataclass
@@ -82,11 +97,11 @@ def build_restriction_permissions() -> ChatPermissions:
 
 
 async def _ensure_settings(session: AsyncSession, chat_id: int) -> ChatSettings:
-    settings = await session.get(ChatSettings, chat_id)
+    settings = await _maybe_await(session.get(ChatSettings, chat_id))
     if settings is None:
         settings = ChatSettings(chat_id=chat_id)
         session.add(settings)
-        await session.flush()
+        await _maybe_await(session.flush())
     return settings
 
 

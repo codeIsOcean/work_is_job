@@ -9,7 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.services.new_member_requested_to_join_mute_logic import mute_manually_approved_member_logic
 from bot.services.auto_mute_scammers_logic import auto_mute_scammer_on_join
-from bot.services.redis_conn import redis
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,8 @@ on:
 jobs:
   build-and-deploy-prod:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    # Отключено: используем только deploy-prod.yml для продакшн-деплоя
+    if: false
 
     steps:
       - uses: actions/checkout@v4

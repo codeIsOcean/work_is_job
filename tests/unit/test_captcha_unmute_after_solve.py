@@ -8,7 +8,6 @@ from aiogram import Bot
 from aiogram.types import ChatPermissions, ChatMember
 from aiogram.exceptions import TelegramBadRequest
 
-from bot.services.redis_conn import redis
 
 
 @pytest.mark.asyncio

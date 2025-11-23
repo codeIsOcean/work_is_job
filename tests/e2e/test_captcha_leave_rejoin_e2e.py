@@ -20,7 +20,7 @@ from aiogram.types import (
 )
 from aiogram.enums import ChatMemberStatus
 
-from bot.services.redis_conn import redis
+from bot.services import redis_conn
 
 
 @pytest.mark.asyncio
@@ -84,10 +84,10 @@ async def test_full_leave_rejoin_captcha_flow():
     # 3. Setting the flag directly simulates the end state after successful captcha
     
     # Simulate: User passed captcha (this is what process_captcha_answer does at the end)
-    await redis.setex(f"captcha_passed:{user_id}:{chat_id}", 3600, "1")
+    await redis_conn.redis.setex(f"captcha_passed:{user_id}:{chat_id}", 3600, "1")
 
     # Verify captcha_passed flag was set (TTL: 1 hour)
-    flag_after_captcha = await redis.get(f"captcha_passed:{user_id}:{chat_id}")
+    flag_after_captcha = await redis_conn.redis.get(f"captcha_passed:{user_id}:{chat_id}")
     assert flag_after_captcha == "1", "captcha_passed flag must be set after correct answer"
 
     # =====================================
@@ -130,7 +130,7 @@ async def test_full_leave_rejoin_captcha_flow():
         await handle_member_status_change(join_event, session)
 
     # Verify flag still exists
-    flag_after_join = await redis.get(f"captcha_passed:{user_id}:{chat_id}")
+    flag_after_join = await redis_conn.redis.get(f"captcha_passed:{user_id}:{chat_id}")
     assert flag_after_join == "1", "Flag should still exist after join"
 
     # =====================================
@@ -149,7 +149,7 @@ async def test_full_leave_rejoin_captcha_flow():
     await handle_member_status_change(leave_event, session)
 
     # CRITICAL VERIFICATION: Flag MUST be deleted on leave
-    flag_after_leave = await redis.get(f"captcha_passed:{user_id}:{chat_id}")
+    flag_after_leave = await redis_conn.redis.get(f"captcha_passed:{user_id}:{chat_id}")
     assert flag_after_leave is None, "🔒 SECURITY: captcha_passed flag MUST be deleted when user leaves"
 
     # =====================================
@@ -216,7 +216,7 @@ async def test_multiple_leave_rejoin_cycles():
     from bot.handlers.visual_captcha.visual_captcha_handler import handle_member_status_change
 
     # Cycle 1
-    await redis.setex(f"captcha_passed:{user_id}:{chat_id}", 3600, "1")
+    await redis_conn.redis.setex(f"captcha_passed:{user_id}:{chat_id}", 3600, "1")
 
     leave_event = MagicMock(spec=ChatMemberUpdated)
     leave_event.chat = MagicMock(spec=Chat, id=chat_id)
@@ -229,19 +229,19 @@ async def test_multiple_leave_rejoin_cycles():
     session = MagicMock()
 
     await handle_member_status_change(leave_event, session)
-    flag = await redis.get(f"captcha_passed:{user_id}:{chat_id}")
+    flag = await redis_conn.redis.get(f"captcha_passed:{user_id}:{chat_id}")
     assert flag is None, "Cycle 1: Flag must be deleted"
 
     # Cycle 2
-    await redis.setex(f"captcha_passed:{user_id}:{chat_id}", 3600, "1")
+    await redis_conn.redis.setex(f"captcha_passed:{user_id}:{chat_id}", 3600, "1")
     await handle_member_status_change(leave_event, session)
-    flag = await redis.get(f"captcha_passed:{user_id}:{chat_id}")
+    flag = await redis_conn.redis.get(f"captcha_passed:{user_id}:{chat_id}")
     assert flag is None, "Cycle 2: Flag must be deleted"
 
     # Cycle 3
-    await redis.setex(f"captcha_passed:{user_id}:{chat_id}", 3600, "1")
+    await redis_conn.redis.setex(f"captcha_passed:{user_id}:{chat_id}", 3600, "1")
     await handle_member_status_change(leave_event, session)
-    flag = await redis.get(f"captcha_passed:{user_id}:{chat_id}")
+    flag = await redis_conn.redis.get(f"captcha_passed:{user_id}:{chat_id}")
     assert flag is None, "Cycle 3: Flag must be deleted"
 
 
@@ -254,7 +254,7 @@ async def test_kicked_user_flag_deleted():
     chat_id = -1001234567890
 
     # User has captcha_passed flag
-    await redis.setex(f"captcha_passed:{user_id}:{chat_id}", 3600, "1")
+    await redis_conn.redis.setex(f"captcha_passed:{user_id}:{chat_id}", 3600, "1")
 
     from bot.handlers.visual_captcha.visual_captcha_handler import handle_member_status_change
 
@@ -272,7 +272,7 @@ async def test_kicked_user_flag_deleted():
     await handle_member_status_change(kick_event, session)
 
     # Flag must be deleted even on kick
-    flag = await redis.get(f"captcha_passed:{user_id}:{chat_id}")
+    flag = await redis_conn.redis.get(f"captcha_passed:{user_id}:{chat_id}")
     assert flag is None, "Flag must be deleted when user is kicked"
 
 
@@ -288,8 +288,8 @@ async def test_different_users_independent_flags():
     chat_id = -1001234567890
 
     # Both users have flags
-    await redis.setex(f"captcha_passed:{user1_id}:{chat_id}", 3600, "1")
-    await redis.setex(f"captcha_passed:{user2_id}:{chat_id}", 3600, "1")
+    await redis_conn.redis.setex(f"captcha_passed:{user1_id}:{chat_id}", 3600, "1")
+    await redis_conn.redis.setex(f"captcha_passed:{user2_id}:{chat_id}", 3600, "1")
 
     from bot.handlers.visual_captcha.visual_captcha_handler import handle_member_status_change
 
@@ -307,8 +307,8 @@ async def test_different_users_independent_flags():
     await handle_member_status_change(leave_event, session)
 
     # User 1 flag deleted, User 2 flag intact
-    user1_flag = await redis.get(f"captcha_passed:{user1_id}:{chat_id}")
-    user2_flag = await redis.get(f"captcha_passed:{user2_id}:{chat_id}")
+    user1_flag = await redis_conn.redis.get(f"captcha_passed:{user1_id}:{chat_id}")
+    user2_flag = await redis_conn.redis.get(f"captcha_passed:{user2_id}:{chat_id}")
 
     assert user1_flag is None, "User 1 flag must be deleted"
     assert user2_flag == "1", "User 2 flag must remain intact"
@@ -326,8 +326,8 @@ async def test_same_user_different_groups_independent():
     chat2_id = -1002222222222
 
     # User has flags in both groups
-    await redis.setex(f"captcha_passed:{user_id}:{chat1_id}", 3600, "1")
-    await redis.setex(f"captcha_passed:{user_id}:{chat2_id}", 3600, "1")
+    await redis_conn.redis.setex(f"captcha_passed:{user_id}:{chat1_id}", 3600, "1")
+    await redis_conn.redis.setex(f"captcha_passed:{user_id}:{chat2_id}", 3600, "1")
 
     from bot.handlers.visual_captcha.visual_captcha_handler import handle_member_status_change
 
@@ -345,8 +345,8 @@ async def test_same_user_different_groups_independent():
     await handle_member_status_change(leave_event, session)
 
     # Group 1 flag deleted, Group 2 flag intact
-    chat1_flag = await redis.get(f"captcha_passed:{user_id}:{chat1_id}")
-    chat2_flag = await redis.get(f"captcha_passed:{user_id}:{chat2_id}")
+    chat1_flag = await redis_conn.redis.get(f"captcha_passed:{user_id}:{chat1_id}")
+    chat2_flag = await redis_conn.redis.get(f"captcha_passed:{user_id}:{chat2_id}")
 
     assert chat1_flag is None, "Chat 1 flag must be deleted"
     assert chat2_flag == "1", "Chat 2 flag must remain intact"
@@ -377,11 +377,11 @@ async def test_rejoin_captcha_with_real_redis_and_db(
     
     from bot.database.models import Group, ChatSettings, CaptchaSettings
     from bot.handlers.visual_captcha.visual_captcha_handler import handle_member_status_change
-    from bot.services.redis_conn import redis as redis_module
+    from bot.services import redis_conn as redis_module
     
     # Patch redis to use real Redis client
-    original_redis = redis_module
-    redis_module = redis_client_e2e
+    original_redis = redis_module.redis
+    redis_module.redis = redis_client_e2e
     
     user_id = 999888
     chat_id = -1001234567890
@@ -502,3 +502,9 @@ async def test_rejoin_captcha_with_real_redis_and_db(
             await db_session.commit()
         except Exception:
             await db_session.rollback()
+
+        # Restore patched redis
+        try:
+            redis_module.redis = original_redis
+        except Exception:
+            pass

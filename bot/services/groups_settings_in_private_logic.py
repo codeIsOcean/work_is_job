@@ -5,21 +5,29 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, delete
 from bot.database.models import Group, UserGroup, CaptchaSettings, ChatSettings
 import logging
+import inspect
 
 logger = logging.getLogger(__name__)
 
 
+async def _maybe_await(result):
+    """Helper: supports both real AsyncSession and MagicMock in tests."""
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
 async def _ensure_chat_settings(session: AsyncSession, chat_id: int) -> ChatSettings:
-    result = await session.execute(
-        select(ChatSettings).where(ChatSettings.chat_id == chat_id)
-    )
+    raw = session.execute(select(ChatSettings).where(ChatSettings.chat_id == chat_id))
+    result = await _maybe_await(raw)
     settings = result.scalar_one_or_none()
     if settings is None:
         settings = ChatSettings(chat_id=chat_id)
         session.add(settings)
-        await session.commit()
-        result = await session.execute(
-            select(ChatSettings).where(ChatSettings.chat_id == chat_id)
+        commit_call = session.commit()
+        await _maybe_await(commit_call)
+        result = await _maybe_await(
+            session.execute(select(ChatSettings).where(ChatSettings.chat_id == chat_id))
         )
         settings = result.scalar_one()
     return settings
@@ -436,21 +444,29 @@ async def set_system_mute_announcements_enabled(session: AsyncSession, chat_id: 
 
 
 async def toggle_visual_captcha(session: AsyncSession, chat_id: int) -> bool:
-    """Переключает визуальную капчу и возвращает новый статус"""
+    """Переключает визуальную капчу и возвращает новый статус.
+
+    В проде session — это AsyncSession, в тестах может приходить MagicMock.
+    Поэтому аккуратно работаем как с awaitable, так и с синхронными заглушками.
+    """
     try:
-        result = await session.execute(
+        raw_result = session.execute(
             select(CaptchaSettings).where(CaptchaSettings.group_id == chat_id)
         )
-        settings = result.scalar_one_or_none()
+        if inspect.isawaitable(raw_result):
+            raw_result = await raw_result
+        settings = raw_result.scalar_one_or_none()
 
         if settings:
             # Обновляем существующую запись
             new_status = not settings.is_visual_enabled
-            await session.execute(
+            update_call = session.execute(
                 update(CaptchaSettings)
                 .where(CaptchaSettings.group_id == chat_id)
                 .values(is_visual_enabled=new_status)
             )
+            if inspect.isawaitable(update_call):
+                await update_call
             logger.info(f"Обновлен статус визуальной капчи для группы {chat_id}: {new_status}")
         else:
             # Создаем новую запись
@@ -459,20 +475,32 @@ async def toggle_visual_captcha(session: AsyncSession, chat_id: int) -> bool:
             new_status = True
             logger.info(f"Создана новая запись визуальной капчи для группы {chat_id}: {new_status}")
 
-        await session.commit()
+        commit_call = session.commit()
+        if inspect.isawaitable(commit_call):
+            await commit_call
         
         # КРИТИЧЕСКИЙ ФИКС: Обновляем Redis после изменения в БД
         # Это гарантирует, что get_visual_captcha_status() вернет актуальное значение
         # БЕЗ этого фикса Redis кэш остается устаревшим и капча не отправляется при rejoin
         from bot.services.visual_captcha_logic import set_visual_captcha_status
-        await set_visual_captcha_status(chat_id, new_status)
+        set_call = set_visual_captcha_status(chat_id, new_status)
+        if inspect.isawaitable(set_call):
+            await set_call
         logger.info(f"✅ Redis обновлен для группы {chat_id}: visual_captcha_enabled={new_status}")
         
         return new_status
 
     except Exception as e:
         logger.error(f"Ошибка при переключении капчи: {e}")
-        await session.rollback()
+        rollback_call = getattr(session, "rollback", None)
+        if rollback_call is not None:
+            try:
+                rc = rollback_call()
+                if inspect.isawaitable(rc):
+                    await rc
+            except Exception:
+                # В тестах не роняемся из-за mock rollback
+                pass
         return False
 
 

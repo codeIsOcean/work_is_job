@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 from unittest.mock import AsyncMock
+import sys
+import pytest
 
 import pytest
 
@@ -33,8 +35,11 @@ from redis.asyncio import Redis as AsyncRedis
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from redis.asyncio import Redis as AsyncRedis
+
 from bot.database.models import Base
 from bot.database import session as db_session_module
+from bot.services import redis_conn as redis_module
 
 
 def _build_database_url() -> str:
@@ -57,6 +62,41 @@ def event_loop():
     loop = asyncio.new_event_loop()
     yield loop
     loop.close()
+
+
+@pytest.fixture(autouse=True)
+async def _reset_redis_client():
+    """Переинициализирует глобальный Redis-клиент для каждого async-теста.
+
+    Это устраняет ошибки вида "Future attached to a different loop" и
+    "Event loop is closed", которые возникают, когда один и тот же
+    Redis-клиент используется в разных event loop.
+    """
+    # Закрываем старый клиент, если он был
+    old_client = getattr(redis_module, "redis", None)
+    if old_client is not None and hasattr(old_client, "aclose"):
+        try:
+            await old_client.aclose()
+        except Exception:
+            # В тестах игнорируем ошибки закрытия
+            pass
+
+    redis_module.redis = AsyncRedis(
+        host=os.getenv("REDIS_HOST", "127.0.0.1"),
+        port=int(os.getenv("REDIS_PORT", "6379")),
+        db=int(os.getenv("REDIS_DB", "0")),
+        decode_responses=True,
+    )
+
+    yield
+
+    # После теста пробуем аккуратно закрыть клиент
+    new_client = getattr(redis_module, "redis", None)
+    if new_client is not None and hasattr(new_client, "aclose"):
+        try:
+            await new_client.aclose()
+        except Exception:
+            pass
 
 
 @pytest.fixture(scope="session")
@@ -245,6 +285,18 @@ def update_factory(message_factory) -> Callable[..., Update]:
         return Update.model_validate(payload)
 
     return _factory
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip e2e tests on Windows (real Redis/DB + Windows event loop = нестабильно).
+
+    В проде (Linux) эти тесты должны запускаться без skip.
+    """
+    if sys.platform.startswith("win"):
+        skip_e2e = pytest.mark.skip(reason="e2e tests are unstable on Windows; run them on Linux CI/prod")
+        for item in items:
+            if "e2e" in item.keywords:
+                item.add_marker(skip_e2e)
 
 
 HANDLER_MODULES = [

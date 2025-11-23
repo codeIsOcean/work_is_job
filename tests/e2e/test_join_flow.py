@@ -6,6 +6,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from aiogram import Bot
 from aiogram.types import ChatMemberUpdated, ChatJoinRequest, Chat, User as TgUser
+from aiogram.enums import ChatMemberStatus
 
 from bot.services.event_classifier import classify_join_event, JoinEventType
 from bot.services.captcha_flow_logic import prepare_invite_flow, prepare_manual_approval_flow
@@ -27,6 +28,11 @@ async def test_self_join_no_flood_warning():
     event = MagicMock(spec=ChatMemberUpdated)
     event.bot = bot
     event.chat = chat
+    # Настраиваем old/new члена чата как LEFT -> MEMBER
+    event.old_chat_member = MagicMock()
+    event.old_chat_member.status = ChatMemberStatus.LEFT
+    event.new_chat_member = MagicMock()
+    event.new_chat_member.status = ChatMemberStatus.MEMBER
     event.new_chat_member.user = user
     event.from_user = None  # Нет инициатора
     

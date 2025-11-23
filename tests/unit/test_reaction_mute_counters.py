@@ -56,7 +56,8 @@ async def test_reaction_counter_first_warn():
          patch('bot.services.mute_by_reaction_service.logic.get_global_mute_flag', return_value=False), \
          patch('bot.services.redis_conn.redis.get', return_value=None), \
          patch('bot.services.redis_conn.redis.setex', return_value=None), \
-         patch('bot.services.mute_by_reaction_service.logic.log_warning_reaction', new_callable=AsyncMock) as mock_warn:
+         patch('bot.services.mute_by_reaction_service.logic.log_warning_reaction', new_callable=AsyncMock) as mock_warn, \
+         patch('bot.services.mute_by_reaction_service.logic.REACTION_RULES', {"👎": {"duration": None, "score_delta": 0, "action": "warn"}}):
         
         mock_settings.return_value = MagicMock(reaction_mute_enabled=True)
         mock_admin.return_value = (MagicMock(id=123), False)
