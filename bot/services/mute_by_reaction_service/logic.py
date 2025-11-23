@@ -295,7 +295,7 @@ async def handle_reaction_mute(
         except Exception as exc:
             logger.error("Ошибка при логировании предупреждения по реакции: %s", exc)
         logger.info(
-            f"⚠️ Предупреждение для пользователя {target_user.id}: {new_count} негативная реакция"
+            f"⚠️ Предупреждение для пользователя {target_user.id}: негативная реакция {emoji}"
         )
         return ReactionMuteResult(
             success=True,
@@ -336,7 +336,7 @@ async def handle_reaction_mute(
 
     await session.commit()
     
-    logger.info(f"✅ Мут применен: пользователь {target_user.id}, реакций: {new_count}, действие: {rule['action']}")
+    logger.info(f"✅ Мут применен: пользователь {target_user.id}, реакция: {emoji}, действие: {rule['action']}")
 
     ttl = int(duration.total_seconds()) if duration else None
     redis_key = f"mute:{chat_id}:{target_user.id}"
