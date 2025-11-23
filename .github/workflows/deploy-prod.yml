@@ -52,38 +52,13 @@ jobs:
             set -e
             cd /opt/jobs_inDubai_prod
 
-            # КРИТИЧНО: чиним nginx.prod.conf, если на сервере снова оказалась директория
-            mkdir -p nginx
-            if [ -d nginx/nginx.prod.conf ]; then
-              echo "nginx/nginx.prod.conf is a directory, removing and recreating basic config..."
-              rm -rf nginx/nginx.prod.conf
-            fi
+            # Проверяем что nginx.prod.conf существует после rsync
             if [ ! -f nginx/nginx.prod.conf ]; then
-              echo "nginx/nginx.prod.conf is missing, creating minimal default config..."
-              printf '%s\n' \
-                'events {' \
-                '    worker_connections 1024;' \
-                '}' \
-                '' \
-                'http {' \
-                '    upstream bot_backend {' \
-                '        server bot_prod:8080;' \
-                '    }' \
-                '' \
-                '    server {' \
-                '        listen 80;' \
-                '        server_name _;' \
-                '' \
-                '        location / {' \
-                '            proxy_pass http://bot_backend;' \
-                '            proxy_set_header Host $host;' \
-                '            proxy_set_header X-Real-IP $remote_addr;' \
-                '            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;' \
-                '            proxy_set_header X-Forwarded-Proto $scheme;' \
-                '        }' \
-                '    }' \
-                '}' > nginx/nginx.prod.conf
+              echo "ERROR: nginx/nginx.prod.conf is missing after rsync!"
+              echo "Make sure the file exists in the repository."
+              exit 1
             fi
+            echo "OK: nginx/nginx.prod.conf exists"
 
             if [ ! -f .env.prod ]; then
               echo ".env.prod is missing. Create it from env.prod.example before deploying."
