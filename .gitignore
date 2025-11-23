@@ -157,8 +157,10 @@ docker-compose.yml
 docker-compose.dev.yml
 docker-compose.test.yml
 
-# Nginx конфиги могут содержать пути к сертификатам
-nginx/
+# Nginx конфиги - разрешаем .conf файлы для деплоя
+nginx/*
+!nginx/*.conf
+!nginx/*.conf.example
 
 # .example файлы - проверяем что пароли замаскированы
 # Если в .example файлах есть реальные пароли - добавляем их сюда
