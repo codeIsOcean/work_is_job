@@ -1,7 +1,7 @@
 """add_group_journal_channels
 
 Revision ID: add_journal_channels
-Revises: df251fa0997f
+Revises: 2f852e70babb
 Create Date: 2025-10-30 14:00:00.000000
 
 Multi-tenant журнал действий: каждая группа может иметь свой канал для журнала.
@@ -15,7 +15,7 @@ from sqlalchemy import DateTime
 
 # revision identifiers, used by Alembic.
 revision: str = 'add_journal_channels'
-down_revision: Union[str, None] = 'df251fa0997f'
+down_revision: Union[str, None] = '2f852e70babb'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
