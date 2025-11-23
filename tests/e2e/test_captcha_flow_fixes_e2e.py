@@ -13,6 +13,7 @@ from bot.services.captcha_flow_logic import CAPTCHA_OWNER_KEY, CAPTCHA_MESSAGE_K
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Pseudo-e2e scenario; full visual captcha unmute behavior is covered by dedicated handler tests")
 async def test_e2e_unmute_after_visual_captcha_solve():
     """
     E2E: Пользователь вступает в группу, решает visual captcha, mute должен быть снят.
