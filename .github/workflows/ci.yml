@@ -71,6 +71,12 @@ jobs:
           ruff check . --select F821 --ignore F401,F541,E402,E722,F841,F811
 
       - name: Run tests
+        env:
+          DATABASE_URL: "postgresql+asyncpg://testuser:testpass@127.0.0.1:5432/testdb"
+          REDIS_URL: "redis://127.0.0.1:6379/0"
+          ENV: "development"
+          MODE: "polling"
+          BOT_TOKEN: "000000:TEST"
         run: |
           mkdir -p reports
           pytest tests/ -q --junitxml=reports/junit.xml
