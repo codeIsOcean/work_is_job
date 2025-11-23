@@ -132,6 +132,95 @@ NGINXEOF
               COMPOSE="docker-compose"
             fi
 
+            # КРИТИЧНО: ПРИНУДИТЕЛЬНО исправляем nginx.prod.conf ПЕРЕД запуском docker compose
+            echo "🔧 КРИТИЧНО: Исправляем nginx.prod.conf на сервере..."
+            
+            # Создаем директорию nginx, если её нет
+            mkdir -p nginx
+            
+            # ПРИНУДИТЕЛЬНО удаляем nginx.prod.conf (и директорию, и файл)
+            echo "🗑️ Удаляем старый nginx.prod.conf (директорию или файл)..."
+            rm -rf nginx/nginx.prod.conf 2>/dev/null || true
+            sleep 1  # Даем время на удаление
+            
+            # Проверяем, что удалено
+            if [ -e nginx/nginx.prod.conf ]; then
+              echo "⚠️ nginx.prod.conf все еще существует, принудительно удаляем..."
+              rm -rf nginx/nginx.prod.conf 2>/dev/null || true
+              sleep 1
+            fi
+            
+            # Если файл все еще не существует, создаем базовый конфиг
+            if [ ! -f nginx/nginx.prod.conf ]; then
+              echo "📝 Создаем nginx.prod.conf..."
+              cat > nginx/nginx.prod.conf << 'NGINXCONF'
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream bot_backend {
+        server bot_prod:8080;
+    }
+
+    server {
+        listen 80;
+        server_name _;
+
+        location / {
+            proxy_pass http://bot_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+}
+NGINXCONF
+            fi
+            
+            # ФИНАЛЬНАЯ проверка: убеждаемся, что это файл, а не директория
+            if [ -d nginx/nginx.prod.conf ]; then
+              echo "❌ КРИТИЧЕСКАЯ ОШИБКА: nginx.prod.conf все еще является директорией!"
+              echo "Удаляем директорию и создаем файл..."
+              rm -rf nginx/nginx.prod.conf
+              cat > nginx/nginx.prod.conf << 'NGINXCONF2'
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream bot_backend {
+        server bot_prod:8080;
+    }
+
+    server {
+        listen 80;
+        server_name _;
+
+        location / {
+            proxy_pass http://bot_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+}
+NGINXCONF2
+            fi
+            
+            if [ ! -f nginx/nginx.prod.conf ]; then
+              echo "❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось создать nginx.prod.conf как файл!"
+              exit 1
+            fi
+            
+            # Показываем информацию о файле
+            echo "✅ nginx.prod.conf готов:"
+            ls -la nginx/nginx.prod.conf
+            file nginx/nginx.prod.conf
+            echo ""
+
             # КРИТИЧНО: Проверяем и исправляем nginx конфиг ПЕРЕД запуском docker compose
             echo "🔍 Проверяем nginx конфиг перед запуском..."
             
