@@ -1834,20 +1834,21 @@ async def handle_member_status_change(event: ChatMemberUpdated, session: AsyncSe
                     f"Используем значение из БД: {db_visual_enabled}"
                 )
             
-            # КРИТИЧНО: Если visual_captcha_enabled=True, капча ОБЯЗАТЕЛЬНА независимо от fallback_mode
-            # Это гарантирует, что капча всегда отправляется при rejoin, если включена через UI
-            if visual_captcha_enabled:
-                captcha_should_be_required = True
-                # Игнорируем fallback_mode если visual_captcha явно включен
-                ignore_fallback = True
+            # Визуальная капча — это ТИП капчи, не переключатель включения
+            # Решение принимается на основе decision.require_captcha (настройки "Капча при вступлении" / "Капча для инвайтов")
+            captcha_should_be_required = decision.require_captcha
+            ignore_fallback = False
+
+            if visual_captcha_enabled and decision.require_captcha:
                 logger.info(
-                    f"🔒 [MEMBER_JOIN] visual_captcha_enabled=True → капча ОБЯЗАТЕЛЬНА для user={user.id}, "
-                    f"chat={chat.id} (игнорируем fallback_mode)"
+                    f"🔒 [MEMBER_JOIN] Капча требуется (decision.require_captcha=True), "
+                    f"visual_captcha_enabled={visual_captcha_enabled} для user={user.id}, chat={chat.id}"
                 )
-            else:
-                # Если visual_captcha выключен, используем decision
-                captcha_should_be_required = decision.require_captcha
-                ignore_fallback = False
+            elif not decision.require_captcha:
+                logger.info(
+                    f"⛔ [MEMBER_JOIN] Капча НЕ требуется (decision.require_captcha=False) для user={user.id}, "
+                    f"chat={chat.id}, visual_captcha_enabled={visual_captcha_enabled} игнорируется"
+                )
         
         # Определяем источник требования капчи для лучшего логирования
         captcha_source = "unknown"
@@ -1940,6 +1941,69 @@ async def handle_member_status_change(event: ChatMemberUpdated, session: AsyncSe
                 f"ignore_fallback={ignore_fallback}, decision.fallback_mode={decision.fallback_mode}, "
                 f"captcha_source={captcha_source}"
             )
+
+            # ГЛОБАЛЬНЫЙ МУТ: Проверяем и применяем мут для ручного одобрения
+            # Если есть initiator (админ вручную одобрил заявку) и глобальный мут включен
+            if initiator is not None:
+                # Глобальный мут - это настройка для ВСЕХ групп, ключ без chat_id
+                global_mute_enabled = await redis_conn.redis.get("global_mute_enabled")
+
+                logger.info(
+                    f"🔍 [GLOBAL_MUTE] Проверка глобального мута: chat={chat.id}, "
+                    f"user={user.id}, initiator={initiator.id}, global_mute_enabled={global_mute_enabled}"
+                )
+
+                if global_mute_enabled == "1":
+                    # Глобальный мут включен - мьютим пользователя
+                    try:
+                        await event.bot.restrict_chat_member(
+                            chat_id=chat.id,
+                            user_id=user.id,
+                            permissions=build_restriction_permissions(),
+                            until_date=None,  # Бессрочный мут
+                        )
+                        logger.info(
+                            f"🔇 [GLOBAL_MUTE] Пользователь {user.id} замьючен в чате {chat.id} "
+                            f"(ручное одобрение админом {initiator.id}, глобальный мут включен)"
+                        )
+
+                        # Проверяем настройку системных сообщений перед отправкой
+                        should_announce = True
+                        try:
+                            from bot.database.models import ChatSettings
+                            from sqlalchemy import select
+                            result = await session.execute(
+                                select(ChatSettings).where(ChatSettings.chat_id == chat.id)
+                            )
+                            settings = result.scalar_one_or_none()
+                            if settings:
+                                should_announce = settings.system_mute_announcements_enabled
+                        except Exception as settings_error:
+                            logger.error(f"Ошибка при проверке настроек системных сообщений: {settings_error}")
+
+                        if should_announce:
+                            user_mention = f"<a href='tg://user?id={user.id}'>{user.full_name}</a>"
+                            await event.bot.send_message(
+                                chat_id=chat.id,
+                                text=f"🔇 {user_mention} замьючен при ручном одобрении (глобальный мут включен)",
+                                parse_mode="HTML",
+                            )
+                            logger.info(
+                                f"📢 [GLOBAL_MUTE] Отправлено системное сообщение о муте для user={user.id}"
+                            )
+                        else:
+                            logger.info(
+                                f"🔕 [GLOBAL_MUTE] Системное сообщение НЕ отправлено (отключено в настройках) для user={user.id}"
+                            )
+                    except Exception as mute_error:
+                        logger.error(
+                            f"❌ [GLOBAL_MUTE] Ошибка при муте пользователя {user.id}: {mute_error}"
+                        )
+                else:
+                    logger.info(
+                        f"✅ [GLOBAL_MUTE] Глобальный мут выключен для chat={chat.id}, "
+                        f"пользователь {user.id} НЕ мьютится при ручном одобрении"
+                    )
 
         admission = await evaluate_admission(
             bot=event.bot,
