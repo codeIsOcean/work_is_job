@@ -560,14 +560,17 @@ async def create_deeplink_for_captcha(bot: Bot, group_id: str) -> str:
 async def get_captcha_keyboard(deep_link: str) -> InlineKeyboardMarkup:
     """Кнопка «Пройти капчу» (открывает /start с deep link)."""
     # Проверяем, что deep_link валидный
-    if not deep_link or not deep_link.startswith(('http://', 'https://', 'tg://')):
+    # ФИКС: Явно преобразуем в строку для безопасности
+    deep_link_str = str(deep_link) if deep_link is not None else ""
+
+    if not deep_link_str or not deep_link_str.startswith(('http://', 'https://', 'tg://')):
         # Если deep_link невалидный, используем callback_data
         return InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton(text="🧩 Пройти капчу", callback_data="captcha_fallback")]]
         )
-    
+
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="🧩 Пройти капчу", url=deep_link)]]
+        inline_keyboard=[[InlineKeyboardButton(text="🧩 Пройти капчу", url=deep_link_str)]]
     )
 
 

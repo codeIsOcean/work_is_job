@@ -293,7 +293,7 @@ async def send_captcha_attempt_log_with_buttons(message: str, user_id: int, chat
         "text": message,
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
-        "reply_markup": keyboard.model_dump_json()
+        "reply_markup": keyboard.model_dump()  # ФИКС: model_dump() вместо model_dump_json()
     }
 
     async with aiohttp.ClientSession() as session:

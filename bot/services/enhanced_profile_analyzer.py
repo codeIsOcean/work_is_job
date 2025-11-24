@@ -88,7 +88,8 @@ class EnhancedProfileAnalyzer:
             age_days = age_info["age_days"]
 
             # УПРОЩЕННАЯ ЛОГИКА: Только возраст <= 30 дней = МУТ
-            is_suspicious = age_days <= 30
+            # ВАЖНО: Проверяем age_days >= 0, чтобы отрицательные значения не проходили
+            is_suspicious = 0 <= age_days <= 30
             risk_score = 100 if is_suspicious else 0
 
             analysis = {
