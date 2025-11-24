@@ -13,6 +13,7 @@ from .admin_log_handlers import admin_log_router
 from .enhanced_analysis_test_handler import enhanced_analysis_router
 from .settings_captcha_handler import captcha_settings_router
 from .journal_link_handler import journal_link_router
+from .unscam_handler import unscam_router
 
 # Объединяем все роутеры в один
 from aiogram import Router, F
@@ -36,6 +37,7 @@ handlers_router.include_router(enhanced_analysis_router)
 handlers_router.include_router(journal_link_router)           # Привязка журнала через пересылку
 handlers_router.include_router(reaction_mute_router)
 handlers_router.include_router(captcha_settings_router)
+handlers_router.include_router(unscam_router)                 # Команда /unscam в ЛС
 
 
 def create_fresh_handlers_router():
@@ -56,6 +58,7 @@ def create_fresh_handlers_router():
     fresh_router.include_router(journal_link_router)
     fresh_router.include_router(reaction_mute_router)
     fresh_router.include_router(captcha_settings_router)
+    fresh_router.include_router(unscam_router)
     return fresh_router
 
 

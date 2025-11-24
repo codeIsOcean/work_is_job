@@ -42,6 +42,25 @@ async def record_spammer_incident(
     await session.flush()
 
 
+async def delete_spammer_record(session: AsyncSession, user_id: int) -> bool:
+    """
+    Удаляет запись о скаммере из базы данных
+
+    Args:
+        session: Сессия БД
+        user_id: ID пользователя
+
+    Returns:
+        True если запись была удалена, False если записи не было
+    """
+    record = await session.get(SpammerRecord, user_id)
+    if record:
+        await session.delete(record)
+        await session.flush()
+        return True
+    return False
+
+
 async def mute_suspicious_user_across_groups(
     *,
     bot: Bot,

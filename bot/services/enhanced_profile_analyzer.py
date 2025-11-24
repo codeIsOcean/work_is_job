@@ -22,12 +22,15 @@ class EnhancedProfileAnalyzer:
     
     async def analyze_user_profile_enhanced(self, user_data: dict, bot=None) -> Dict[str, Any]:
         """
-        Расширенный анализ профиля пользователя с учетом возраста аккаунта и био
-        
+        УПРОЩЕННЫЙ анализ профиля пользователя - ТОЛЬКО по возрасту аккаунта
+
+        ВАЖНО: Проверяется ТОЛЬКО возраст аккаунта <= 30 дней
+        Все остальные проверки (био, username, имя и т.д.) ОТКЛЮЧЕНЫ
+
         Args:
             user_data: Данные пользователя
-            bot: Экземпляр бота для получения дополнительной информации
-            
+            bot: Экземпляр бота (не используется, оставлен для совместимости)
+
         Returns:
             Словарь с результатами анализа
         """
@@ -39,96 +42,81 @@ class EnhancedProfileAnalyzer:
             "bio_analysis": {},
             "profile_analysis": {}
         }
-        
+
         user_id = user_data.get("id", "unknown")
-        
+
         if user_id == "unknown":
             logger.warning("Неизвестный user_id для анализа профиля")
-            analysis["risk_score"] += 20
+            analysis["risk_score"] = 0
             analysis["reasons"].append("Неизвестный user_id")
             return analysis
-        
+
         try:
-            # 1. Анализ возраста аккаунта по ID
+            # ТОЛЬКО анализ возраста аккаунта по ID
             age_analysis = self._analyze_account_age(user_id)
             analysis["age_analysis"] = age_analysis
-            analysis["risk_score"] += age_analysis["risk_score"]
-            
+            analysis["risk_score"] = age_analysis["risk_score"]
+
             if age_analysis["is_suspicious"]:
                 analysis["is_suspicious"] = True
                 analysis["reasons"].extend(age_analysis["reasons"])
-            
-            # 2. Анализ био (если доступно)
-            bio_analysis = await self._analyze_user_bio(user_data, bot)
-            analysis["bio_analysis"] = bio_analysis
-            analysis["risk_score"] += bio_analysis["risk_score"]
-            
-            if bio_analysis["is_suspicious"]:
-                analysis["is_suspicious"] = True
-                analysis["reasons"].extend(bio_analysis["reasons"])
-            
-            # 3. Классический анализ профиля
-            profile_analysis = self._analyze_basic_profile(user_data)
-            analysis["profile_analysis"] = profile_analysis
-            analysis["risk_score"] += profile_analysis["risk_score"]
-            
-            if profile_analysis["is_suspicious"]:
-                analysis["is_suspicious"] = True
-                analysis["reasons"].extend(profile_analysis["reasons"])
-            
-            # Ограничиваем максимальный балл
-            analysis["risk_score"] = min(analysis["risk_score"], 100)
-            
+
             # Логируем результаты
             self._log_analysis_results(user_id, analysis)
-            
+
         except Exception as e:
-            logger.error(f"Ошибка при расширенном анализе профиля пользователя {user_id}: {e}")
-            analysis["risk_score"] += 20
+            logger.error(f"Ошибка при анализе профиля пользователя {user_id}: {e}")
+            analysis["risk_score"] = 0
             analysis["reasons"].append("Ошибка анализа профиля")
-        
+
         return analysis
     
     def _analyze_account_age(self, user_id: int) -> Dict[str, Any]:
         """
         Анализирует возраст аккаунта по user_id
-        
+
+        ПРАВИЛО: Если возраст аккаунта <= 30 дней → МУТ (100 баллов, is_suspicious = True)
+
         Args:
             user_id: ID пользователя
-            
+
         Returns:
             Результаты анализа возраста
         """
         try:
             age_info = self.age_estimator.get_detailed_age_info(user_id)
-            
+            age_days = age_info["age_days"]
+
+            # УПРОЩЕННАЯ ЛОГИКА: Только возраст <= 30 дней = МУТ
+            is_suspicious = age_days <= 30
+            risk_score = 100 if is_suspicious else 0
+
             analysis = {
-                "is_suspicious": False,
+                "is_suspicious": is_suspicious,
                 "reasons": [],
-                "risk_score": age_info["risk_score"],
-                "age_days": age_info["age_days"],
+                "risk_score": risk_score,
+                "age_days": age_days,
                 "creation_date": age_info["creation_date_str"],
-                "risk_label": age_info["risk_label"],
-                "risk_description": age_info["risk_description"]
+                "risk_label": "young" if is_suspicious else "mature",
+                "risk_description": f"Аккаунт {age_days} дней - {'МУТИМ' if is_suspicious else 'в порядке'}"
             }
-            
-            if age_info["risk_score"] >= 60:
-                analysis["is_suspicious"] = True
-                analysis["reasons"].append(age_info["risk_description"])
-            
+
+            if is_suspicious:
+                analysis["reasons"].append(f"Аккаунт слишком молодой: {age_days} дней (порог: ≤30)")
+
             logger.info(f"   📅 АНАЛИЗ ВОЗРАСТА АККАУНТА:")
             logger.info(f"   📅 Предполагаемая дата создания: {age_info['creation_date_str']}")
-            logger.info(f"   ⏰ Возраст аккаунта: {age_info['age_days']} дней")
-            logger.info(f"   🎯 Балл риска: {age_info['risk_score']}/100 ({age_info['risk_label']})")
-            
+            logger.info(f"   ⏰ Возраст аккаунта: {age_days} дней")
+            logger.info(f"   🎯 Балл риска: {risk_score}/100 ({'МУТИМ' if is_suspicious else 'НЕ МУТИМ'})")
+
             return analysis
-            
+
         except Exception as e:
             logger.error(f"Ошибка анализа возраста аккаунта {user_id}: {e}")
             return {
                 "is_suspicious": False,
-                "reasons": [],
-                "risk_score": 10,
+                "reasons": ["Ошибка анализа возраста"],
+                "risk_score": 0,
                 "age_days": "неизвестно",
                 "creation_date": "неизвестно",
                 "risk_label": "unknown",
