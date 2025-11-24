@@ -69,26 +69,28 @@ async def should_apply_manual_mute(
     session: AsyncSession,
     bot: Optional[Bot] = None,
 ) -> bool:
-    """Определяет, нужно ли применять ручной мут с учётом глобального флага."""
+    """
+    Определяет, нужно ли применять ручной мут при одобрении заявки админом.
+
+    ВАЖНО: Глобальный мут = ТОЛЬКО для ручного одобрения заявок!
+    - global_flag=True + ручное одобрение → МУТИМ
+    - global_flag=False + ручное одобрение → НЕ мутим
+    - Капча пройдена → НЕ мутим (глобальный мут не влияет)
+
+    БЕЗ проверки risk_gate - это отдельная функция автомута скаммеров.
+    """
     if not global_flag:
         logger.debug(
-            "global_mute_policy: global mute disabled, skip manual mute for user %s chat %s",
+            "global_mute_policy: global mute DISABLED, skip manual mute for user %s chat %s",
             user_id,
             chat_id,
         )
         return False
 
-    suspicious = await risk_gate_is_suspicious(
-        user_id=user_id,
-        chat_id=chat_id,
-        session=session,
-        bot=bot,
-    )
-
+    # Глобальный мут включен - мутим ВСЕХ при ручном одобрении
     logger.info(
-        "global_mute_policy: decision user=%s chat=%s suspicious=%s",
+        "global_mute_policy: global mute ENABLED, will mute user=%s chat=%s",
         user_id,
         chat_id,
-        suspicious,
     )
-    return suspicious
+    return True

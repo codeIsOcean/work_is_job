@@ -461,10 +461,24 @@ async def mute_unapproved_member_logic(event):
         await asyncio.sleep(1)
 
         try:
-            await event.bot.send_message(
-                chat_id=event.chat.id,
-                text=f"🚫 Спамер @{user.username or user.id} был автоматически замьючен."
-            )
+            # Проверяем настройку системных сообщений перед отправкой
+            should_announce = True
+            try:
+                async with get_session() as announce_session:
+                    result = await announce_session.execute(
+                        select(ChatSettings).where(ChatSettings.chat_id == event.chat.id)
+                    )
+                    settings = result.scalar_one_or_none()
+                    if settings:
+                        should_announce = settings.system_mute_announcements_enabled
+            except Exception as settings_error:
+                logger.error(f"Ошибка при проверке настроек системных сообщений: {settings_error}")
+
+            if should_announce:
+                await event.bot.send_message(
+                    chat_id=event.chat.id,
+                    text=f"🚫 Спамер @{user.username or user.id} был автоматически замьючен."
+                )
             logger.info(f"Пользователь @{user.username or user.id} (ID: {user.id}) замьючен в группе {event.chat.id}")
         except Exception as e:
             logger.error(f"Не удалось отправить сообщение в чат {event.chat.id}: {str(e)}")
@@ -491,22 +505,39 @@ async def mute_manually_approved_member_logic(event):
         logger.info(f"🔍 [MUTE_LOGIC] Статус: {old_status} -> {new_status}")
         logger.info(f"🔍 [MUTE_LOGIC] Время события: {event.date}")
 
-        if old_status in ("left", "kicked") and new_status == "member":
-            logger.info(f"🔍 [MUTE_LOGIC] ✅ Условие выполнено: пользователь стал member из {old_status}")
+        # Проверяем: это ручное одобрение?
+        # Сценарий 1: left/kicked -> member (классический)
+        # Сценарий 2: restricted -> restricted, но права изменились
+        # Сценарий 3: restricted -> member
+        is_manual_approval = False
 
-            # Проверяем, включен ли мут для этой группы
-            mute_enabled = await redis.get(f"group:{chat.id}:mute_new_members")
-            logger.info(f"🔍 [MUTE_LOGIC] Статус мута в Redis для группы {chat.id}: {mute_enabled}")
-            
-            # Проверяем глобальную настройку мута
+        if old_status in ("left", "kicked") and new_status == "member":
+            is_manual_approval = True
+            logger.info(f"🔍 [MUTE_LOGIC] ✅ Сценарий 1: {old_status} -> member")
+        elif old_status == "restricted" and new_status == "restricted":
+            old_can_send = getattr(event.old_chat_member, 'can_send_messages', False)
+            new_can_send = getattr(event.new_chat_member, 'can_send_messages', False)
+            if not old_can_send and new_can_send:
+                is_manual_approval = True
+                logger.info(f"🔍 [MUTE_LOGIC] ✅ Сценарий 2: restricted -> restricted, can_send: {old_can_send} -> {new_can_send}")
+        elif old_status == "restricted" and new_status == "member":
+            is_manual_approval = True
+            logger.info(f"🔍 [MUTE_LOGIC] ✅ Сценарий 3: restricted -> member")
+
+        if is_manual_approval:
+            logger.info(f"🔍 [MUTE_LOGIC] ✅ Условие выполнено: ручное одобрение")
+
+            # Проверяем глобальную настройку мута (мастер-переключатель)
             global_mute_enabled = await redis.get("global_mute_enabled")
-            logger.info(f"🔍 [MUTE_LOGIC] Глобальный мут включен: {global_mute_enabled}")
-            
-            # Мут работает если включен глобально ИЛИ для конкретной группы
-            should_mute = (global_mute_enabled == "1") or (mute_enabled == "1")
-            
+            logger.info(f"🔍 [MUTE_LOGIC] Глобальный мут: {global_mute_enabled}")
+
+            # Глобальный мут — мастер-переключатель для ручного мута
+            # Включен = мутим при ручном одобрении, Выключен = не мутим
+            # Локальные настройки НЕ учитываются
+            should_mute = (global_mute_enabled == "1")
+
             if not should_mute:
-                logger.info(f"🔍 [MUTE_LOGIC] ❌ Мут отключен (глобально: {global_mute_enabled}, для группы: {mute_enabled}), пропускаем")
+                logger.info(f"🔍 [MUTE_LOGIC] ❌ Глобальный мут выключен ({global_mute_enabled}), пропускаем")
                 return
 
             # БАГ #1 и #3: Проверяем, что это именно ручное одобрение админом, а не автоматическое через капчу
@@ -521,17 +552,8 @@ async def mute_manually_approved_member_logic(event):
                 logger.info(f"🔍 [MUTE_LOGIC] ✅ Пользователь {user.id} прошел капчу - это автоматическое одобрение, ручной мут не применяется")
                 return
             
-            # ПРИОРИТЕТНАЯ ЛОГИКА: Глобальный мут = приоритет ВСЕ!
-            if global_mute_enabled == "1":
-                logger.info(f"🔍 [MUTE_LOGIC] 🌍 Глобальный мут включен - мутим пользователя {user.id} (ручное одобрение админом)")
-            elif mute_enabled == "1":
-                logger.info(f"🔍 [MUTE_LOGIC] 🔧 Локальный мут включен - мутим пользователя {user.id} (ручное одобрение админом)")
-            else:
-                logger.info(f"🔍 [MUTE_LOGIC] ❌ Ни глобальный, ни локальный мут не включены - не мутим")
-                return
-
+            logger.info(f"🔍 [MUTE_LOGIC] 🌍 Глобальный мут включен - мутим пользователя {user.id} (ручное одобрение админом)")
             logger.info(f"🔍 [MUTE_LOGIC] 🚀 Все проверки пройдены, начинаем мут пользователя @{user.username or user.id}")
-            logger.info(f"🔍 [MUTE_LOGIC] 📋 Статусы: global_mute={global_mute_enabled}, group_mute={mute_enabled}")
             logger.info(f"🔍 [MUTE_LOGIC] 📋 Дополнительная диагностика:")
             logger.info(f"🔍 [MUTE_LOGIC]    - user.id: {user.id}")
             logger.info(f"🔍 [MUTE_LOGIC]    - chat.id: {chat.id}")
