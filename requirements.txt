@@ -29,4 +29,4 @@ typing_extensions==4.13.2
 pytz==2024.2
 scipy==1.14.1
 pyrogram==2.0.106
-# tgcrypto==1.2.5  # Опционально: ускоряет Pyrogram, требует компилятор C++ на Windows
+tgcrypto==1.2.5  # Ускоряет Pyrogram (компилятор gcc установлен в Dockerfile)
