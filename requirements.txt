@@ -1,3 +1,5 @@
+pyrogram
+
 aiofiles==24.1.0
 aiogram==3.20.0.post0
 aiohappyeyeballs==2.6.1
@@ -26,3 +28,5 @@ typing-inspection==0.4.1
 typing_extensions==4.13.2
 pytz==2024.2
 scipy==1.14.1
+pyrogram==2.0.106
+# tgcrypto==1.2.5  # Опционально: ускоряет Pyrogram, требует компилятор C++ на Windows

@@ -4,6 +4,7 @@ import os
 from typing import Callable, Dict, Any, Awaitable, Set
 from aiogram import BaseMiddleware
 from aiogram.types import Message, CallbackQuery, ChatMemberUpdated
+
 try:
     # Предпочитаем общую конфигурацию проекта (если доступна)
     from bot.config import ADMIN_IDS as CONFIG_ADMIN_IDS  # type: ignore
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 # ID разрешенного пользователя по умолчанию (разработчик)
 ALLOWED_USER_ID = 619924982
+
 
 # Дополнительные разрешенные пользователи:
 # 1) из переменной окружения ADMIN_IDS (через запятую)
@@ -39,6 +41,7 @@ def _load_allowed_ids() -> Set[int]:
                 ids.add(int(part))
     return ids
 
+
 def _load_allowed_usernames() -> Set[str]:
     names: Set[str] = set()
     raw = os.getenv("ADMIN_USERNAMES", "")
@@ -51,41 +54,43 @@ def _load_allowed_usernames() -> Set[str]:
     names.add("zetabeta90")
     return names
 
+
 ALLOWED_USER_IDS: Set[int] = _load_allowed_ids()
 ALLOWED_USERNAMES: Set[str] = _load_allowed_usernames()
 
 # Флаг для временного отключения ограничения доступа
 ACCESS_CONTROL_ENABLED = True
 
+
 class AccessControlMiddleware(BaseMiddleware):
     """Middleware для ограничения доступа к боту только для определенного пользователя"""
-    
+
     async def __call__(
-        self,
-        handler: Callable[[Message, Dict[str, Any]], Awaitable[Any]],
-        event: Message | CallbackQuery | ChatMemberUpdated,
-        data: Dict[str, Any]
+            self,
+            handler: Callable[[Message, Dict[str, Any]], Awaitable[Any]],
+            event: Message | CallbackQuery | ChatMemberUpdated,
+            data: Dict[str, Any]
     ) -> Any:
         # Получаем user_id в зависимости от типа события
         user_id = None
-        
+
         if isinstance(event, Message):
             user_id = event.from_user.id
         elif isinstance(event, CallbackQuery):
             user_id = event.from_user.id
         elif isinstance(event, ChatMemberUpdated):
             user_id = event.from_user.id
-        
+
         # Если не удалось получить user_id, пропускаем
         if user_id is None:
             logger.warning("Не удалось получить user_id для проверки доступа")
             return await handler(event, data)
-        
+
         # Если контроль доступа отключен, пропускаем проверку
         if not ACCESS_CONTROL_ENABLED:
             logger.info(f"🔓 Контроль доступа отключен, разрешаем доступ для пользователя {user_id}")
             return await handler(event, data)
-        
+
         # Исключения для системных событий (добавление бота в группу и т.д.)
         if isinstance(event, ChatMemberUpdated):
             # Разрешаем события изменения статуса бота в группах
@@ -99,7 +104,7 @@ class AccessControlMiddleware(BaseMiddleware):
                 logger.warning(f"Ошибка при получении информации о боте: {e}")
                 # Если не можем получить информацию о боте, пропускаем проверку
                 pass
-        
+
         # Проверяем доступ (по ID или username)
         username = None
         first_name = None
@@ -119,9 +124,9 @@ class AccessControlMiddleware(BaseMiddleware):
             # Получаем информацию о пользователе для логирования
             username = username or "no_username"
             first_name = first_name or "no_name"
-            
+
             logger.warning(f"🚫 Доступ запрещен для пользователя {user_id} (@{username}, {first_name})")
-            
+
             # Отправляем сообщение об отказе в доступе
             if isinstance(event, Message):
                 await event.answer(
@@ -135,9 +140,9 @@ class AccessControlMiddleware(BaseMiddleware):
                     "🚫 Доступ запрещен. Обратитесь к @texas_dev",
                     show_alert=True
                 )
-            
+
             return  # Блокируем выполнение хэндлера
-        
+
         # Если доступ разрешен, продолжаем выполнение
         logger.debug(f"✅ Доступ разрешен для пользователя {user_id}")
         return await handler(event, data)

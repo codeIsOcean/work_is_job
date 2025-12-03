@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Универсальный скрипт запуска бота
 Можно запускать из любой директории через IDE Play кнопку
@@ -8,6 +9,21 @@ import os
 import sys
 import asyncio
 from pathlib import Path
+
+# ============================================================
+# ИСПРАВЛЕНИЕ КОДИРОВКИ ДЛЯ WINDOWS
+# ============================================================
+# Windows по умолчанию использует кодировку 'charmap' (cp1251/cp866)
+# которая не поддерживает эмодзи и многие unicode символы.
+# Устанавливаем UTF-8 для корректного отображения логов с эмодзи.
+if sys.platform == 'win32':
+    # Настраиваем кодировку для stdin/stdout/stderr
+    sys.stdin.reconfigure(encoding='utf-8') if hasattr(sys.stdin, 'reconfigure') else None
+    sys.stdout.reconfigure(encoding='utf-8') if hasattr(sys.stdout, 'reconfigure') else None
+    sys.stderr.reconfigure(encoding='utf-8') if hasattr(sys.stderr, 'reconfigure') else None
+
+    # Устанавливаем переменную окружения для всех подпроцессов
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 # Получаем абсолютный путь к корню проекта
 project_root = Path(__file__).parent.absolute()

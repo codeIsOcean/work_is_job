@@ -698,7 +698,7 @@ async def process_captcha_answer(message: Message, state: FSMContext, session: A
                     await redis_conn.redis.setex(f"captcha_passed:{message.from_user.id}:{chat_id_for_db}", 3600, "1")
                     logger.info(f"✅ [CAPTCHA] Флаг captcha_passed установлен: user={message.from_user.id}, chat={chat_id_for_db}")
             
-            # Теперь размучиваем пользователя для всех найденных chat_id
+            # Теперь размучиваем пользователя для всех найденных chat_id, НО только если не требуется автомут
             # БАГ №1: Размут должен происходить ПОСЛЕ установки флага
             all_chat_ids = chat_ids_to_check if chat_ids_to_check else []
             if not all_chat_ids and chat_id:
@@ -735,33 +735,37 @@ async def process_captcha_answer(message: Message, state: FSMContext, session: A
                         is_in_group = False
                         logger.warning(f"⚠️ [CAPTCHA] Не удалось проверить статус пользователя в группе {current_chat_id}: {e}")
                     
-                    # ФИКС 1: Снимаем mute ВСЕГДА после успешной капчи, независимо от статуса пользователя
-                    # УБРАНА проверка is_in_group - mute должен сниматься мгновенно
-                    try:
-                        from aiogram.types import ChatPermissions
-                        await message.bot.restrict_chat_member(
-                            chat_id=current_chat_id,
-                            user_id=message.from_user.id,
-                            permissions=ChatPermissions(
-                                can_send_messages=True,
-                                can_send_media_messages=True,
-                                can_send_polls=True,
-                                can_send_other_messages=True,
-                                can_add_web_page_previews=True,
-                                can_invite_users=True,
-                                can_pin_messages=True,
-                            ),
+                    # ВАЖНО: Снимаем mute ТОЛЬКО если не требуется автомут
+                    if not decision.get("should_auto_mute", False):
+                        try:
+                            from aiogram.types import ChatPermissions
+                            await message.bot.restrict_chat_member(
+                                chat_id=current_chat_id,
+                                user_id=message.from_user.id,
+                                permissions=ChatPermissions(
+                                    can_send_messages=True,
+                                    can_send_media_messages=True,
+                                    can_send_polls=True,
+                                    can_send_other_messages=True,
+                                    can_add_web_page_previews=True,
+                                    can_invite_users=True,
+                                    can_pin_messages=True,
+                                ),
+                            )
+                            logger.info(f"✅ [CAPTCHA] Mute СНЯТ для пользователя {message.from_user.id} в группе {current_chat_id} (ФИКС 1: мгновенно, без проверки статуса)")
+                        except Exception as e:
+                            # Если пользователь не в группе - это не критично, просто логируем
+                            error_str = str(e).lower()
+                            if "chat not found" in error_str or "user not found" in error_str:
+                                logger.info(f"ℹ️ [CAPTCHA] Пользователь {message.from_user.id} еще не в группе {current_chat_id}, mute будет снят при входе")
+                            else:
+                                logger.error(f"❌ [CAPTCHA] ОШИБКА при снятии mute для {current_chat_id}: {e}")
+                                # ФИКС: Используем глобальный импорт traceback из начала файла
+                                logger.error(traceback.format_exc())
+                    else:
+                        logger.info(
+                            f"🔇 [CAPTCHA] Автомут включён (should_auto_mute=True), mute НЕ снимаем для пользователя {message.from_user.id} в группе {current_chat_id}"
                         )
-                        logger.info(f"✅ [CAPTCHA] Mute СНЯТ для пользователя {message.from_user.id} в группе {current_chat_id} (ФИКС 1: мгновенно, без проверки статуса)")
-                    except Exception as e:
-                        # Если пользователь не в группе - это не критично, просто логируем
-                        error_str = str(e).lower()
-                        if "chat not found" in error_str or "user not found" in error_str:
-                            logger.info(f"ℹ️ [CAPTCHA] Пользователь {message.from_user.id} еще не в группе {current_chat_id}, mute будет снят при входе")
-                        else:
-                            logger.error(f"❌ [CAPTCHA] ОШИБКА при снятии mute для {current_chat_id}: {e}")
-                            # ФИКС: Используем глобальный импорт traceback из начала файла
-                            logger.error(traceback.format_exc())
                     
                     # Удаляем системное сообщение капчи в группе после прохождения
                     try:
@@ -786,7 +790,33 @@ async def process_captcha_answer(message: Message, state: FSMContext, session: A
                 result = await approve_chat_join_request(message.bot, chat_id, message.from_user.id)
 
                 if result["success"]:
-                    pass  # Логика уже обработана выше
+                    # КРИТИЧНО: После одобрения join_request Telegram СНИМАЕТ все restrictions!
+                    # Если нужен автомут - применяем его СРАЗУ ПОСЛЕ одобрения
+                    if decision.get("should_auto_mute", False):
+                        try:
+                            from aiogram.types import ChatPermissions
+                            # Применяем полное ограничение (пользователь не может писать)
+                            await message.bot.restrict_chat_member(
+                                chat_id=chat_id,
+                                user_id=message.from_user.id,
+                                permissions=ChatPermissions(
+                                    can_send_messages=False,  # НЕ может писать
+                                    can_send_media_messages=False,
+                                    can_send_polls=False,
+                                    can_send_other_messages=False,
+                                    can_add_web_page_previews=False,
+                                    can_invite_users=False,
+                                    can_pin_messages=False,
+                                    can_change_info=False
+                                ),
+                                until_date=None  # Бессрочный мут (пока админ не размутит)
+                            )
+                            logger.warning(
+                                f"🔇 [AUTO_MUTE] Пользователь {message.from_user.id} ЗАМУЧЕН в группе {chat_id} "
+                                f"(риск: {decision.get('total_risk_score', 0)}/100, причины: {', '.join(decision.get('analysis', {}).get('reasons', [])[:2])})"
+                            )
+                        except Exception as e:
+                            logger.error(f"❌ [AUTO_MUTE] Ошибка при применении мута для {message.from_user.id} в группе {chat_id}: {e}")
             
             # Убеждаемся, что флаг автомута установлен с правильным chat_id
             for current_chat_id in all_chat_ids:
@@ -822,10 +852,38 @@ async def process_captcha_answer(message: Message, state: FSMContext, session: A
             if chat_id:
                 # Пытаемся одобрить запрос (только для join_request)
                 result = await approve_chat_join_request(message.bot, chat_id, message.from_user.id)
-                
+
                 if result.get("success"):
                     group_link_for_keyboard = result.get("group_link")
                     logger.info(f"Одобрен запрос на вступление user=@{message.from_user.username or message.from_user.first_name or message.from_user.id} [{message.from_user.id}] group={group_name}")
+
+                    # КРИТИЧНО: После одобрения join_request Telegram СНИМАЕТ все restrictions!
+                    # ПРОВЕРЯЕМ: Если это СКАММЕР (should_auto_mute=True) → применяем мут СРАЗУ
+                    # ИНАЧЕ: обычный пользователь проходит БЕЗ мута
+                    if decision.get("should_auto_mute", False):
+                        try:
+                            from aiogram.types import ChatPermissions
+                            await message.bot.restrict_chat_member(
+                                chat_id=chat_id,
+                                user_id=message.from_user.id,
+                                permissions=ChatPermissions(
+                                    can_send_messages=False,
+                                    can_send_media_messages=False,
+                                    can_send_polls=False,
+                                    can_send_other_messages=False,
+                                    can_add_web_page_previews=False,
+                                    can_invite_users=False,
+                                    can_pin_messages=False,
+                                    can_change_info=False
+                                ),
+                                until_date=None  # Бессрочный мут
+                            )
+                            logger.warning(
+                                f"🔇 [AUTO_MUTE] Скаммер {message.from_user.id} ЗАМУЧЕН в группе {chat_id} "
+                                f"(риск: {decision.get('total_risk_score', 0)}/100)"
+                            )
+                        except Exception as e:
+                            logger.error(f"❌ [AUTO_MUTE] Ошибка мута для {message.from_user.id} в {chat_id}: {e}")
                 else:
                     # Ошибка approve — показываем сообщение и (если есть) ссылку
                     await message.answer(result.get("message", "Произошла ошибка при одобрении запроса."), parse_mode="HTML")
@@ -1286,9 +1344,9 @@ async def back_to_main_captcha_settings(callback: CallbackQuery, state: FSMConte
     await callback.answer("Настройки доступны через команду /settings", show_alert=True)
 
 
-@visual_captcha_handler_router.message(Command("start"))
+@visual_captcha_handler_router.message(Command("start"), F.text == "/start")
 async def start_command(message: Message, state: FSMContext, session: AsyncSession):
-    """Обработчик обычной команды /start"""
+    """Обработчик обычной команды /start (БЕЗ параметров, чтобы не перехватывать deep_link)"""
     user_id = message.from_user.id
     
     if user_id == 619924982:
@@ -1432,6 +1490,34 @@ async def approve_user_join_request(message: Message, group_name: str, message_i
                 # Устанавливаем флаг, что пользователь прошел капчу
                 await redis_conn.redis.setex(f"captcha_passed:{message.from_user.id}:{chat_id}", 3600, "1")
                 logger.info(f"✅ Пользователь {message.from_user.id} прошел капчу для группы {chat_id}")
+
+                # КРИТИЧНО: После одобрения join_request Telegram СНИМАЕТ все restrictions!
+                # Проверяем Redis: если пользователь помечен как скаммер → применяем мут СРАЗУ
+                is_scammer = await redis_conn.redis.get(f"auto_mute_scammer:{message.from_user.id}:{chat_id}")
+                if is_scammer:
+                    try:
+                        from aiogram.types import ChatPermissions
+                        await message.bot.restrict_chat_member(
+                            chat_id=chat_id,
+                            user_id=message.from_user.id,
+                            permissions=ChatPermissions(
+                                can_send_messages=False,
+                                can_send_media_messages=False,
+                                can_send_polls=False,
+                                can_send_other_messages=False,
+                                can_add_web_page_previews=False,
+                                can_invite_users=False,
+                                can_pin_messages=False,
+                                can_change_info=False
+                            ),
+                            until_date=None  # Бессрочный мут
+                        )
+                        logger.warning(
+                            f"🔇 [AUTO_MUTE] Скаммер {message.from_user.id} ЗАМУЧЕН в группе {chat_id} "
+                            f"(помечен в Redis)"
+                        )
+                    except Exception as e:
+                        logger.error(f"❌ [AUTO_MUTE] Ошибка мута для {message.from_user.id} в {chat_id}: {e}")
                 
                 # Получаем реальное название группы
                 try:
@@ -1733,11 +1819,24 @@ async def handle_member_status_change(event: ChatMemberUpdated, session: AsyncSe
 
     initiator = event.from_user if event.from_user and event.from_user.id != user.id else None
 
+    # ФИКС БАГ 2: Проверяем, был ли у пользователя pending join_request
+    # Если был - это одобрение запроса, а не приглашение админом
+    group_id = chat.username or f"private_{chat.id}"
+    join_request_key = f"join_request:{user.id}:{group_id}"
+    had_pending_request = await redis_conn.redis.exists(join_request_key)
+
+    if had_pending_request:
+        logger.info(
+            f"✅ [MEMBER_JOIN] Обнаружен pending join_request для user={user.id}, "
+            f"chat={chat.id} - это одобрение запроса, НЕ invite"
+        )
+
     # ФИКС №1 и №4: Явно разделяем три сценария: join_request, invite, self-join
     event_type = classify_join_event(
         event=event,
         user_id=user.id,
         initiator_id=initiator.id if initiator else None,
+        had_pending_request=bool(had_pending_request),
     )
 
     logger.info(f"🔍 [MEMBER_JOIN] Классификация события: user={user.id}, type={event_type.value}")

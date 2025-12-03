@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, insert
 
 from bot.services.redis_conn import redis
-from bot.database.models import ChatSettings, ScammerTracker
+from bot.database.models import ChatSettings, ScammerTracker, Group
 from bot.database.session import get_session
 from bot.utils.logger import send_formatted_log
 
@@ -144,6 +144,159 @@ async def set_auto_mute_scammers_status(chat_id: int, enabled: bool, session: As
         return False
 
 
+async def mute_scammer_in_all_groups(bot: Bot, user_id: int, user_username: str = None, reason: str = "Подозрительный аккаунт") -> dict:
+    """
+    Мутит подозрительного пользователя ВО ВСЕХ группах, где присутствует бот
+
+    ЛОГИКА:
+    1. Получает список ВСЕХ групп из базы данных
+    2. Для каждой группы проверяет, включен ли автомут
+    3. Если автомут включен - мутит пользователя в этой группе
+    4. Логирует результаты (успешные муты и ошибки)
+
+    ВАЖНО: Эта функция вызывается когда пользователь признан подозрительным
+    (молодой аккаунт или все фото молодые) и должен быть замучен везде.
+
+    Args:
+        bot: Экземпляр бота Telegram
+        user_id: ID пользователя для мута
+        user_username: Username пользователя (для логов)
+        reason: Причина мута (для логов)
+
+    Returns:
+        Словарь с результатами:
+        {
+            "total_groups": int,      # Всего групп в БД
+            "muted_in": list,         # Список chat_id где успешно замучен
+            "failed_in": list,        # Список chat_id где мут не удался
+            "skipped": list           # Список chat_id где автомут выключен
+        }
+    """
+    # Инициализируем результаты
+    results = {
+        "total_groups": 0,
+        "muted_in": [],      # Успешно замучен
+        "failed_in": [],     # Ошибка мута
+        "skipped": []        # Пропущено (автомут выключен)
+    }
+
+    try:
+        # ============================================================
+        # ШАГ 1: Получаем список ВСЕХ групп из базы данных
+        # ============================================================
+        async with get_session() as session:
+            # Получаем все группы из таблицы groups
+            result = await session.execute(select(Group))
+            groups = result.scalars().all()
+            results["total_groups"] = len(groups)
+
+            logger.info(f"🌍 [GLOBAL_MUTE] Начинаем глобальный мут пользователя {user_id} (@{user_username})")
+            logger.info(f"🌍 [GLOBAL_MUTE] Найдено групп в БД: {len(groups)}")
+            logger.info(f"🌍 [GLOBAL_MUTE] Причина мута: {reason}")
+
+            # ============================================================
+            # ШАГ 2: Проходим по каждой группе и мутим
+            # ============================================================
+            for group in groups:
+                chat_id = group.chat_id
+
+                # Пропускаем служебную группу с chat_id=0 (если есть)
+                if chat_id == 0:
+                    logger.debug(f"🌍 [GLOBAL_MUTE] Пропуск служебной группы с chat_id=0")
+                    continue
+
+                try:
+                    # ШАГ 2.1: Проверяем, включен ли автомут в этой группе
+                    auto_mute_enabled = await get_auto_mute_scammers_status(chat_id, session)
+
+                    if not auto_mute_enabled:
+                        # Автомут выключен - пропускаем эту группу
+                        logger.info(f"🌍 [GLOBAL_MUTE] Группа {group.title} ({chat_id}): автомут выключен, пропуск")
+                        results["skipped"].append(chat_id)
+                        continue
+
+                    # ШАГ 2.2: Проверяем, состоит ли бот в этой группе
+                    try:
+                        bot_me = await bot.me()
+                        member = await bot.get_chat_member(chat_id, bot_me.id)
+
+                        # Проверяем статус бота (должен быть администратором)
+                        if member.status not in ("administrator", "creator"):
+                            logger.warning(f"🌍 [GLOBAL_MUTE] Группа {group.title} ({chat_id}): бот не админ, пропуск")
+                            results["skipped"].append(chat_id)
+                            continue
+
+                    except Exception as e:
+                        # Бот не в группе или группа удалена
+                        logger.warning(f"🌍 [GLOBAL_MUTE] Группа {group.title} ({chat_id}): бот не в группе ({str(e)}), пропуск")
+                        results["skipped"].append(chat_id)
+                        continue
+
+                    # ШАГ 2.3: Проверяем, не является ли пользователь уже участником группы
+                    # Если пользователь не в группе, пропускаем (не мутим заранее)
+                    try:
+                        user_member = await bot.get_chat_member(chat_id, user_id)
+                        if user_member.status in ("left", "kicked"):
+                            # Пользователь не в группе - не мутим
+                            logger.debug(f"🌍 [GLOBAL_MUTE] Группа {group.title} ({chat_id}): пользователь не в группе, пропуск")
+                            results["skipped"].append(chat_id)
+                            continue
+                    except Exception:
+                        # Ошибка получения информации о пользователе - считаем что его нет в группе
+                        logger.debug(f"🌍 [GLOBAL_MUTE] Группа {group.title} ({chat_id}): не удалось проверить пользователя, пропуск")
+                        results["skipped"].append(chat_id)
+                        continue
+
+                    # ШАГ 2.4: МУТИМ пользователя в этой группе
+                    logger.info(f"🌍 [GLOBAL_MUTE] Мутим в группе {group.title} ({chat_id})...")
+
+                    await bot.restrict_chat_member(
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        permissions=ChatPermissions(
+                            can_send_messages=False,        # Запрет писать сообщения
+                            can_send_media_messages=False,  # Запрет отправлять медиа
+                            can_send_polls=False,           # Запрет отправлять опросы
+                            can_send_other_messages=False,  # Запрет отправлять другие сообщения
+                            can_add_web_page_previews=False, # Запрет превью ссылок
+                            can_change_info=False,          # Запрет менять инфо группы
+                            can_invite_users=False,         # Запрет приглашать пользователей
+                            can_pin_messages=False          # Запрет закреплять сообщения
+                        ),
+                        until_date=datetime.now() + timedelta(days=366 * 10)  # Мут на 10 лет
+                    )
+
+                    # Успешно замучен
+                    results["muted_in"].append(chat_id)
+                    logger.info(f"✅ [GLOBAL_MUTE] Успешно замучен в группе {group.title} ({chat_id})")
+
+                    # Небольшая задержка между мутами (чтобы не превысить лимиты API)
+                    await asyncio.sleep(0.5)
+
+                except Exception as e:
+                    # Ошибка при муте в конкретной группе
+                    logger.error(f"❌ [GLOBAL_MUTE] Ошибка мута в группе {group.title} ({chat_id}): {e}")
+                    results["failed_in"].append(chat_id)
+
+            # ============================================================
+            # ШАГ 3: Логируем итоговые результаты
+            # ============================================================
+            logger.info(f"🌍 [GLOBAL_MUTE] ИТОГИ глобального мута пользователя {user_id}:")
+            logger.info(f"   ✅ Замучен в {len(results['muted_in'])} группах")
+            logger.info(f"   ❌ Ошибки в {len(results['failed_in'])} группах")
+            logger.info(f"   ⏭️ Пропущено {len(results['skipped'])} групп")
+
+            if results['muted_in']:
+                logger.info(f"   📋 Замучен в группах: {results['muted_in']}")
+
+    except Exception as e:
+        logger.error(f"❌ [GLOBAL_MUTE] Критическая ошибка глобального мута: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+    return results
+
+
 async def auto_mute_scammer_on_join(bot: Bot, event: ChatMemberUpdated) -> bool:
     """
     Автоматически мутит скаммеров при вступлении в группу
@@ -255,8 +408,34 @@ async def auto_mute_scammer_on_join(bot: Bot, event: ChatMemberUpdated) -> bool:
             )
             
             await asyncio.sleep(1)
-            logger.info(f"🔇 Скаммер @{user.username or user.first_name or user.id} [{user.id}] был автоматически замьючен (причина: {mute_reason})")
-            
+            logger.info(f"🔇 Скаммер @{user.username or user.first_name or user.id} [{user.id}] был автоматически замьючен в текущей группе (причина: {mute_reason})")
+
+            # ============================================================
+            # ГЛОБАЛЬНЫЙ МУТ ВО ВСЕХ ГРУППАХ БОТА
+            # ============================================================
+            # Если пользователь признан подозрительным, мутим его ВО ВСЕХ группах
+            # где присутствует бот и включен автомут
+            logger.info(f"🌍 [GLOBAL_MUTE] Запуск глобального мута для пользователя @{user.username or user.first_name or user.id} [{user.id}]...")
+
+            try:
+                # Вызываем функцию глобального мута во всех группах
+                global_mute_results = await mute_scammer_in_all_groups(
+                    bot=bot,
+                    user_id=user.id,
+                    user_username=user.username or user.first_name or str(user.id),
+                    reason=mute_reason
+                )
+
+                # Логируем результаты глобального мута
+                logger.info(f"🌍 [GLOBAL_MUTE] Глобальный мут завершен:")
+                logger.info(f"   ✅ Замучен в {len(global_mute_results['muted_in'])} группах")
+                logger.info(f"   ⏭️ Пропущено {len(global_mute_results['skipped'])} групп")
+                logger.info(f"   ❌ Ошибок: {len(global_mute_results['failed_in'])}")
+
+            except Exception as global_mute_error:
+                # Ошибка глобального мута не должна блокировать основную логику
+                logger.error(f"❌ [GLOBAL_MUTE] Ошибка глобального мута: {global_mute_error}")
+
             # Удаляем флаг автомута из Redis после применения мута
             if auto_mute_flag == "1":
                 await redis.delete(f"auto_mute_scammer:{user.id}:{chat_id}")

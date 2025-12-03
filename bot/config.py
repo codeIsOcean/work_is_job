@@ -36,6 +36,19 @@ LOG_CHANNEL_ID = os.getenv("LOG_CHANNEL_ID")
 raw_admin_ids = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS: List[int] = [int(x.strip()) for x in raw_admin_ids.split(",") if x.strip().isdigit()]
 
+# ============================================================
+# НАСТРОЙКИ PYROGRAM (MTProto API для расширенной информации)
+# ============================================================
+# Pyrogram используется для получения детальной информации о пользователях:
+# - Точная дата создания аккаунта (вместо приблизительной оценки по ID)
+# - Даты загрузки фото профиля (недоступно через Bot API)
+# - Дополнительная информация о профиле пользователя
+#
+# Получить API_ID и API_HASH можно на https://my.telegram.org
+PYROGRAM_API_ID = os.getenv("PYROGRAM_API_ID")  # API ID из my.telegram.org
+PYROGRAM_API_HASH = os.getenv("PYROGRAM_API_HASH")  # API Hash из my.telegram.org
+PYROGRAM_SESSION_NAME = os.getenv("PYROGRAM_SESSION_NAME", "bot_session")  # Имя сессии Pyrogram
+
 # Redis настройки
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
@@ -90,4 +103,8 @@ print(f"✅ USE_WEBHOOK: {USE_WEBHOOK}")
 print(f"✅ ENVIRONMENT: {ENVIRONMENT}")
 print(f"✅ DEBUG: {DEBUG}")
 print(f"✅ LOG_LEVEL: {LOG_LEVEL}")
+# Выводим информацию о настройках Pyrogram (скрываем секретные данные)
+print(f"✅ PYROGRAM_API_ID: {PYROGRAM_API_ID if PYROGRAM_API_ID else 'НЕ УСТАНОВЛЕН'}")
+print(f"✅ PYROGRAM_API_HASH: {'*' * 8 + PYROGRAM_API_HASH[-4:] if PYROGRAM_API_HASH else 'НЕ УСТАНОВЛЕН'}")
+print(f"✅ PYROGRAM_SESSION: {PYROGRAM_SESSION_NAME}")
 

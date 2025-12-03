@@ -24,16 +24,18 @@ def classify_join_event(
     join_request: Optional[ChatJoinRequest] = None,
     user_id: int,
     initiator_id: Optional[int] = None,
+    had_pending_request: bool = False,
 ) -> JoinEventType:
     """
     Классифицирует событие вступления в группу.
-    
+
     Args:
         event: ChatMemberUpdated событие (если есть)
         join_request: ChatJoinRequest событие (если есть)
         user_id: ID пользователя, который вступил/хочет вступить
         initiator_id: ID пользователя, который инициировал событие (from_user.id)
-    
+        had_pending_request: Был ли у пользователя pending join_request (проверяется через Redis)
+
     Returns:
         JoinEventType: Тип события
     """
@@ -60,11 +62,17 @@ def classify_join_event(
             actual_initiator_id = event.from_user.id
         elif hasattr(event, "actor_chat") and event.actor_chat:
             actual_initiator_id = event.actor_chat.id
-    
+
+    # ФИКС БАГ 2: Если у пользователя был pending join_request, который одобрили - это НЕ invite!
+    # Одобрение запроса на вступление != приглашение админом
+    if had_pending_request:
+        # Пользователь сам подал запрос, админ только одобрил - это SELF_JOIN
+        return JoinEventType.SELF_JOIN
+
     # ФИКС 8: INVITE - есть инициатор и он не равен пользователю (истинный инвайт)
     if actual_initiator_id is not None and actual_initiator_id != user_id:
         return JoinEventType.INVITE
-    
+
     # ФИКС 8: SELF_JOIN - нет инициатора или инициатор = пользователь
     # (пользователь сам нажал кнопку/перешел по ссылке) - антифлуд НЕ срабатывает
     return JoinEventType.SELF_JOIN
