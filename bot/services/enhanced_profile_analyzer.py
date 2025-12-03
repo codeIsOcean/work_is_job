@@ -83,32 +83,56 @@ class EnhancedProfileAnalyzer:
 
         try:
             # ============================================================
-            # ПРОВЕРКА #1: Возраст аккаунта (приблизительная оценка по ID)
+            # ЛОГИКА ПРИОРИТЕТА (ВАЖНО!):
+            # 1. ПРИОРИТЕТ: Проверка фото профиля (если есть фото)
+            # 2. ЗАПАСНОЙ: Проверка возраста аккаунта (если НЕТ фото)
             # ============================================================
-            # Используем старый метод для совместимости
-            # Правило: Если возраст <= 30 дней → is_suspicious = True, risk_score = 100
-            age_analysis = await self._analyze_account_age(user_id)
-            analysis["age_analysis"] = age_analysis
-
-            # Если возраст подозрительный → обновляем общий анализ
-            if age_analysis["is_suspicious"]:
-                analysis["is_suspicious"] = True  # Ставим флаг мута
-                analysis["reasons"].extend(age_analysis["reasons"])  # Добавляем причины
-                analysis["risk_score"] = max(analysis["risk_score"], age_analysis["risk_score"])  # Обновляем балл
 
             # ============================================================
-            # ПРОВЕРКА #2: ВСЕ фото профиля через Pyrogram (НОВОЕ!)
+            # ПРОВЕРКА #1 (ПРИОРИТЕТ): ВСЕ фото профиля через Pyrogram
             # ============================================================
             # Используем Pyrogram для получения дат фото (недоступно через Bot API)
             # Правило: Если ВСЕ фото моложе 15 дней → is_suspicious = True, risk_score = 100
             photos_analysis = await self._analyze_profile_photos_pyrogram(user_id)
             analysis["photos_analysis"] = photos_analysis
 
-            # Если фото подозрительные → обновляем общий анализ
-            if photos_analysis["is_suspicious"]:
-                analysis["is_suspicious"] = True  # Ставим флаг мута
-                analysis["reasons"].extend(photos_analysis["reasons"])  # Добавляем причины
-                analysis["risk_score"] = max(analysis["risk_score"], photos_analysis["risk_score"])  # Обновляем балл
+            # Проверяем количество фото
+            has_photos = photos_analysis.get("photos_count", 0) > 0
+
+            if has_photos:
+                # ЕСТЬ ФОТО → используем ТОЛЬКО результат проверки фото (ПРИОРИТЕТ!)
+                logger.info(f"   ✅ У пользователя {user_id} ЕСТЬ фото → проверяем ТОЛЬКО фото (возраст аккаунта игнорируется)")
+
+                # Обновляем общий анализ на основе ТОЛЬКО фото
+                if photos_analysis["is_suspicious"]:
+                    analysis["is_suspicious"] = True
+                    analysis["reasons"].extend(photos_analysis["reasons"])
+                    analysis["risk_score"] = photos_analysis["risk_score"]
+                else:
+                    # Фото старше 15 дней → НЕ МУТИМ (даже если аккаунт молодой!)
+                    analysis["is_suspicious"] = False
+                    analysis["risk_score"] = 0
+
+                # ВАЖНО: Всё равно получаем возраст для логов, НО НЕ используем для решения о муте
+                age_analysis = await self._analyze_account_age(user_id)
+                analysis["age_analysis"] = age_analysis
+                logger.info(f"   ℹ️ Возраст аккаунта: {age_analysis.get('age_days')} дней (НЕ используется для решения о муте, т.к. есть фото)")
+
+            else:
+                # НЕТ ФОТО → используем возраст аккаунта (ЗАПАСНОЙ вариант)
+                logger.info(f"   ⚠️ У пользователя {user_id} НЕТ фото → проверяем возраст аккаунта")
+
+                age_analysis = await self._analyze_account_age(user_id)
+                analysis["age_analysis"] = age_analysis
+
+                # Обновляем общий анализ на основе ТОЛЬКО возраста
+                if age_analysis["is_suspicious"]:
+                    analysis["is_suspicious"] = True
+                    analysis["reasons"].extend(age_analysis["reasons"])
+                    analysis["risk_score"] = age_analysis["risk_score"]
+                else:
+                    analysis["is_suspicious"] = False
+                    analysis["risk_score"] = 0
 
             # ============================================================
             # ЛОГИРОВАНИЕ РЕЗУЛЬТАТОВ
