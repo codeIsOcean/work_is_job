@@ -12,6 +12,8 @@ from typing import Sequence, Union
 from alembic import op
 # Импорт типов данных SQLAlchemy
 import sqlalchemy as sa
+# Импорт PostgreSQL-специфичных типов
+from sqlalchemy.dialects import postgresql
 
 
 # Идентификаторы ревизий, используемые Alembic
@@ -64,17 +66,18 @@ def upgrade() -> None:
     """))
 
     # Определяем enum типы для использования в колонках (без создания)
-    rule_type_enum = sa.Enum(
+    # ВАЖНО: используем postgresql.ENUM вместо sa.Enum для корректной работы create_type=False
+    rule_type_enum = postgresql.ENUM(
         'TELEGRAM_LINK', 'ANY_LINK', 'FORWARD_CHANNEL', 'FORWARD_GROUP',
         'FORWARD_USER', 'FORWARD_BOT', 'QUOTE_CHANNEL', 'QUOTE_GROUP',
         'QUOTE_USER', 'QUOTE_BOT',
         name='rule_type_enum', create_type=False
     )
-    action_type_enum = sa.Enum(
+    action_type_enum = postgresql.ENUM(
         'OFF', 'WARN', 'KICK', 'RESTRICT', 'BAN',
         name='action_type_enum', create_type=False
     )
-    whitelist_scope_enum = sa.Enum(
+    whitelist_scope_enum = postgresql.ENUM(
         'TELEGRAM_LINK', 'ANY_LINK', 'FORWARD', 'QUOTE',
         name='whitelist_scope_enum', create_type=False
     )
