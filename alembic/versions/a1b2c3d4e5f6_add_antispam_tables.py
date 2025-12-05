@@ -29,54 +29,55 @@ def upgrade() -> None:
     """Применить миграцию: создать таблицы и enum типы для антиспам модуля."""
 
     # ============================================================
-    # СОЗДАНИЕ ENUM ТИПОВ
+    # СОЗДАНИЕ ENUM ТИПОВ (через raw SQL с проверкой существования)
     # ============================================================
 
-    # Создаем enum тип для типов правил антиспам
-    # Определяет какой контент проверяется (ссылки, пересылки, цитаты)
+    # Используем raw SQL для создания enum с проверкой - работает надёжнее чем checkfirst
+    connection = op.get_bind()
+
+    # Создаем enum для типов правил антиспам
+    connection.execute(sa.text("""
+        DO $$ BEGIN
+            CREATE TYPE rule_type_enum AS ENUM (
+                'TELEGRAM_LINK', 'ANY_LINK', 'FORWARD_CHANNEL', 'FORWARD_GROUP',
+                'FORWARD_USER', 'FORWARD_BOT', 'QUOTE_CHANNEL', 'QUOTE_GROUP',
+                'QUOTE_USER', 'QUOTE_BOT'
+            );
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+    """))
+
+    # Создаем enum для действий при срабатывании правила
+    connection.execute(sa.text("""
+        DO $$ BEGIN
+            CREATE TYPE action_type_enum AS ENUM ('OFF', 'WARN', 'KICK', 'RESTRICT', 'BAN');
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+    """))
+
+    # Создаем enum для областей применения белого списка
+    connection.execute(sa.text("""
+        DO $$ BEGIN
+            CREATE TYPE whitelist_scope_enum AS ENUM ('TELEGRAM_LINK', 'ANY_LINK', 'FORWARD', 'QUOTE');
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+    """))
+
+    # Определяем enum типы для использования в колонках (без создания)
     rule_type_enum = sa.Enum(
-        'TELEGRAM_LINK',      # Ссылки на Telegram
-        'ANY_LINK',           # Любые HTTP/HTTPS ссылки
-        'FORWARD_CHANNEL',    # Пересылки из каналов
-        'FORWARD_GROUP',      # Пересылки из групп
-        'FORWARD_USER',       # Пересылки от пользователей
-        'FORWARD_BOT',        # Пересылки от ботов
-        'QUOTE_CHANNEL',      # Цитаты из каналов
-        'QUOTE_GROUP',        # Цитаты из групп
-        'QUOTE_USER',         # Цитаты от пользователей
-        'QUOTE_BOT',          # Цитаты от ботов
-        name='rule_type_enum',
-        create_type=False  # НЕ создавать автоматически при create_table
+        'TELEGRAM_LINK', 'ANY_LINK', 'FORWARD_CHANNEL', 'FORWARD_GROUP',
+        'FORWARD_USER', 'FORWARD_BOT', 'QUOTE_CHANNEL', 'QUOTE_GROUP',
+        'QUOTE_USER', 'QUOTE_BOT',
+        name='rule_type_enum', create_type=False
     )
-    # Создаем enum тип в базе данных (checkfirst=True предотвращает ошибку если существует)
-    rule_type_enum.create(op.get_bind(), checkfirst=True)
-
-    # Создаем enum тип для действий при срабатывании правила
-    # Определяет что делать с пользователем при нарушении
     action_type_enum = sa.Enum(
-        'OFF',        # Правило выключено
-        'WARN',       # Предупреждение
-        'KICK',       # Исключение из группы
-        'RESTRICT',   # Ограничение (мут)
-        'BAN',        # Блокировка навсегда
-        name='action_type_enum',
-        create_type=False  # НЕ создавать автоматически при create_table
+        'OFF', 'WARN', 'KICK', 'RESTRICT', 'BAN',
+        name='action_type_enum', create_type=False
     )
-    # Создаем enum тип в базе данных
-    action_type_enum.create(op.get_bind(), checkfirst=True)
-
-    # Создаем enum тип для областей применения белого списка
-    # Определяет для каких типов контента действует исключение
     whitelist_scope_enum = sa.Enum(
-        'TELEGRAM_LINK',  # Исключения для ссылок Telegram
-        'ANY_LINK',       # Исключения для любых ссылок
-        'FORWARD',        # Исключения для пересылок
-        'QUOTE',          # Исключения для цитат
-        name='whitelist_scope_enum',
-        create_type=False  # НЕ создавать автоматически при create_table
+        'TELEGRAM_LINK', 'ANY_LINK', 'FORWARD', 'QUOTE',
+        name='whitelist_scope_enum', create_type=False
     )
-    # Создаем enum тип в базе данных
-    whitelist_scope_enum.create(op.get_bind(), checkfirst=True)
 
     # ============================================================
     # СОЗДАНИЕ ТАБЛИЦЫ ПРАВИЛ АНТИСПАМ
