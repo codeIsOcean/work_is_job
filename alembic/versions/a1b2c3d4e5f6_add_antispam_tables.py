@@ -46,9 +46,9 @@ def upgrade() -> None:
         'QUOTE_USER',         # Цитаты от пользователей
         'QUOTE_BOT',          # Цитаты от ботов
         name='rule_type_enum',
-        create_type=True
+        create_type=False  # НЕ создавать автоматически при create_table
     )
-    # Создаем enum тип в базе данных
+    # Создаем enum тип в базе данных (checkfirst=True предотвращает ошибку если существует)
     rule_type_enum.create(op.get_bind(), checkfirst=True)
 
     # Создаем enum тип для действий при срабатывании правила
@@ -60,7 +60,7 @@ def upgrade() -> None:
         'RESTRICT',   # Ограничение (мут)
         'BAN',        # Блокировка навсегда
         name='action_type_enum',
-        create_type=True
+        create_type=False  # НЕ создавать автоматически при create_table
     )
     # Создаем enum тип в базе данных
     action_type_enum.create(op.get_bind(), checkfirst=True)
@@ -73,7 +73,7 @@ def upgrade() -> None:
         'FORWARD',        # Исключения для пересылок
         'QUOTE',          # Исключения для цитат
         name='whitelist_scope_enum',
-        create_type=True
+        create_type=False  # НЕ создавать автоматически при create_table
     )
     # Создаем enum тип в базе данных
     whitelist_scope_enum.create(op.get_bind(), checkfirst=True)
