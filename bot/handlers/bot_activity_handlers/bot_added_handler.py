@@ -101,7 +101,7 @@ async def on_my_status_change(
 
     # БАГ-ФИКС: Игнорируем личные чаты (private)
     # Бот НЕ может быть "добавлен" в ЛС - это просто пользователь написал /start
-    if chat.type == "private":
+    if chat.type == ChatType.PRIVATE:
         logger.debug(f"[BOT_ADDED] Игнорируем событие my_chat_member для личного чата {chat_id}")
         return
 

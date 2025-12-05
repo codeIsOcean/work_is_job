@@ -113,6 +113,13 @@ async def handle_join_request(join_request: ChatJoinRequest):
                 source="join_request",
             )
 
+            # ФИКС БАГ 2: Сохраняем join_request ДО одобрения
+            # Это нужно для корректной классификации события в on_new_member
+            # Без этого ключа had_pending_request будет False и событие будет
+            # ошибочно классифицировано как INVITE вместо SELF_JOIN
+            group_id = chat.username or f"private_{chat.id}"
+            await save_join_request(user_id, chat_id, group_id)
+
             try:
                 await approve_chat_join_request(join_request.bot, chat_id, user_id)
             except Exception as exc:

@@ -780,19 +780,15 @@ async def set_visual_captcha_status(chat_id: int, enabled: bool) -> None:
 
 
 async def get_visual_captcha_status(chat_id: int) -> bool:
-    """Статус визуальной капчи с защитой от устаревшего Redis-кэша.
+    """Статус визуальной капчи. БД - источник истины.
 
-    Если Redis говорит "выключено", мы дополнительно проверяем БД и при
-    расхождении приводим Redis в соответствие с БД (источником истины).
+    ИСПРАВЛЕНО: Всегда проверяем БД как источник истины.
+    Redis используется только как кэш, который синхронизируется с БД.
+    Это решает проблему рассинхронизации Redis/БД.
     """
     key = f"visual_captcha_enabled:{chat_id}"
-    cached = await redis.get(key)
 
-    # Если кэш явно говорит, что включено — считаем это актуальным
-    if cached == "1":
-        return True
-
-    # Если кэш говорит "выключено" или пустой – перепроверяем в БД
+    # ВСЕГДА проверяем БД как источник истины
     async with get_session() as session:
         raw = session.execute(
             select(CaptchaSettings).where(CaptchaSettings.group_id == chat_id)
@@ -801,8 +797,18 @@ async def get_visual_captcha_status(chat_id: int) -> bool:
         settings = result.scalar_one_or_none()
         enabled = bool(settings.is_visual_enabled) if settings else False
 
-        # Синхронизируем Redis с БД
-        await redis.set(key, "1" if enabled else "0")
+        # Проверяем Redis для синхронизации
+        cached = await redis.get(key)
+        cached_value = cached == "1"
+
+        # Если Redis не совпадает с БД - синхронизируем
+        if cached_value != enabled:
+            logger.info(
+                f"🔄 [VISUAL_CAPTCHA_SYNC] Redis/БД рассинхронизация для chat={chat_id}. "
+                f"БД={enabled}, Redis={cached_value}. Обновляем Redis."
+            )
+            await redis.set(key, "1" if enabled else "0")
+
         return enabled
 
 

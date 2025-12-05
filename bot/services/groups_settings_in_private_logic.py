@@ -69,15 +69,23 @@ async def get_admin_groups(user_id: int, session: AsyncSession, bot: Bot = None)
                         logger.info(f"Бот не состоит в группе {group.chat_id}, пропускаем")
                         continue
                 except Exception as e:
-                    logger.warning(f"Не удалось получить статус бота в группе {group.chat_id}: {e}")
-                    # Чистим устаревшую связь
-                    await session.execute(
-                        delete(UserGroup).where(
-                            UserGroup.user_id == user_id,
-                            UserGroup.group_id == group.chat_id,
+                    error_str = str(e).lower()
+                    # ФИКС: Удаляем связь ТОЛЬКО если группа/пользователь не найдены
+                    # При других ошибках (таймаут, rate limit) - просто пропускаем
+                    if "chat not found" in error_str or "user not found" in error_str or "kicked" in error_str:
+                        logger.warning(f"Группа {group.chat_id} недоступна ({e}), чистим связь")
+                        await session.execute(
+                            delete(UserGroup).where(
+                                UserGroup.user_id == user_id,
+                                UserGroup.group_id == group.chat_id,
+                            )
                         )
-                    )
-                    await session.commit()
+                        await session.commit()
+                    else:
+                        # При временных ошибках (таймаут, rate limit) - НЕ удаляем, просто включаем группу
+                        logger.warning(f"Временная ошибка при проверке бота в группе {group.chat_id}: {e}")
+                        # Доверяем данным из БД при временных ошибках
+                        valid_groups.append(group)
                     continue
 
                 # Проверяем, что пользователь сейчас админ
@@ -94,7 +102,21 @@ async def get_admin_groups(user_id: int, session: AsyncSession, bot: Bot = None)
                         await session.commit()
                         continue
                 except Exception as e:
-                    logger.warning(f"Не удалось проверить права пользователя {user_id} в группе {group.chat_id}: {e}")
+                    error_str = str(e).lower()
+                    # ФИКС: Удаляем связь ТОЛЬКО если пользователь точно не в группе
+                    if "user not found" in error_str or "kicked" in error_str:
+                        logger.warning(f"Пользователь {user_id} не найден в группе {group.chat_id}, чистим связь")
+                        await session.execute(
+                            delete(UserGroup).where(
+                                UserGroup.user_id == user_id,
+                                UserGroup.group_id == group.chat_id,
+                            )
+                        )
+                        await session.commit()
+                    else:
+                        # При временных ошибках - доверяем БД
+                        logger.warning(f"Временная ошибка при проверке прав {user_id} в группе {group.chat_id}: {e}")
+                        valid_groups.append(group)
                     continue
 
                 valid_groups.append(group)

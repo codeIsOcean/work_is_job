@@ -112,7 +112,12 @@ async def main():
 
     # ✅ Подключение middleware — будет автоматически прокидывать сессию в каждый хендлер
     dp.update.middleware(DbSessionMiddleware(async_session))
-    
+
+    # ✅ Подключение автосинхронизации групп
+    # При любом событии из группы - автоматически создаёт записи в БД если их нет
+    from bot.middleware.group_auto_sync_middleware import GroupAutoSyncMiddleware
+    dp.update.middleware(GroupAutoSyncMiddleware())
+
     # ✅ Подключение структурированного логирования ПЕРВЫМ (чтобы перехватить все логи)
     from bot.middleware.structured_logging import StructuredLoggingMiddleware
     # ВАЖНО: middleware выполняется в обратном порядке регистрации, поэтому регистрируем последним

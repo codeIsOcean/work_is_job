@@ -8,7 +8,7 @@ import html
 from datetime import datetime
 from aiogram import Router, F
 from aiogram.types import Message
-from aiogram.filters import Command
+from aiogram.filters import Command, Filter
 from sqlalchemy.ext.asyncio import AsyncSession
 from bot.services.group_journal_service import (
     link_journal_channel,
@@ -20,6 +20,28 @@ from bot.services.groups_settings_in_private_logic import check_granular_permiss
 logger = logging.getLogger(__name__)
 
 journal_link_router = Router()
+
+
+class IsAdminWithChangeInfoFilter(Filter):
+    """
+    Фильтр: проверяет что пользователь админ с правом change_info.
+    Если НЕ админ - фильтр НЕ срабатывает и сообщение идёт в следующие хендлеры.
+    """
+
+    async def __call__(self, message: Message, session: AsyncSession) -> bool:
+        if not message.from_user:
+            return False
+        if message.chat.type not in ("group", "supergroup"):
+            return False
+
+        user_id = message.from_user.id
+        chat_id = message.chat.id
+
+        # Проверяем права - если не админ, возвращаем False (не матчим)
+        is_admin = await check_granular_permissions(
+            message.bot, user_id, chat_id, 'change_info', session
+        )
+        return is_admin
 
 
 @journal_link_router.message(Command("linkjournal"))
@@ -101,32 +123,28 @@ async def unlink_journal_command(message: Message, session: AsyncSession):
         await message.reply("❌ Ошибка при отвязке журнала.")
 
 
-@journal_link_router.message(F.forward_from_chat)
+@journal_link_router.message(F.forward_from_chat, IsAdminWithChangeInfoFilter())
 async def handle_journal_link_forward(message: Message, session: AsyncSession):
     """
     Обрабатывает пересылку сообщения для автоматической привязки журнала.
     Когда админ пересылает сообщение из канала в группу - привязываем канал как журнал.
+
+    ВАЖНО: Фильтр IsAdminWithChangeInfoFilter проверяет права админа.
+    Если НЕ админ - хендлер НЕ вызывается и сообщение идёт в антиспам фильтр.
     """
-    if message.chat.type not in ("group", "supergroup"):
-        return
-    
     # Пропускаем команды
     if message.text and message.text.startswith("/"):
         return
-    
+
     forward_from_chat = message.forward_from_chat
-    
+
     # Проверяем, что пересылка из канала или группы
     if not forward_from_chat or forward_from_chat.type not in ("channel", "group", "supergroup"):
         return
-    
+
     user_id = message.from_user.id
     chat_id = message.chat.id
-    
-    # Проверяем права админа
-    if not await check_granular_permissions(message.bot, user_id, chat_id, 'change_info', session):
-        return  # Просто игнорируем, не отправляем ошибку на каждую пересылку
-    
+
     # Проверяем, что канал не является самой группой
     if forward_from_chat.id == chat_id:
         return

@@ -174,6 +174,8 @@ class ChatSettings(Base):
     captcha_flood_window_seconds = Column(Integer, default=180)
     captcha_flood_action = Column(String(16), default="warn")
     system_mute_announcements_enabled = Column(Boolean, default=True)
+    # Время жизни предупреждений антиспам в секундах (0 = не удалять)
+    antispam_warning_ttl_seconds = Column(Integer, default=0)
 
     group = relationship("Group")
 
@@ -299,4 +301,7 @@ class GroupJournalChannel(Base):
 # Ensure additional models are registered with SQLAlchemy metadata
 import importlib
 
+# Импортируем дополнительные модели для регистрации в SQLAlchemy metadata
 importlib.import_module("bot.database.mute_models")
+# Импортируем модели антиспам для регистрации в SQLAlchemy metadata
+importlib.import_module("bot.database.models_antispam")
