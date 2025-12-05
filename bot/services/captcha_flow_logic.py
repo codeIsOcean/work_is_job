@@ -180,35 +180,38 @@ async def prepare_invite_flow(
         fallback_active = await is_fallback_active(chat_id=chat.id, initiator_id=initiator.id)
         if fallback_active:
             anti_flood = AntiFloodResult(triggered=True, total=0, action=settings.flood_action)
-            await log_mass_invite_event(
-                bot=bot,
-                session=session,
-                chat=chat,
-                initiator=initiator,
-                invited_total=0,
-                settings=settings,
-            )
+            # ОТКЛЮЧЕНО: Ложные срабатывания при одобрении join requests
+            # await log_mass_invite_event(
+            #     bot=bot,
+            #     session=session,
+            #     chat=chat,
+            #     initiator=initiator,
+            #     invited_total=0,
+            #     settings=settings,
+            # )
         else:
             anti_flood = await increment_invite_counter(
                 initiator_id=initiator.id,
                 chat_id=chat.id,
                 settings=settings,
             )
-            if anti_flood.triggered:
-                await log_mass_invite_event(
-                    bot=bot,
-                    session=session,
-                    chat=chat,
-                    initiator=initiator,
-                    invited_total=anti_flood.total,
-                    settings=settings,
-                )
-                await apply_flood_action(
-                    bot=bot,
-                    chat=chat,
-                    initiator=initiator,
-                    flood_result=anti_flood,
-                )
+            # ОТКЛЮЧЕНО: Ложные срабатывания при одобрении join requests
+            # Система неправильно классифицирует одобрение запросов как INVITE
+            # if anti_flood.triggered:
+            #     await log_mass_invite_event(
+            #         bot=bot,
+            #         session=session,
+            #         chat=chat,
+            #         initiator=initiator,
+            #         invited_total=anti_flood.total,
+            #         settings=settings,
+            #     )
+            #     await apply_flood_action(
+            #         bot=bot,
+            #         chat=chat,
+            #         initiator=initiator,
+            #         flood_result=anti_flood,
+            #     )
 
     return await should_require_captcha(
         settings=settings,
