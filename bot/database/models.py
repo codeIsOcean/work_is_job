@@ -305,3 +305,5 @@ import importlib
 importlib.import_module("bot.database.mute_models")
 # Импортируем модели антиспам для регистрации в SQLAlchemy metadata
 importlib.import_module("bot.database.models_antispam")
+# Импортируем модели content_filter для регистрации в SQLAlchemy metadata
+importlib.import_module("bot.database.models_content_filter")

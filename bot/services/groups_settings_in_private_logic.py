@@ -33,34 +33,102 @@ async def _ensure_chat_settings(session: AsyncSession, chat_id: int) -> ChatSett
     return settings
 
 
+async def _ensure_user_group_exists(
+    session: AsyncSession,
+    user_id: int,
+    chat_id: int,
+    user_info=None
+) -> None:
+    """Создаёт или обновляет запись UserGroup для админа.
+
+    Решает проблему "исчезающих групп" - когда UserGroup был удалён,
+    но пользователь снова стал админом.
+
+    Args:
+        session: AsyncSession для БД
+        user_id: ID пользователя Telegram
+        chat_id: ID группы
+        user_info: Объект aiogram User (опционально, для создания записи User)
+    """
+    from bot.database.models import User as DbUser
+
+    # Проверяем, существует ли UserGroup
+    result = await session.execute(
+        select(UserGroup).where(
+            UserGroup.user_id == user_id,
+            UserGroup.group_id == chat_id
+        )
+    )
+    existing = result.scalar_one_or_none()
+
+    if existing:
+        # Связь уже есть, ничего не делаем
+        return
+
+    # Связи нет - нужно создать
+    # Сначала проверяем, есть ли пользователь в таблице User (для FK constraint)
+    user_result = await session.execute(
+        select(DbUser).where(DbUser.user_id == user_id)
+    )
+    db_user = user_result.scalar_one_or_none()
+
+    if not db_user and user_info:
+        # Создаём пользователя
+        full_name = f"{user_info.first_name or ''} {user_info.last_name or ''}".strip()
+        db_user = DbUser(
+            user_id=user_id,
+            username=getattr(user_info, 'username', None),
+            full_name=full_name,
+            is_bot=getattr(user_info, 'is_bot', False)
+        )
+        session.add(db_user)
+        await session.flush()
+        logger.info(f"✅ [AUTO_RESTORE] Создан пользователь {user_id} в БД")
+
+    if not db_user:
+        # Не можем создать UserGroup без User
+        logger.warning(f"⚠️ Не удалось восстановить UserGroup: пользователь {user_id} не найден в БД")
+        return
+
+    # Создаём UserGroup
+    session.add(UserGroup(user_id=user_id, group_id=chat_id))
+    await session.commit()
+    logger.info(f"✅ [AUTO_RESTORE] Восстановлена связь админа {user_id} с группой {chat_id}")
+
+
 async def get_admin_groups(user_id: int, session: AsyncSession, bot: Bot = None) -> List[Group]:
     """Возвращает список групп, где пользователь сейчас является админом.
     Если bot не передан — возвращает группы по данным БД без онлайн-проверки.
+
+    ВАЖНО: Функция проверяет ВСЕ группы где бот состоит (не только из UserGroup),
+    чтобы восстановить связи если пользователь снова стал админом.
     """
     try:
-        # Все связи пользователь-группа из БД
-        user_groups_query = select(UserGroup).where(UserGroup.user_id == user_id)
-        user_groups_result = await session.execute(user_groups_query)
-        user_groups = user_groups_result.scalars().all()
+        # ФИКС: Получаем ВСЕ группы из БД (где бот состоит), а не только из UserGroup
+        # Это решает проблему "исчезающих групп" когда UserGroup был удалён,
+        # но пользователь снова стал админом
+        all_groups_query = select(Group).where(Group.chat_id != 0)  # исключаем глобальные настройки
+        all_groups_result = await session.execute(all_groups_query)
+        all_groups = all_groups_result.scalars().all()
 
-        logger.info(f"Найдено {len(user_groups)} записей с правами админа (по БД)")
+        logger.info(f"Найдено {len(all_groups)} групп в БД для проверки")
 
-        if not user_groups:
+        if not all_groups:
             return []
 
-        group_ids = [ug.group_id for ug in user_groups]
-        groups_query = select(Group).where(Group.chat_id.in_(group_ids))
-        groups_result = await session.execute(groups_query)
-        groups = groups_result.scalars().all()
-
         if not bot:
-            # Старое поведение: без онлайн-проверки
+            # Старое поведение: без онлайн-проверки, возвращаем только по UserGroup
+            user_groups_query = select(UserGroup).where(UserGroup.user_id == user_id)
+            user_groups_result = await session.execute(user_groups_query)
+            user_groups = user_groups_result.scalars().all()
+            group_ids = [ug.group_id for ug in user_groups]
             logger.warning("get_admin_groups: bot не передан, возврат групп без онлайн-проверки")
-            return groups
+            return [g for g in all_groups if g.chat_id in group_ids]
 
         valid_groups: List[Group] = []
 
-        for group in groups:
+        # Итерируемся по ВСЕМ группам в БД (не только по UserGroup)
+        for group in all_groups:
             try:
                 # Проверяем, что бот в группе
                 try:
@@ -82,9 +150,11 @@ async def get_admin_groups(user_id: int, session: AsyncSession, bot: Bot = None)
                         )
                         await session.commit()
                     else:
-                        # При временных ошибках (таймаут, rate limit) - НЕ удаляем, просто включаем группу
+                        # При временных ошибках (таймаут, rate limit) - НЕ удаляем, но восстанавливаем UserGroup
                         logger.warning(f"Временная ошибка при проверке бота в группе {group.chat_id}: {e}")
                         # Доверяем данным из БД при временных ошибках
+                        # ФИКС: Восстанавливаем UserGroup чтобы группа не пропала при следующем вызове
+                        await _ensure_user_group_exists(session, user_id, group.chat_id, None)
                         valid_groups.append(group)
                     continue
 
@@ -114,11 +184,16 @@ async def get_admin_groups(user_id: int, session: AsyncSession, bot: Bot = None)
                         )
                         await session.commit()
                     else:
-                        # При временных ошибках - доверяем БД
+                        # При временных ошибках - доверяем БД, но восстанавливаем UserGroup
                         logger.warning(f"Временная ошибка при проверке прав {user_id} в группе {group.chat_id}: {e}")
+                        # ФИКС: Восстанавливаем UserGroup чтобы группа не пропала при следующем вызове
+                        await _ensure_user_group_exists(session, user_id, group.chat_id, None)
                         valid_groups.append(group)
                     continue
 
+                # ФИКС: Восстанавливаем UserGroup если пользователь снова админ
+                # Это решает проблему "исчезающих групп"
+                await _ensure_user_group_exists(session, user_id, group.chat_id, user_member.user)
                 valid_groups.append(group)
             except Exception as e:
                 logger.error(f"Ошибка обработки группы {group.chat_id}: {e}")

@@ -698,6 +698,10 @@ async def create_group_management_keyboard(session: AsyncSession, chat_id: int):
             callback_data=f"as:m:{chat_id}"
         )],
         [InlineKeyboardButton(
+            text="🔍 Фильтр контента",
+            callback_data=f"cf:m:{chat_id}"
+        )],
+        [InlineKeyboardButton(
             text="📢 Рассылки",
             callback_data="broadcast_settings"
         )],

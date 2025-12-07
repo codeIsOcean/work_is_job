@@ -26,16 +26,26 @@ class IsAdminWithChangeInfoFilter(Filter):
     """
     Фильтр: проверяет что пользователь админ с правом change_info.
     Если НЕ админ - фильтр НЕ срабатывает и сообщение идёт в следующие хендлеры.
+
+    Также проверяет анонимных админов (sender_chat == chat).
     """
 
     async def __call__(self, message: Message, session: AsyncSession) -> bool:
-        if not message.from_user:
-            return False
         if message.chat.type not in ("group", "supergroup"):
             return False
 
-        user_id = message.from_user.id
         chat_id = message.chat.id
+
+        # Проверяем: если сообщение от имени группы (sender_chat == chat),
+        # значит это анонимный админ — у него точно есть права
+        if message.sender_chat is not None and message.sender_chat.id == chat_id:
+            return True
+
+        # Обычный пользователь — проверяем права
+        if not message.from_user:
+            return False
+
+        user_id = message.from_user.id
 
         # Проверяем права - если не админ, возвращаем False (не матчим)
         is_admin = await check_granular_permissions(
@@ -53,17 +63,33 @@ async def link_journal_command(message: Message, session: AsyncSession):
     if message.chat.type not in ("group", "supergroup"):
         await message.reply("❌ Эта команда работает только в группах!")
         return
-    
-    user_id = message.from_user.id
+
     chat_id = message.chat.id
-    
-    # Проверяем права: нужно can_change_info для привязки журнала
-    if not await check_granular_permissions(message.bot, user_id, chat_id, 'change_info', session):
-        await message.reply(
-            "❌ Недостаточно прав!\n"
-            "Нужно право 'Изменять информацию о группе' для привязки журнала."
-        )
-        return
+
+    # Проверяем: если сообщение от имени группы (sender_chat == chat),
+    # значит это анонимный админ — у него точно есть права
+    is_anonymous_admin = (
+        message.sender_chat is not None and
+        message.sender_chat.id == chat_id
+    )
+
+    if is_anonymous_admin:
+        # Анонимный админ — пропускаем проверку прав
+        user_id = None  # Анонимный
+    else:
+        # Обычный пользователь — проверяем права
+        if not message.from_user:
+            await message.reply("❌ Не удалось определить отправителя.")
+            return
+        user_id = message.from_user.id
+
+        # Проверяем права: нужно can_change_info для привязки журнала
+        if not await check_granular_permissions(message.bot, user_id, chat_id, 'change_info', session):
+            await message.reply(
+                "❌ Недостаточно прав!\n"
+                "Нужно право 'Изменять информацию о группе' для привязки журнала."
+            )
+            return
     
     # Проверяем, есть ли уже привязанный журнал
     existing = await get_group_journal_channel(session, chat_id)
@@ -96,17 +122,30 @@ async def unlink_journal_command(message: Message, session: AsyncSession):
     if message.chat.type not in ("group", "supergroup"):
         await message.reply("❌ Эта команда работает только в группах!")
         return
-    
-    user_id = message.from_user.id
+
     chat_id = message.chat.id
-    
-    # Проверяем права
-    if not await check_granular_permissions(message.bot, user_id, chat_id, 'change_info', session):
-        await message.reply(
-            "❌ Недостаточно прав!\n"
-            "Нужно право 'Изменять информацию о группе' для отвязки журнала."
-        )
-        return
+
+    # Проверяем: если сообщение от имени группы (sender_chat == chat),
+    # значит это анонимный админ — у него точно есть права
+    is_anonymous_admin = (
+        message.sender_chat is not None and
+        message.sender_chat.id == chat_id
+    )
+
+    if not is_anonymous_admin:
+        # Обычный пользователь — проверяем права
+        if not message.from_user:
+            await message.reply("❌ Не удалось определить отправителя.")
+            return
+        user_id = message.from_user.id
+
+        # Проверяем права
+        if not await check_granular_permissions(message.bot, user_id, chat_id, 'change_info', session):
+            await message.reply(
+                "❌ Недостаточно прав!\n"
+                "Нужно право 'Изменять информацию о группе' для отвязки журнала."
+            )
+            return
     
     existing = await get_group_journal_channel(session, chat_id)
     
