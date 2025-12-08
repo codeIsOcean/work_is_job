@@ -56,9 +56,18 @@ async def log_new_member(
     user: User,
     chat: Chat,
     invited_by: Optional[User] = None,
-    session: Optional[AsyncSession] = None
+    session: Optional[AsyncSession] = None,
+    age_info: Optional[Dict[str, Any]] = None
 ):
-    """Логирует нового участника группы"""
+    """
+    Логирует нового участника группы
+
+    Args:
+        age_info: Опциональный словарь с информацией о возрасте:
+            - photo_age_days: возраст самого старого фото (если есть)
+            - estimated_age_days: приблизительный возраст аккаунта (динамический расчёт)
+            - photos_count: количество фото в профиле
+    """
     try:
         user_data = {
             "user_id": user.id,
@@ -66,13 +75,13 @@ async def log_new_member(
             "first_name": user.first_name,
             "last_name": user.last_name,
         }
-        
+
         group_data = {
             "chat_id": chat.id,
             "title": chat.title,
             "username": chat.username,
         }
-        
+
         additional_info = {}
         if invited_by:
             additional_info["invited_by"] = {
@@ -81,7 +90,11 @@ async def log_new_member(
                 "first_name": invited_by.first_name,
                 "last_name": invited_by.last_name,
             }
-        
+
+        # Добавляем информацию о возрасте аккаунта (если передана)
+        if age_info:
+            additional_info["age_info"] = age_info
+
         await send_activity_log(
             bot=bot,
             event_type="НовыйПользователь",

@@ -11,6 +11,8 @@ from aiogram.filters import Command
 from bot.services.enhanced_profile_analyzer import enhanced_profile_analyzer
 from bot.services.account_age_estimator import account_age_estimator
 from bot.services.bio_content_analyzer import bio_analyzer
+from bot.services.redis_conn import redis as redis_client
+from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 enhanced_analysis_router = Router()
@@ -33,8 +35,11 @@ async def test_enhanced_analysis(message: Message, bot: Bot):
 
         await message.answer("🔍 Запускаю расширенный анализ профиля...")
 
-        # Анализ возраста аккаунта
-        age_info = account_age_estimator.get_detailed_age_info(user_id)
+        # Анализ возраста аккаунта (ИСПРАВЛЕНО: динамический расчёт)
+        age_days = await account_age_estimator.get_dynamic_age_days(redis_client, user_id)
+        age_risk_score = 100 if age_days <= 30 else 0
+        age_label = "young" if age_days <= 30 else "mature"
+        creation_date = datetime.now(timezone.utc) - timedelta(days=age_days)
 
         # Анализ био
         bio_text = "Тестовое био для проверки анализа"
@@ -50,11 +55,11 @@ async def test_enhanced_analysis(message: Message, bot: Bot):
 👤 **Пользователь:** {user_data['first_name']} (@{user_data['username']})
 🆔 **ID:** {user_id}
 
-📅 **АНАЛИЗ ВОЗРАСТА АККАУНТА:**
-• Предполагаемая дата создания: {age_info['creation_date_str']}
-• Возраст: {age_info['age_days']} дней
-• Балл риска: {age_info['risk_score']}/100 ({age_info['risk_label']})
-• Описание: {age_info['risk_description']}
+📅 **АНАЛИЗ ВОЗРАСТА АККАУНТА (динамический):**
+• Предполагаемая дата создания: ~{creation_date.strftime('%Y-%m-%d')}
+• Возраст: ~{age_days} дней
+• Балл риска: {age_risk_score}/100 ({age_label})
+• Описание: {'Молодой аккаунт - МУТИМ' if age_days <= 30 else 'Старый аккаунт - OK'}
 
 📝 **АНАЛИЗ БИО:**
 • Балл риска: {bio_analysis['risk_score']}/100
@@ -117,21 +122,24 @@ async def test_age_analysis(message: Message):
     try:
         user_id = message.from_user.id
 
-        # Анализируем возраст
-        age_info = account_age_estimator.get_detailed_age_info(user_id)
+        # Анализируем возраст (ИСПРАВЛЕНО: динамический расчёт)
+        age_days = await account_age_estimator.get_dynamic_age_days(redis_client, user_id)
+        age_risk_score = 100 if age_days <= 30 else 0
+        age_label = "young" if age_days <= 30 else "mature"
+        creation_date = datetime.now(timezone.utc) - timedelta(days=age_days)
 
         report = f"""
-📅 **АНАЛИЗ ВОЗРАСТА АККАУНТА:**
+📅 **АНАЛИЗ ВОЗРАСТА АККАУНТА (динамический):**
 
 **Пользователь:** {message.from_user.first_name} (@{message.from_user.username})
 **ID:** {user_id}
 
 **Результаты:**
-• Предполагаемая дата создания: {age_info['creation_date_str']}
-• Возраст: {age_info['age_days']} дней
-• Балл риска: {age_info['risk_score']}/100
-• Категория: {age_info['risk_label']}
-• Описание: {age_info['risk_description']}
+• Предполагаемая дата создания: ~{creation_date.strftime('%Y-%m-%d')}
+• Возраст: ~{age_days} дней
+• Балл риска: {age_risk_score}/100
+• Категория: {age_label}
+• Описание: {'Молодой аккаунт - МУТИМ' if age_days <= 30 else 'Старый аккаунт - OK'}
         """
 
         await message.answer(report, parse_mode="Markdown")

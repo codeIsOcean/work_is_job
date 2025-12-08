@@ -165,6 +165,22 @@ async def format_activity_message(
         message = f"🆔 #{event_type} вступление не по приглашению\n\n"
         message += f"Группа: {group_display} #c{group_id}\n"
         message += f"Пользователь: {user_display} #user{user_id}\n"
+
+        # Добавляем информацию о возрасте аккаунта (если передана)
+        if additional_info and additional_info.get('age_info'):
+            age_info = additional_info['age_info']
+            photo_age = age_info.get('photo_age_days')
+            estimated_age = age_info.get('estimated_age_days')
+            photos_count = age_info.get('photos_count', 0)
+
+            if photos_count > 0 and photo_age is not None:
+                message += f"📸 Возраст фото: {photo_age} дн. ({photos_count} фото)\n"
+            else:
+                message += f"📸 Фото: нет\n"
+
+            if estimated_age is not None:
+                message += f"📅 Прибл. возраст аккаунта: ~{estimated_age} дн.\n"
+
         message += f"👋Время: {current_time}"
         
     elif event_type == "пользовательудален":

@@ -70,6 +70,7 @@ from bot.services.bot_activity_journal.bot_activity_journal_logic import (
     log_new_member,
 )
 from bot.services.spammer_registry import mute_suspicious_user_across_groups
+from bot.services.account_age_estimator import account_age_estimator
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,13 @@ async def handle_join_request(join_request: ChatJoinRequest):
     chat = join_request.chat
     user_id = user.id
     chat_id = chat.id
+
+    # Обновляем max_seen_id для динамического расчёта возраста аккаунтов
+    # Это позволяет точнее оценивать возраст новых пользователей
+    try:
+        await account_age_estimator.update_max_seen_id(redis, user_id)
+    except Exception as e:
+        logger.warning(f"Не удалось обновить max_seen_id: {e}")
 
     async with get_session() as session:
         settings_snapshot = await load_captcha_settings(session, chat_id)
@@ -2138,6 +2146,29 @@ async def handle_member_status_change(event: ChatMemberUpdated, session: AsyncSe
 
         await clear_captcha_state(chat.id, user.id)
 
+        # Получаем информацию о возрасте аккаунта для журнала
+        age_info = None
+        try:
+            from bot.services.enhanced_profile_analyzer import enhanced_profile_analyzer
+            user_data = {
+                "id": user.id,
+                "username": user.username,
+                "first_name": user.first_name,
+                "last_name": getattr(user, 'last_name', None),
+            }
+            analysis = await enhanced_profile_analyzer.analyze_user_profile_enhanced(user_data, event.bot)
+            photos_analysis = analysis.get('photos_analysis', {})
+            age_analysis = analysis.get('age_analysis', {})
+
+            age_info = {
+                'photo_age_days': photos_analysis.get('oldest_photo_days'),
+                'photos_count': photos_analysis.get('photos_count', 0),
+                'estimated_age_days': age_analysis.get('age_days'),
+            }
+            logger.info(f"📊 [AGE_INFO] user={user.id}: фото={age_info['photo_age_days']} дн., прибл.={age_info['estimated_age_days']} дн.")
+        except Exception as age_error:
+            logger.warning(f"Не удалось получить информацию о возрасте для {user.id}: {age_error}")
+
         try:
             await log_new_member(
                 bot=event.bot,
@@ -2145,6 +2176,7 @@ async def handle_member_status_change(event: ChatMemberUpdated, session: AsyncSe
                 chat=chat,
                 invited_by=initiator,
                 session=session,
+                age_info=age_info,
             )
         except Exception as log_error:
             logger.error("Ошибка при логировании нового участника: %s", log_error)

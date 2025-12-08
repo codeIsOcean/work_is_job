@@ -350,13 +350,13 @@ class PyrogramService:
                 account_age_days = oldest_photo['age_days']
             else:
                 # ВАЖНО: Telegram API НЕ предоставляет точную дату регистрации!
-                # Если фото нет - используем приблизительную оценку по USER ID
+                # Если фото нет - используем ДИНАМИЧЕСКИЙ расчёт по USER ID
+                # ИСПРАВЛЕНО: Заменён устаревший статический маппинг на динамический расчёт
                 from bot.services.account_age_estimator import account_age_estimator
-                age_info = account_age_estimator.get_detailed_age_info(user_id)
-                account_age_days = age_info["age_days"]
-                # Парсим дату из строки формата "YYYY-MM-DD HH:MM:SS UTC"
-                creation_date_str = age_info["creation_date_str"]
-                creation_date = datetime.strptime(creation_date_str, "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
+                from bot.services.redis_conn import redis as redis_client
+                account_age_days = await account_age_estimator.get_dynamic_age_days(redis_client, user_id)
+                # Вычисляем примерную дату создания на основе возраста
+                creation_date = datetime.now(timezone.utc) - timedelta(days=account_age_days)
 
             # ГЛАВНАЯ ПРОВЕРКА: Аккаунт моложе 30 дней?
             is_young = account_age_days <= 30

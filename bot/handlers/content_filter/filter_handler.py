@@ -78,6 +78,15 @@ async def content_filter_message_handler(
         session: Сессия БД (инжектится middleware)
     """
     # ─────────────────────────────────────────────────────────
+    # DEBUG: Логируем что хендлер вызван (INFO для видимости на проде)
+    # ─────────────────────────────────────────────────────────
+    logger.info(
+        f"[ContentFilter] 📥 Получено сообщение: chat={message.chat.id}, "
+        f"user={message.from_user.id if message.from_user else 'N/A'}, "
+        f"text={message.text[:50] if message.text else 'N/A'}..."
+    )
+
+    # ─────────────────────────────────────────────────────────
     # ПРОВЕРКА 1: Есть ли автор сообщения
     # ─────────────────────────────────────────────────────────
     # Сообщения от каналов или системные могут не иметь автора
@@ -113,6 +122,13 @@ async def content_filter_message_handler(
     try:
         # Проверяем сообщение всеми фильтрами
         result = await _filter_manager.check_message(message, session)
+
+        # Логируем результат проверки
+        logger.info(
+            f"[ContentFilter] 🔍 Результат проверки: chat={chat_id}, "
+            f"should_act={result.should_act}, detector={result.detector_type}, "
+            f"trigger={result.trigger}"
+        )
 
         # Если фильтр не сработал - ничего не делаем
         if not result.should_act:
@@ -227,12 +243,12 @@ async def _apply_action(
         if delete_delay and delete_delay > 0:
             # Удаляем с задержкой в фоне
             asyncio.create_task(_delayed_delete(message, delete_delay))
-            logger.debug(f"[ContentFilter] Отложено удаление сообщения {message.message_id} на {delete_delay} сек")
+            logger.info(f"[ContentFilter] ⏰ Отложено удаление msg={message.message_id} на {delete_delay} сек")
         else:
             # Удаляем сразу
             try:
                 await message.delete()
-                logger.debug(f"[ContentFilter] Удалено сообщение {message.message_id}")
+                logger.info(f"[ContentFilter] 🗑️ Удалено сообщение msg={message.message_id}")
             except TelegramAPIError as e:
                 # Не смогли удалить - логируем, но продолжаем
                 logger.warning(f"[ContentFilter] Не удалось удалить сообщение: {e}")
@@ -278,7 +294,7 @@ async def _delayed_delete(message: Message, delay_seconds: int) -> None:
     try:
         await asyncio.sleep(delay_seconds)
         await message.delete()
-        logger.debug(f"[ContentFilter] Удалено сообщение {message.message_id} после задержки {delay_seconds} сек")
+        logger.info(f"[ContentFilter] 🗑️ Удалено msg={message.message_id} после задержки {delay_seconds} сек")
     except TelegramAPIError as e:
         logger.warning(f"[ContentFilter] Не удалось удалить сообщение с задержкой: {e}")
     except asyncio.CancelledError:
@@ -298,7 +314,7 @@ async def _schedule_notification_delete(bot, chat_id: int, message_id: int, dela
     try:
         await asyncio.sleep(delay_seconds)
         await bot.delete_message(chat_id=chat_id, message_id=message_id)
-        logger.debug(f"[ContentFilter] Автоудалено уведомление {message_id} через {delay_seconds} сек")
+        logger.info(f"[ContentFilter] 🔔 Автоудалено уведомление msg={message_id} через {delay_seconds} сек")
     except TelegramAPIError as e:
         logger.warning(f"[ContentFilter] Не удалось автоудалить уведомление: {e}")
     except asyncio.CancelledError:
@@ -524,58 +540,116 @@ async def _send_journal_log(
     """
     # Получаем данные для лога
     chat_id = message.chat.id
-    user_id = message.from_user.id
+    user = message.from_user
+    user_id = user.id
 
-    # Формируем упоминание пользователя
-    user_mention = message.from_user.mention_html()
+    # Формируем кликабельную ссылку на пользователя
+    user_name = user.full_name or user.username or str(user_id)
+    user_name_safe = html.escape(user_name)
+    user_link = f'<a href="tg://user?id={user_id}">{user_name_safe}</a>'
 
-    # Определяем эмодзи и текст для типа детектора
-    detector_names = {
-        'word_filter': ('🔤', 'Запрещённое слово'),
-        'scam_detector': ('💰', 'Скам'),
-        'flood_detector': ('📢', 'Флуд')
-    }
-    detector_emoji, detector_name = detector_names.get(
-        result.detector_type,
-        ('🔍', 'Фильтр контента')
-    )
+    # Текущее время (МСК = UTC+3)
+    now = datetime.now(timezone.utc) + timedelta(hours=3)
+    time_str = now.strftime("%H:%M:%S")
 
-    # Определяем текст действия
-    action_names = {
-        'delete': '🗑️ Удалено',
-        'warn': '⚠️ Предупреждение',
-        'mute': '🔇 Мут',
-        'kick': '👢 Исключение',
-        'ban': '🚫 Бан'
-    }
-    action_text = action_names.get(result.action, result.action)
+    # ─────────────────────────────────────────────────────────
+    # WORD FILTER - расширенное логирование
+    # ─────────────────────────────────────────────────────────
+    if result.detector_type == 'word_filter':
+        # Категории слов с эмодзи
+        category_names = {
+            'simple': ('📝', 'Простые'),
+            'harmful': ('💊', 'Вредные'),
+            'obfuscated': ('🔀', 'Обфускация')
+        }
+        cat_emoji, cat_name = category_names.get(
+            result.word_category,
+            ('🔤', 'Без категории')
+        )
 
-    # Формируем текст сообщения для журнала
-    # Используем HTML-безопасный триггер (обрезаем до 100 символов)
-    trigger_text = result.trigger[:100] if result.trigger else 'N/A'
-    # Экранируем HTML специальные символы в триггере
-    trigger_safe = html.escape(trigger_text)
+        # Текст действия
+        action_names = {
+            'delete': '🗑️ Удалено',
+            'warn': '⚠️ Предупреждение',
+            'mute': '🔇 Мут',
+            'kick': '👢 Кик',
+            'ban': '🚫 Бан'
+        }
+        action_text = action_names.get(result.action, result.action)
 
-    # Формируем сообщение
-    journal_text = (
-        f"{detector_emoji} <b>Фильтр контента: {detector_name}</b>\n\n"
-        f"👤 Пользователь: {user_mention} "
-        f"[<code>{user_id}</code>]\n"
-        f"🔎 Триггер: <code>{trigger_safe}</code>\n"
-        f"⚡ Действие: {action_text}\n"
-    )
+        # Длительность мута/бана
+        duration_text = ""
+        if result.action in ('mute', 'ban') and result.action_duration:
+            hours = result.action_duration // 60
+            minutes = result.action_duration % 60
+            if hours > 0:
+                duration_text = f" {hours}ч"
+                if minutes > 0:
+                    duration_text += f" {minutes}мин"
+            else:
+                duration_text = f" {minutes}мин"
 
-    # Добавляем длительность мута если есть
-    if result.action == 'mute' and result.action_duration:
-        hours = result.action_duration // 60
-        minutes = result.action_duration % 60
-        if hours > 0:
-            duration_text = f"{hours}ч"
-            if minutes > 0:
-                duration_text += f" {minutes}мин"
-        else:
-            duration_text = f"{minutes}мин"
-        journal_text += f"⏱️ Длительность: {duration_text}\n"
+        # Триггер (слово)
+        trigger_safe = html.escape(result.trigger[:50] if result.trigger else 'N/A')
+
+        # Оригинальный текст сообщения (обрезаем до 150 символов)
+        original_text = message.text or message.caption or ''
+        if len(original_text) > 150:
+            original_text = original_text[:150] + '...'
+        original_safe = html.escape(original_text)
+
+        # Формируем сообщение для журнала
+        journal_text = (
+            f"🔤 <b>Фильтр слов: {cat_emoji} {cat_name}</b>\n\n"
+            f"👤 {user_link} [<code>{user_id}</code>]\n"
+            f"🔎 Слово: <code>{trigger_safe}</code>\n"
+            f"💬 Текст: <i>{original_safe}</i>\n"
+            f"⚡ {action_text}{duration_text}\n"
+            f"🕐 {time_str}"
+        )
+
+    # ─────────────────────────────────────────────────────────
+    # SCAM DETECTOR
+    # ─────────────────────────────────────────────────────────
+    elif result.detector_type == 'scam':
+        trigger_safe = html.escape(result.trigger[:80] if result.trigger else 'N/A')
+        score_text = f" (score: {result.scam_score})" if result.scam_score else ""
+
+        journal_text = (
+            f"💰 <b>Антискам</b>{score_text}\n\n"
+            f"👤 {user_link} [<code>{user_id}</code>]\n"
+            f"🔎 Сигналы: <code>{trigger_safe}</code>\n"
+            f"⚡ {result.action or 'delete'}\n"
+            f"🕐 {time_str}"
+        )
+
+    # ─────────────────────────────────────────────────────────
+    # FLOOD DETECTOR
+    # ─────────────────────────────────────────────────────────
+    elif result.detector_type == 'flood':
+        deleted_count = len(result.flood_message_ids) if result.flood_message_ids else 0
+
+        journal_text = (
+            f"📢 <b>Антифлуд</b>\n\n"
+            f"👤 {user_link} [<code>{user_id}</code>]\n"
+            f"🔁 Повторов: {result.trigger}\n"
+            f"🗑️ Удалено сообщений: {deleted_count}\n"
+            f"🕐 {time_str}"
+        )
+
+    # ─────────────────────────────────────────────────────────
+    # FALLBACK - другие детекторы
+    # ─────────────────────────────────────────────────────────
+    else:
+        trigger_safe = html.escape(result.trigger[:100] if result.trigger else 'N/A')
+
+        journal_text = (
+            f"🔍 <b>Фильтр контента</b>\n\n"
+            f"👤 {user_link} [<code>{user_id}</code>]\n"
+            f"🔎 Триггер: <code>{trigger_safe}</code>\n"
+            f"⚡ {result.action or 'N/A'}\n"
+            f"🕐 {time_str}"
+        )
 
     # Отправляем в журнал
     try:
@@ -585,7 +659,7 @@ async def _send_journal_log(
             group_id=chat_id,
             message_text=journal_text
         )
-        logger.debug(f"[ContentFilter] Отправлен лог в журнал группы {chat_id}")
+        logger.info(f"[ContentFilter] 📝 Отправлен лог в журнал группы {chat_id}")
     except Exception as e:
         # Не падаем если журнал недоступен
         logger.warning(f"[ContentFilter] Не удалось отправить в журнал: {e}")

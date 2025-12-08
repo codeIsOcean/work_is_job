@@ -101,12 +101,14 @@ class WordFilter:
         """
         Проверяет текст на наличие запрещённых слов.
 
+        ВАЖНО: Нормализация (l33tspeak) применяется ТОЛЬКО к категории 'obfuscated'.
+        Для категорий 'simple' и 'harmful' используется простое сравнение (lowercase).
+
         Args:
             text: Текст для проверки
             chat_id: ID группы (для загрузки слов этой группы)
             session: Сессия БД
-            use_normalizer: Использовать ли TextNormalizer (True по умолчанию)
-                           Если False - поиск только по точному совпадению
+            use_normalizer: Deprecated, игнорируется. Нормализация теперь per-category.
 
         Returns:
             WordMatchResult с информацией о найденном слове (или matched=False)
@@ -131,36 +133,59 @@ class WordFilter:
         whitelist = await self._get_whitelist(chat_id, session)
 
         # ─────────────────────────────────────────────────────────
-        # ШАГ 3: Нормализуем входной текст (если включено)
+        # ШАГ 3: Готовим ОБЕ версии текста
         # ─────────────────────────────────────────────────────────
-        if use_normalizer:
-            # Приводим к единому виду для сравнения (обход l33tspeak)
-            normalized_text = self._normalizer.normalize(text)
-            # Также получаем список отдельных слов из текста
-            text_words = self._normalizer.get_words_from_text(text)
-        else:
-            # Без нормализатора - просто приводим к нижнему регистру
-            normalized_text = text.lower()
-            # Разбиваем на слова по пробелам и знакам препинания
-            text_words = [w.lower() for w in text.split() if w.strip()]
+        # Версия для simple/harmful - простой lowercase
+        text_lower = text.lower()
+        text_words_lower = [w.lower() for w in re.split(r'\W+', text) if w.strip()]
+
+        # Версия для obfuscated - полная нормализация (l33tspeak → кириллица)
+        text_normalized = self._normalizer.normalize(text)
+        text_words_normalized = self._normalizer.get_words_from_text(text)
 
         # ─────────────────────────────────────────────────────────
         # ШАГ 4: Проверяем каждое запрещённое слово
         # ─────────────────────────────────────────────────────────
+        logger.info(
+            f"[WordFilter] Проверка: chat={chat_id}, words={len(filter_words)}, "
+            f"text_lower='{text_lower[:80] if len(text_lower) > 80 else text_lower}'"
+        )
+
         for fw in filter_words:
+            # ─────────────────────────────────────────────────────
+            # ВЫБОР ВЕРСИИ ТЕКСТА НА ОСНОВЕ КАТЕГОРИИ СЛОВА
+            # ─────────────────────────────────────────────────────
+            # obfuscated → используем нормализованный текст (l33tspeak)
+            # simple/harmful → используем простой lowercase
+            if fw.category == 'obfuscated':
+                check_text = text_normalized
+                check_words = text_words_normalized
+                # Для obfuscated слово тоже должно быть нормализовано
+                check_filter_word = fw.normalized
+            else:
+                check_text = text_lower
+                check_words = text_words_lower
+                # Для simple/harmful сравниваем с оригиналом слова (lowercase)
+                check_filter_word = fw.word.lower()
+
+            logger.info(
+                f"[WordFilter] Проверяем: '{fw.word}' (cat={fw.category}, "
+                f"match={fw.match_type}, use_normalized={fw.category == 'obfuscated'})"
+            )
+
             # Проверяем совпадение в зависимости от типа
             is_match = self._check_word_match(
                 filter_word=fw,
-                normalized_text=normalized_text,
-                text_words=text_words,
-                whitelist=whitelist
+                normalized_text=check_text,
+                text_words=check_words,
+                whitelist=whitelist,
+                check_filter_word=check_filter_word
             )
 
             # Если нашли совпадение - возвращаем результат
             if is_match:
                 logger.info(
-                    f"[WordFilter] Найдено запрещённое слово '{fw.word}' "
-                    f"в чате {chat_id}"
+                    f"[WordFilter] ✅ Найдено: '{fw.word}' (cat={fw.category}) в чате {chat_id}"
                 )
                 return WordMatchResult(
                     matched=True,
@@ -179,22 +204,26 @@ class WordFilter:
         filter_word: FilterWord,
         normalized_text: str,
         text_words: List[str],
-        whitelist: Set[str]
+        whitelist: Set[str],
+        check_filter_word: Optional[str] = None
     ) -> bool:
         """
         Проверяет совпадение одного запрещённого слова с текстом.
 
         Args:
             filter_word: Объект FilterWord из БД
-            normalized_text: Нормализованный полный текст
+            normalized_text: Текст для проверки (нормализованный или lowercase)
             text_words: Список отдельных слов из текста
             whitelist: Множество слов-исключений
+            check_filter_word: Слово для сравнения (normalized для obfuscated,
+                               lowercase для simple/harmful). Если None - используется
+                               filter_word.normalized (для обратной совместимости)
 
         Returns:
             True если слово найдено в тексте
         """
-        # Получаем нормализованную версию запрещённого слова
-        normalized_filter_word = filter_word.normalized
+        # Используем переданное слово или fallback на normalized
+        normalized_filter_word = check_filter_word or filter_word.normalized
 
         # ─────────────────────────────────────────────────────────
         # Проверяем тип совпадения
@@ -225,16 +254,20 @@ class WordFilter:
             # ─────────────────────────────────────────────────────
             # PHRASE: ищем как подстроку (может быть частью слова)
             # ─────────────────────────────────────────────────────
-            # Просто проверяем наличие в тексте
-            if normalized_filter_word in normalized_text:
-                # Проверяем whitelist
-                # Для phrase проверяем все слова текста
-                for text_word in text_words:
-                    if normalized_filter_word in text_word:
-                        # Если слово целиком в whitelist - пропускаем
-                        if text_word in whitelist:
-                            continue
-                        return True
+            # Просто проверяем наличие в полном тексте
+            # Важно: text_words не подходит для phrase т.к. split по \W+
+            # удаляет спецсимволы типа + в номерах телефонов
+            is_found = normalized_filter_word in normalized_text
+            logger.info(
+                f"[WordFilter] PHRASE check: '{normalized_filter_word}' in text = {is_found}"
+            )
+            if is_found:
+                # Для whitelist проверяем полный текст, не отдельные слова
+                # Если искомая фраза есть в whitelist - пропускаем
+                if normalized_filter_word in whitelist:
+                    logger.info(f"[WordFilter] PHRASE '{normalized_filter_word}' в whitelist, пропускаем")
+                    return False
+                return True
             return False
 
         else:

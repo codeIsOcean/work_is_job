@@ -44,6 +44,10 @@ async def _ensure_user_group_exists(
     Решает проблему "исчезающих групп" - когда UserGroup был удалён,
     но пользователь снова стал админом.
 
+    КРИТИЧЕСКИЙ ФИКС: Если user_info=None и пользователя нет в БД,
+    создаём User с минимальными данными (только user_id).
+    Это гарантирует что UserGroup ВСЕГДА создастся.
+
     Args:
         session: AsyncSession для БД
         user_id: ID пользователя Telegram
@@ -52,48 +56,61 @@ async def _ensure_user_group_exists(
     """
     from bot.database.models import User as DbUser
 
-    # Проверяем, существует ли UserGroup
-    result = await session.execute(
-        select(UserGroup).where(
-            UserGroup.user_id == user_id,
-            UserGroup.group_id == chat_id
+    try:
+        # Проверяем, существует ли UserGroup
+        result = await session.execute(
+            select(UserGroup).where(
+                UserGroup.user_id == user_id,
+                UserGroup.group_id == chat_id
+            )
         )
-    )
-    existing = result.scalar_one_or_none()
+        existing = result.scalar_one_or_none()
 
-    if existing:
-        # Связь уже есть, ничего не делаем
-        return
+        if existing:
+            # Связь уже есть, ничего не делаем
+            return
 
-    # Связи нет - нужно создать
-    # Сначала проверяем, есть ли пользователь в таблице User (для FK constraint)
-    user_result = await session.execute(
-        select(DbUser).where(DbUser.user_id == user_id)
-    )
-    db_user = user_result.scalar_one_or_none()
-
-    if not db_user and user_info:
-        # Создаём пользователя
-        full_name = f"{user_info.first_name or ''} {user_info.last_name or ''}".strip()
-        db_user = DbUser(
-            user_id=user_id,
-            username=getattr(user_info, 'username', None),
-            full_name=full_name,
-            is_bot=getattr(user_info, 'is_bot', False)
+        # Связи нет - нужно создать
+        # Сначала проверяем, есть ли пользователь в таблице User (для FK constraint)
+        user_result = await session.execute(
+            select(DbUser).where(DbUser.user_id == user_id)
         )
-        session.add(db_user)
-        await session.flush()
-        logger.info(f"✅ [AUTO_RESTORE] Создан пользователь {user_id} в БД")
+        db_user = user_result.scalar_one_or_none()
 
-    if not db_user:
-        # Не можем создать UserGroup без User
-        logger.warning(f"⚠️ Не удалось восстановить UserGroup: пользователь {user_id} не найден в БД")
-        return
+        if not db_user:
+            # КРИТИЧЕСКИЙ ФИКС: Создаём пользователя с минимальными данными
+            # даже если user_info=None. Это гарантирует что UserGroup создастся!
+            if user_info:
+                full_name = f"{user_info.first_name or ''} {user_info.last_name or ''}".strip()
+                username = getattr(user_info, 'username', None)
+                is_bot = getattr(user_info, 'is_bot', False)
+            else:
+                # Минимальные данные - только user_id
+                full_name = f"User_{user_id}"
+                username = None
+                is_bot = False
 
-    # Создаём UserGroup
-    session.add(UserGroup(user_id=user_id, group_id=chat_id))
-    await session.commit()
-    logger.info(f"✅ [AUTO_RESTORE] Восстановлена связь админа {user_id} с группой {chat_id}")
+            db_user = DbUser(
+                user_id=user_id,
+                username=username,
+                full_name=full_name,
+                is_bot=is_bot
+            )
+            session.add(db_user)
+            await session.flush()
+            logger.info(f"✅ [AUTO_RESTORE] Создан пользователь {user_id} в БД (user_info={'есть' if user_info else 'нет'})")
+
+        # Создаём UserGroup
+        session.add(UserGroup(user_id=user_id, group_id=chat_id))
+        await session.commit()
+        logger.info(f"✅ [AUTO_RESTORE] Восстановлена связь админа {user_id} с группой {chat_id}")
+
+    except Exception as e:
+        logger.error(f"❌ [AUTO_RESTORE] Ошибка при восстановлении UserGroup для {user_id} в {chat_id}: {e}")
+        try:
+            await session.rollback()
+        except Exception:
+            pass
 
 
 async def get_admin_groups(user_id: int, session: AsyncSession, bot: Bot = None) -> List[Group]:
@@ -196,14 +213,37 @@ async def get_admin_groups(user_id: int, session: AsyncSession, bot: Bot = None)
                 await _ensure_user_group_exists(session, user_id, group.chat_id, user_member.user)
                 valid_groups.append(group)
             except Exception as e:
-                logger.error(f"Ошибка обработки группы {group.chat_id}: {e}")
+                # КРИТИЧЕСКИЙ ФИКС: При неожиданных ошибках - доверяем БД и добавляем группу!
+                # Раньше группа просто терялась при любом exception
+                logger.error(f"Ошибка обработки группы {group.chat_id}: {e}, но доверяем БД")
+                try:
+                    await _ensure_user_group_exists(session, user_id, group.chat_id, None)
+                    valid_groups.append(group)
+                except Exception:
+                    pass
                 continue
 
         return valid_groups
 
     except Exception as e:
         logger.error(f"Ошибка при получении групп пользователя {user_id}: {e}")
-        return []
+        # КРИТИЧЕСКИЙ ФИКС: При глобальной ошибке - возвращаем кэш из UserGroup
+        # Раньше возвращался пустой список и все группы терялись
+        try:
+            user_groups_query = select(UserGroup).where(UserGroup.user_id == user_id)
+            user_groups_result = await session.execute(user_groups_query)
+            user_groups = user_groups_result.scalars().all()
+            group_ids = [ug.group_id for ug in user_groups]
+
+            all_groups_query = select(Group).where(Group.chat_id.in_(group_ids))
+            all_groups_result = await session.execute(all_groups_query)
+            cached_groups = all_groups_result.scalars().all()
+
+            logger.warning(f"⚠️ Возвращаем {len(cached_groups)} групп из кэша (БД) после ошибки")
+            return cached_groups
+        except Exception as fallback_error:
+            logger.error(f"❌ Даже fallback не сработал: {fallback_error}")
+            return []
 
 
 async def check_admin_rights(session: AsyncSession, user_id: int, chat_id: int) -> bool:

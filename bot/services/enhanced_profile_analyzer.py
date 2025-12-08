@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 from bot.services.account_age_estimator import account_age_estimator
 from bot.services.bio_content_analyzer import bio_analyzer
+from bot.services.redis_conn import redis
 
 # ============================================================
 # ИМПОРТ PYROGRAM СЕРВИСА для расширенной проверки профиля
@@ -166,10 +167,10 @@ class EnhancedProfileAnalyzer:
             Результаты анализа возраста
         """
         try:
-            # Базовая оценка по user_id (старый метод)
-            age_info = self.age_estimator.get_detailed_age_info(user_id)
-            age_days = age_info["age_days"]
-            creation_date_str = age_info["creation_date_str"]
+            # Динамический расчёт возраста по user_id
+            # Использует формулу: (max_seen_id - user_id) / DAILY_GROWTH
+            age_days = await self.age_estimator.get_dynamic_age_days(redis, user_id)
+            creation_date_str = f"~{age_days} дней назад (динамический расчёт)"
 
             # Попытка уточнить возраст через Pyrogram (если доступен)
             precise_age_info: Optional[Dict[str, Any]] = None
@@ -199,22 +200,7 @@ class EnhancedProfileAnalyzer:
                         creation_date_str = creation_dt.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
                     except Exception:
                         creation_date_str = creation_dt.strftime('%Y-%m-%d %H:%M:%S')
-
-                    # ============================================================
-                    # ЛОГИРОВАНИЕ ДЛЯ УЛУЧШЕНИЯ МАППИНГА (НОВОЕ!)
-                    # ============================================================
-                    # Логируем реальные данные для пользователей с ID >= 7B
-                    # Эти данные можно использовать для улучшения маппинга
-                    if user_id >= 7_000_000_000:
-                        try:
-                            creation_date_simple = creation_dt.strftime('%Y-%m-%d')
-                            logger.info(
-                                f"📊 MAPPING_DATA: user_id={user_id}, "
-                                f"creation_date={creation_date_simple}, "
-                                f"age_days={precise_age_days}"
-                            )
-                        except Exception:
-                            pass  # Не ломаем код если логирование не удалось
+                    # NOTE: Автосохранение в маппинг удалено - используем динамический расчёт
 
             # УПРОЩЕННАЯ ЛОГИКА: Только возраст <= 30 дней = МУТ
             # ВАЖНО: Проверяем age_days >= 0, чтобы отрицательные значения не проходили

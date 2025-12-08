@@ -151,10 +151,19 @@ class FilterManager:
 
         # Если настроек нет - модуль не настроен для этой группы
         if not settings:
+            logger.info(f"[FilterManager] ❌ Нет настроек для чата {chat_id}")
             return FilterResult(should_act=False)
+
+        # Логируем состояние модуля
+        logger.info(
+            f"[FilterManager] 📊 Настройки чата {chat_id}: "
+            f"enabled={settings.enabled}, word_filter={settings.word_filter_enabled}, "
+            f"scam={settings.scam_detection_enabled}, flood={settings.flood_detection_enabled}"
+        )
 
         # Если модуль выключен - пропускаем
         if not settings.enabled:
+            logger.info(f"[FilterManager] ⏸️ Модуль выключен для чата {chat_id}")
             return FilterResult(should_act=False)
 
         # Получаем текст сообщения
@@ -207,12 +216,12 @@ class FilterManager:
         # ─────────────────────────────────────────────────────────
         if settings.word_filter_enabled:
             # Проверяем текст на запрещённые слова
-            # Используем настройку word_filter_normalize для включения/выключения нормализатора
+            # Нормализация (l33tspeak) теперь применяется ТОЛЬКО к категории 'obfuscated'
+            # Для simple/harmful используется простой lowercase matching
             word_result = await self._word_filter.check(
                 text=text,
                 chat_id=chat_id,
-                session=session,
-                use_normalizer=settings.word_filter_normalize
+                session=session
             )
 
             # Если найдено запрещённое слово

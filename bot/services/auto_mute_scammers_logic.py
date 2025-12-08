@@ -357,10 +357,11 @@ async def auto_mute_scammer_on_join(bot: Bot, event: ChatMemberUpdated) -> bool:
             logger.info(f"🔍 [AUTO_MUTE_DEBUG] Уровень скама из БД для пользователя @{user.username or user.first_name or user.id} [{user.id}]: {scam_level}")
             
             # ПРИОРИТЕТ 3: Проверяем возраст аккаунта - свежие аккаунты (≤30 дней) мутим автоматически
+            # ИСПРАВЛЕНО: Используем динамический расчёт вместо устаревшего статического маппинга
             from bot.services.account_age_estimator import account_age_estimator
-            age_info = account_age_estimator.get_detailed_age_info(user.id)
-            age_days = age_info["age_days"]
-            age_risk_score = age_info["risk_score"]
+            from bot.services.redis_conn import redis as redis_client
+            age_days = await account_age_estimator.get_dynamic_age_days(redis_client, user.id)
+            age_risk_score = 100 if age_days <= 30 else 0
             
             logger.info(f"🔍 [AUTO_MUTE_DEBUG] Возраст аккаунта @{user.username or user.first_name or user.id} [{user.id}]: {age_days} дней, риск: {age_risk_score}/100")
             

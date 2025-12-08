@@ -112,16 +112,43 @@ async def manually_mute_on_approval(event: ChatMemberUpdated):
         logger.info(f"🔍 [MANUAL_MUTE_HANDLER] Время события: {event.date}")
         logger.info(f"🔍 [MANUAL_MUTE_HANDLER] Инвайтер: {event.invite_link}")
         
-        # ЛОГИРУЕМ ВСТУПЛЕНИЕ ПОЛЬЗОВАТЕЛЯ В ГРУППУ
+        # ЛОГИРУЕМ ВСТУПЛЕНИЕ ПОЛЬЗОВАТЕЛЯ В ГРУППУ (с информацией о возрасте)
         try:
             from bot.database.session import get_session
+            from bot.services.enhanced_profile_analyzer import enhanced_profile_analyzer
+
+            user = event.new_chat_member.user
+            user_data = {
+                "id": user.id,
+                "username": user.username,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+            }
+
+            # Получаем информацию о возрасте аккаунта
+            age_info = None
+            try:
+                analysis = await enhanced_profile_analyzer.analyze_user_profile_enhanced(user_data, event.bot)
+                photos_analysis = analysis.get('photos_analysis', {})
+                age_analysis = analysis.get('age_analysis', {})
+
+                age_info = {
+                    'photo_age_days': photos_analysis.get('oldest_photo_days'),
+                    'photos_count': photos_analysis.get('photos_count', 0),
+                    'estimated_age_days': age_analysis.get('age_days'),
+                }
+                logger.info(f"📊 [AGE_INFO] Пользователь {user.id}: фото={age_info['photo_age_days']} дн., прибл.={age_info['estimated_age_days']} дн.")
+            except Exception as age_error:
+                logger.warning(f"Не удалось получить информацию о возрасте для {user.id}: {age_error}")
+
             async with get_session() as session:
                 await log_new_member(
                     bot=event.bot,
                     user=event.new_chat_member.user,
                     chat=event.chat,
                     invited_by=event.from_user if event.from_user.id != event.new_chat_member.user.id else None,
-                    session=session
+                    session=session,
+                    age_info=age_info
                 )
         except Exception as log_error:
             logger.error(f"Ошибка при логировании вступления пользователя: {log_error}")
