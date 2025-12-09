@@ -1,0 +1,68 @@
+services:
+  db:
+    image: postgres:15
+    container_name: april_test_db
+    hostname: postgres_prod
+    environment:
+      POSTGRES_USER: april_test_bot
+      POSTGRES_PASSWORD: april_postgres_bot
+      POSTGRES_DB: april_test_db
+      TZ: Asia/Almaty
+    volumes:
+      - april_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U april_test_bot -d april_test_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      april_network:
+        aliases:
+          - postgres_prod
+
+  redis:
+    image: redis:7-alpine
+    container_name: april_test_redis
+    hostname: redis_prod
+    volumes:
+      - april_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      april_network:
+        aliases:
+          - redis_prod
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    container_name: april_test_bot
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - april_network
+
+volumes:
+  april_db_data:
+    external: true
+    name: april_bot_postgres_data_april_bot
+  april_redis_data:
+    external: true
+    name: april_bot_redis_data_april_bot
+
+networks:
+  april_network:
+    name: april_bot_default
+    external: true

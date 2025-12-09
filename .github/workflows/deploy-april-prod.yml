@@ -82,9 +82,17 @@ jobs:
             echo "  ДЕПЛОЙ НА ПРОДАКШН (april_test_bot)"
             echo "=============================================="
 
+            # Восстанавливаем docker-compose.yml если отсутствует
+            if [ ! -f docker-compose.yml ]; then
+              echo "⚠️ docker-compose.yml отсутствует, восстанавливаем из deploy/april/"
+              cp deploy/april/docker-compose.yml docker-compose.yml
+              echo "✅ docker-compose.yml восстановлен"
+            fi
+
             # Проверяем что .env существует
             if [ ! -f .env ]; then
               echo "ERROR: .env is missing!"
+              echo "Создайте .env на основе deploy/april/env.example"
               exit 1
             fi
 
