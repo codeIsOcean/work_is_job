@@ -55,11 +55,15 @@ jobs:
             --exclude "__pycache__" \
             --exclude "*.pyc" \
             --exclude ".env*" \
+            --exclude "docker-compose.yml" \
+            --exclude "docker-compose.prod.yml" \
+            --exclude "docker-compose.test.yml" \
             --exclude "docs" \
             --exclude "*.md" \
             --exclude ".gitignore" \
             --exclude ".DS_Store" \
             --exclude "tests" \
+            --exclude "scripts" \
             -e "ssh -o StrictHostKeyChecking=no" \
             ./ ${{ secrets.PROD_SERVER_USER }}@${{ secrets.PROD_SERVER_HOST }}:/root/testBotApril/
           rm -f ~/.ssh/id_rsa
