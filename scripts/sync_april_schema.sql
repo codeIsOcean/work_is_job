@@ -166,6 +166,40 @@ CREATE TABLE IF NOT EXISTS content_filter_settings (
     FOREIGN KEY (chat_id) REFERENCES groups(chat_id) ON DELETE CASCADE
 );
 
+-- Дополнительные колонки content_filter_settings (миграции 2025-12)
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS word_filter_action VARCHAR(20) DEFAULT 'delete';
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS word_filter_mute_duration INTEGER DEFAULT 1440;
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS flood_action VARCHAR(20) DEFAULT 'mute';
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS flood_mute_duration INTEGER DEFAULT 60;
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS word_filter_normalize BOOLEAN DEFAULT true;
+
+-- Simple words settings
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS simple_words_enabled BOOLEAN DEFAULT true;
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS simple_words_action VARCHAR(20) DEFAULT 'delete';
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS simple_words_mute_duration INTEGER DEFAULT 1440;
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS simple_words_mute_text VARCHAR(500);
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS simple_words_ban_text VARCHAR(500);
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS simple_words_delete_delay INTEGER DEFAULT 0;
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS simple_words_notification_delete_delay INTEGER DEFAULT 30;
+
+-- Harmful words settings
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS harmful_words_enabled BOOLEAN DEFAULT true;
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS harmful_words_action VARCHAR(20) DEFAULT 'mute';
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS harmful_words_mute_duration INTEGER DEFAULT 1440;
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS harmful_words_mute_text VARCHAR(500);
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS harmful_words_ban_text VARCHAR(500);
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS harmful_words_delete_delay INTEGER DEFAULT 0;
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS harmful_words_notification_delete_delay INTEGER DEFAULT 30;
+
+-- Obfuscated words settings
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS obfuscated_words_enabled BOOLEAN DEFAULT true;
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS obfuscated_words_action VARCHAR(20) DEFAULT 'mute';
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS obfuscated_words_mute_duration INTEGER DEFAULT 1440;
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS obfuscated_words_mute_text VARCHAR(500);
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS obfuscated_words_ban_text VARCHAR(500);
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS obfuscated_words_delete_delay INTEGER DEFAULT 0;
+ALTER TABLE content_filter_settings ADD COLUMN IF NOT EXISTS obfuscated_words_notification_delete_delay INTEGER DEFAULT 30;
+
 CREATE TABLE IF NOT EXISTS filter_words (
     id SERIAL PRIMARY KEY,
     chat_id BIGINT NOT NULL,
