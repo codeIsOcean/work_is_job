@@ -1,0 +1,226 @@
+name: Deploy to PRODUCTION (April Bot)
+
+# ============================================================
+# РУЧНОЙ ДЕПЛОЙ НА ПРОДАКШН (april_test_bot)
+# ============================================================
+# Этот workflow запускается ТОЛЬКО вручную через GitHub UI
+# Использование: GitHub → Actions → Deploy to PRODUCTION → Run workflow
+# ============================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      sync_users:
+        description: 'Синхронизировать пользователей из тестового бота'
+        required: true
+        default: true
+        type: boolean
+      confirm_deploy:
+        description: 'Подтверждаю деплой на ПРОДАКШН'
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  deploy-production:
+    runs-on: ubuntu-latest
+    # Требуется подтверждение
+    if: ${{ github.event.inputs.confirm_deploy == 'true' }}
+    environment: april-production
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check deployment time (warning)
+        run: |
+          HOUR=$(date -u +%H)
+          # Предупреждение если деплой не ночью (UTC 22:00-05:00 = Dubai 02:00-09:00)
+          if [ "$HOUR" -gt 5 ] && [ "$HOUR" -lt 22 ]; then
+            echo "::warning::Рекомендуется деплоить ночью (02:00-09:00 по Dubai) для минимизации downtime"
+          fi
+
+      - name: Prepare SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.PROD_SERVER_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.PROD_SERVER_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Sync project to april_test_bot
+        run: |
+          rsync -az --delete \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude "__pycache__" \
+            --exclude "*.pyc" \
+            --exclude ".env*" \
+            --exclude "docs" \
+            --exclude "*.md" \
+            --exclude ".gitignore" \
+            --exclude ".DS_Store" \
+            --exclude "tests" \
+            -e "ssh -o StrictHostKeyChecking=no" \
+            ./ ${{ secrets.PROD_SERVER_USER }}@${{ secrets.PROD_SERVER_HOST }}:/root/testBotApril/
+          rm -f ~/.ssh/id_rsa
+
+      - name: Deploy april_test_bot (PRODUCTION)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PROD_SERVER_HOST }}
+          username: ${{ secrets.PROD_SERVER_USER }}
+          key: ${{ secrets.PROD_SERVER_SSH_KEY }}
+          script: |
+            set -e
+            cd /root/testBotApril
+
+            echo "=============================================="
+            echo "  ДЕПЛОЙ НА ПРОДАКШН (april_test_bot)"
+            echo "=============================================="
+
+            # Проверяем что .env существует
+            if [ ! -f .env ]; then
+              echo "ERROR: .env is missing!"
+              exit 1
+            fi
+
+            # Определяем docker compose команду
+            if docker compose version >/dev/null 2>&1; then
+              COMPOSE="docker compose"
+            else
+              COMPOSE="docker-compose"
+            fi
+
+            # Создаём бэкап БД перед деплоем
+            echo "📦 Создаём бэкап БД..."
+            mkdir -p /root/backups
+            docker exec april_test_db pg_dump -U april_test_bot -d april_test_db > /root/backups/april_pre_deploy_$(date +%Y%m%d_%H%M%S).sql || echo "Warning: backup failed"
+
+            # Останавливаем контейнеры
+            echo "🛑 Останавливаем контейнеры..."
+            $COMPOSE down --remove-orphans || true
+
+            # Собираем и запускаем
+            echo "🚀 Запускаем контейнеры..."
+            $COMPOSE up -d --build
+
+            # Ждём готовности
+            echo "⏳ Ждём готовности БД..."
+            sleep 10
+
+            # Применяем миграции
+            echo "📊 Применяем миграции..."
+            docker exec april_test_bot alembic upgrade head || echo "Warning: migrations may have failed"
+
+            # Показываем статус
+            echo ""
+            echo "=============================================="
+            echo "  СТАТУС КОНТЕЙНЕРОВ"
+            echo "=============================================="
+            $COMPOSE ps
+            docker ps --filter "name=april" --format "table {{.Names}}\t{{.Status}}"
+
+      - name: Sync users (if enabled)
+        if: ${{ github.event.inputs.sync_users == 'true' }}
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PROD_SERVER_HOST }}
+          username: ${{ secrets.PROD_SERVER_USER }}
+          key: ${{ secrets.PROD_SERVER_SSH_KEY }}
+          script: |
+            echo "=============================================="
+            echo "  СИНХРОНИЗАЦИЯ ПОЛЬЗОВАТЕЛЕЙ prod → april"
+            echo "=============================================="
+
+            # Проверяем что контейнеры запущены
+            if ! docker ps | grep -q postgres_prod; then
+              echo "⚠️ postgres_prod не запущен, пропускаем синхронизацию"
+              exit 0
+            fi
+
+            if ! docker ps | grep -q april_test_db; then
+              echo "❌ april_test_db не запущен!"
+              exit 1
+            fi
+
+            # Считаем пользователей ДО
+            USERS_BEFORE=$(docker exec april_test_db psql -U april_test_bot -d april_test_db -t -c "SELECT COUNT(*) FROM users;" | tr -d ' ')
+            echo "📊 Пользователей в april ДО: $USERS_BEFORE"
+
+            # Синхронизируем
+            docker exec postgres_prod psql -U postgres -d bot_prod -t -A -c "
+            SELECT 'INSERT INTO users (user_id, username, full_name, first_name, last_name, language_code, is_bot, is_premium, added_to_attachment_menu, can_join_groups, can_read_all_group_messages, supports_inline_queries, can_connect_to_business, has_main_web_app, created_at, updated_at) VALUES ('
+                || user_id || ', '
+                || COALESCE('''' || REPLACE(username, '''', '''''') || '''', 'NULL') || ', '
+                || COALESCE('''' || REPLACE(full_name, '''', '''''') || '''', 'NULL') || ', '
+                || COALESCE('''' || REPLACE(first_name, '''', '''''') || '''', 'NULL') || ', '
+                || COALESCE('''' || REPLACE(last_name, '''', '''''') || '''', 'NULL') || ', '
+                || COALESCE('''' || language_code || '''', 'NULL') || ', '
+                || is_bot || ', '
+                || is_premium || ', '
+                || added_to_attachment_menu || ', '
+                || can_join_groups || ', '
+                || can_read_all_group_messages || ', '
+                || supports_inline_queries || ', '
+                || can_connect_to_business || ', '
+                || has_main_web_app || ', '''
+                || created_at || ''', '''
+                || updated_at || ''') ON CONFLICT (user_id) DO NOTHING;'
+            FROM users;
+            " | docker exec -i april_test_db psql -U april_test_bot -d april_test_db > /dev/null 2>&1
+
+            # Считаем пользователей ПОСЛЕ
+            USERS_AFTER=$(docker exec april_test_db psql -U april_test_bot -d april_test_db -t -c "SELECT COUNT(*) FROM users;" | tr -d ' ')
+            ADDED=$((USERS_AFTER - USERS_BEFORE))
+
+            echo ""
+            echo "=============================================="
+            echo "  РЕЗУЛЬТАТ СИНХРОНИЗАЦИИ"
+            echo "=============================================="
+            echo "✅ Добавлено новых: $ADDED"
+            echo "📊 Всего пользователей: $USERS_AFTER"
+            echo "=============================================="
+
+      - name: Verify deployment
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PROD_SERVER_HOST }}
+          username: ${{ secrets.PROD_SERVER_USER }}
+          key: ${{ secrets.PROD_SERVER_SSH_KEY }}
+          script: |
+            echo ""
+            echo "=============================================="
+            echo "  ПРОВЕРКА ДЕПЛОЯ"
+            echo "=============================================="
+
+            # Проверяем что бот запущен
+            if docker ps | grep -q april_test_bot; then
+              echo "✅ april_test_bot запущен"
+            else
+              echo "❌ april_test_bot НЕ запущен!"
+              exit 1
+            fi
+
+            # Проверяем логи на ошибки
+            ERRORS=$(docker logs april_test_bot --tail 50 2>&1 | grep -i "error\|exception\|failed" | head -5 || true)
+            if [ -n "$ERRORS" ]; then
+              echo "⚠️ Найдены ошибки в логах:"
+              echo "$ERRORS"
+            else
+              echo "✅ Ошибок в логах не найдено"
+            fi
+
+            echo ""
+            echo "🎉 ДЕПЛОЙ НА ПРОДАКШН ЗАВЕРШЁН!"
+            echo "=============================================="
+
+  # Job который срабатывает если не подтверждён деплой
+  deployment-cancelled:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.confirm_deploy != 'true' }}
+    steps:
+      - name: Deployment not confirmed
+        run: |
+          echo "❌ Деплой отменён: не было подтверждения"
+          echo "Для деплоя установите 'Подтверждаю деплой на ПРОДАКШН' = true"
+          exit 1
