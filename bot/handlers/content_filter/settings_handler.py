@@ -768,11 +768,35 @@ async def process_scam_mute_duration(
     duration = parse_duration(message.text.strip())
 
     if duration is None:
-        # Неверный формат - просим повторить
-        await message.answer(
-            "❌ Неверный формат. Используйте: 30s, 5min, 1h, 1d, 1m",
-            parse_mode="HTML"
+        # Неверный формат - удаляем сообщение пользователя и показываем ошибку
+        try:
+            await message.delete()
+        except TelegramAPIError:
+            pass
+        # Показываем ошибку в исходном сообщении (если есть)
+        instruction_message_id = await state.get_data()
+        instruction_msg_id = instruction_message_id.get('instruction_message_id')
+        error_text = (
+            "❌ Неверный формат. Используйте: 30s, 5min, 1h, 1d, 1m\n\n"
+            "Попробуйте ещё раз:"
         )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Отмена", callback_data=f"cf:scs:{chat_id}")]
+        ])
+        if instruction_msg_id:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=instruction_msg_id,
+                    text=error_text,
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+                return
+            except TelegramAPIError:
+                pass
+        # Fallback если нет сохранённого ID
+        await message.answer(error_text, reply_markup=keyboard, parse_mode="HTML")
         return
 
     # Очищаем FSM
@@ -1975,12 +1999,19 @@ async def flood_settings_menu(
     # Получаем настройки
     settings = await _filter_manager.get_or_create_settings(chat_id, session)
 
+    # Формируем статус расширенного антифлуда
+    any_status = "✅ Вкл" if settings.flood_detect_any_messages else "❌ Выкл"
+    media_status = "✅ Вкл" if settings.flood_detect_media else "❌ Выкл"
+
     text = (
         f"📢 <b>Настройки антифлуда</b>\n\n"
         f"Флуд — это когда пользователь отправляет одинаковые "
         f"сообщения несколько раз подряд.\n\n"
         f"<b>Макс. повторов:</b> {settings.flood_max_repeats}\n"
         f"<b>Временное окно:</b> {settings.flood_time_window} сек.\n\n"
+        f"<b>Расширенный антифлуд:</b>\n"
+        f"• Любые сообщения подряд: {any_status}\n"
+        f"• Медиа-флуд: {media_status}\n\n"
         f"Если пользователь отправит больше {settings.flood_max_repeats} "
         f"одинаковых сообщений за {settings.flood_time_window} секунд — "
         f"сработает фильтр."
@@ -1991,7 +2022,11 @@ async def flood_settings_menu(
         settings.flood_max_repeats,
         settings.flood_time_window,
         settings.flood_action,
-        settings.flood_mute_duration
+        settings.flood_mute_duration,
+        settings.flood_detect_any_messages,
+        settings.flood_any_max_messages,
+        settings.flood_any_time_window,
+        settings.flood_detect_media
     )
 
     try:
@@ -2012,6 +2047,8 @@ async def set_flood_max_repeats(
 
     Callback: cf:flr:{value}:{chat_id}
 
+    После установки возвращает в меню "Дополнительно" (cf:fladv)
+
     Args:
         callback: CallbackQuery
         session: Сессия БД
@@ -2024,34 +2061,15 @@ async def set_flood_max_repeats(
     # Обновляем настройки
     await _filter_manager.update_settings(chat_id, session, flood_max_repeats=value)
 
-    # Получаем обновлённые настройки
-    settings = await _filter_manager.get_or_create_settings(chat_id, session)
+    # Показываем уведомление
+    await callback.answer(f"✅ Макс. повторов: {value}")
 
-    text = (
-        f"📢 <b>Настройки антифлуда</b>\n\n"
-        f"Флуд — это когда пользователь отправляет одинаковые "
-        f"сообщения несколько раз подряд.\n\n"
-        f"<b>Макс. повторов:</b> {settings.flood_max_repeats}\n"
-        f"<b>Временное окно:</b> {settings.flood_time_window} сек.\n\n"
-        f"Если пользователь отправит больше {settings.flood_max_repeats} "
-        f"одинаковых сообщений за {settings.flood_time_window} секунд — "
-        f"сработает фильтр."
-    )
+    # Создаём фейковый callback для вызова flood_advanced_menu
+    # Меняем data на cf:fladv:{chat_id}
+    callback.data = f"cf:fladv:{chat_id}"
 
-    keyboard = create_flood_settings_menu(
-        chat_id,
-        settings.flood_max_repeats,
-        settings.flood_time_window,
-        settings.flood_action,
-        settings.flood_mute_duration
-    )
-
-    try:
-        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-    except TelegramAPIError:
-        pass
-
-    await callback.answer(f"Макс. повторов: {value}")
+    # Вызываем меню "Дополнительно"
+    await flood_advanced_menu(callback, session)
 
 
 @settings_handler_router.callback_query(F.data.regexp(r"^cf:flw:\d+:-?\d+$"))
@@ -2063,6 +2081,8 @@ async def set_flood_time_window(
     Устанавливает временное окно для подсчёта повторов.
 
     Callback: cf:flw:{value}:{chat_id}
+
+    После установки возвращает в меню "Дополнительно" (cf:fladv)
 
     Args:
         callback: CallbackQuery
@@ -2076,34 +2096,14 @@ async def set_flood_time_window(
     # Обновляем настройки
     await _filter_manager.update_settings(chat_id, session, flood_time_window=value)
 
-    # Получаем обновлённые настройки
-    settings = await _filter_manager.get_or_create_settings(chat_id, session)
+    # Показываем уведомление
+    await callback.answer(f"✅ Временное окно: {value} сек.")
 
-    text = (
-        f"📢 <b>Настройки антифлуда</b>\n\n"
-        f"Флуд — это когда пользователь отправляет одинаковые "
-        f"сообщения несколько раз подряд.\n\n"
-        f"<b>Макс. повторов:</b> {settings.flood_max_repeats}\n"
-        f"<b>Временное окно:</b> {settings.flood_time_window} сек.\n\n"
-        f"Если пользователь отправит больше {settings.flood_max_repeats} "
-        f"одинаковых сообщений за {settings.flood_time_window} секунд — "
-        f"сработает фильтр."
-    )
+    # Создаём фейковый callback для вызова flood_advanced_menu
+    callback.data = f"cf:fladv:{chat_id}"
 
-    keyboard = create_flood_settings_menu(
-        chat_id,
-        settings.flood_max_repeats,
-        settings.flood_time_window,
-        settings.flood_action,
-        settings.flood_mute_duration
-    )
-
-    try:
-        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-    except TelegramAPIError:
-        pass
-
-    await callback.answer(f"Временное окно: {value} сек.")
+    # Вызываем меню "Дополнительно"
+    await flood_advanced_menu(callback, session)
 
 
 # ============================================================
@@ -2134,7 +2134,7 @@ async def start_custom_max_repeats(
 
     text = (
         "📢 <b>Ручной ввод: Макс. повторов</b>\n\n"
-        "Введите число от 1 до 50.\n"
+        "Введите положительное число.\n"
         "После стольких одинаковых сообщений сработает антифлуд.\n\n"
         "<i>Рекомендуется: 2-5</i>"
     )
@@ -2143,7 +2143,7 @@ async def start_custom_max_repeats(
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text="◀️ Отмена",
-            callback_data=f"cf:fls:{chat_id}"
+            callback_data=f"cf:fladv:{chat_id}"  # Возврат в меню "Дополнительно"
         )]
     ])
 
@@ -2161,7 +2161,7 @@ async def process_custom_max_repeats(
     state: FSMContext,
     session: AsyncSession
 ) -> None:
-    """Обрабатывает ручной ввод max_repeats."""
+    """Обрабатывает ручной ввод max_repeats. Возвращает в меню 'Дополнительно'."""
     data = await state.get_data()
     chat_id = data.get('chat_id')
 
@@ -2170,13 +2170,23 @@ async def process_custom_max_repeats(
         await message.answer("❌ Ошибка: данные сессии потеряны.")
         return
 
-    # Валидация ввода
+    # Валидация ввода (без верхнего лимита — админ решает сам)
     try:
         value = int(message.text.strip())
-        if value < 1 or value > 50:
-            await message.answer("❌ Введите число от 1 до 50.")
+        if value < 1:
+            # Удаляем сообщение пользователя чтобы не засорять чат
+            try:
+                await message.delete()
+            except TelegramAPIError:
+                pass
+            await message.answer("❌ Введите положительное число.")
             return
     except ValueError:
+        # Удаляем сообщение пользователя чтобы не засорять чат
+        try:
+            await message.delete()
+        except TelegramAPIError:
+            pass
         await message.answer("❌ Введите целое число.")
         return
 
@@ -2190,25 +2200,20 @@ async def process_custom_max_repeats(
     except TelegramAPIError:
         pass
 
-    # Показываем обновлённое меню
-    settings = await _filter_manager.get_or_create_settings(chat_id, session)
+    # Возвращаем в меню "Дополнительно" с кнопкой перехода
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="◀️ Назад к настройкам",
+            callback_data=f"cf:fladv:{chat_id}"
+        )]
+    ])
 
-    text = (
-        f"✅ Установлено: {value} повторов\n\n"
-        f"📢 <b>Настройки антифлуда</b>\n\n"
-        f"<b>Макс. повторов:</b> {settings.flood_max_repeats}\n"
-        f"<b>Временное окно:</b> {settings.flood_time_window} сек."
+    await message.answer(
+        f"✅ Установлено: {value} повторов",
+        reply_markup=keyboard,
+        parse_mode="HTML"
     )
-
-    keyboard = create_flood_settings_menu(
-        chat_id,
-        settings.flood_max_repeats,
-        settings.flood_time_window,
-        settings.flood_action,
-        settings.flood_mute_duration
-    )
-
-    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 @settings_handler_router.callback_query(F.data.regexp(r"^cf:flwc:-?\d+$"))
@@ -2229,7 +2234,7 @@ async def start_custom_time_window(
 
     text = (
         "⏱️ <b>Ручной ввод: Временное окно</b>\n\n"
-        "Введите время в секундах (от 10 до 600).\n"
+        "Введите положительное число в секундах.\n"
         "За это время считаются повторы.\n\n"
         "<i>Рекомендуется: 30-120 секунд</i>"
     )
@@ -2238,7 +2243,7 @@ async def start_custom_time_window(
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text="◀️ Отмена",
-            callback_data=f"cf:fls:{chat_id}"
+            callback_data=f"cf:fladv:{chat_id}"  # Возврат в меню "Дополнительно"
         )]
     ])
 
@@ -2256,7 +2261,7 @@ async def process_custom_time_window(
     state: FSMContext,
     session: AsyncSession
 ) -> None:
-    """Обрабатывает ручной ввод time_window."""
+    """Обрабатывает ручной ввод time_window. Возвращает в меню 'Дополнительно'."""
     data = await state.get_data()
     chat_id = data.get('chat_id')
 
@@ -2265,13 +2270,23 @@ async def process_custom_time_window(
         await message.answer("❌ Ошибка: данные сессии потеряны.")
         return
 
-    # Валидация ввода
+    # Валидация ввода (без верхнего лимита — админ решает сам)
     try:
         value = int(message.text.strip())
-        if value < 10 or value > 600:
-            await message.answer("❌ Введите число от 10 до 600 секунд.")
+        if value < 1:
+            # Удаляем сообщение пользователя чтобы не засорять чат
+            try:
+                await message.delete()
+            except TelegramAPIError:
+                pass
+            await message.answer("❌ Введите положительное число.")
             return
     except ValueError:
+        # Удаляем сообщение пользователя чтобы не засорять чат
+        try:
+            await message.delete()
+        except TelegramAPIError:
+            pass
         await message.answer("❌ Введите целое число.")
         return
 
@@ -2285,25 +2300,20 @@ async def process_custom_time_window(
     except TelegramAPIError:
         pass
 
-    # Показываем обновлённое меню
-    settings = await _filter_manager.get_or_create_settings(chat_id, session)
+    # Возвращаем в меню "Дополнительно" с кнопкой перехода
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="◀️ Назад к настройкам",
+            callback_data=f"cf:fladv:{chat_id}"
+        )]
+    ])
 
-    text = (
-        f"✅ Установлено: {value} сек.\n\n"
-        f"📢 <b>Настройки антифлуда</b>\n\n"
-        f"<b>Макс. повторов:</b> {settings.flood_max_repeats}\n"
-        f"<b>Временное окно:</b> {settings.flood_time_window} сек."
+    await message.answer(
+        f"✅ Установлено: {value} сек.",
+        reply_markup=keyboard,
+        parse_mode="HTML"
     )
-
-    keyboard = create_flood_settings_menu(
-        chat_id,
-        settings.flood_max_repeats,
-        settings.flood_time_window,
-        settings.flood_action,
-        settings.flood_mute_duration
-    )
-
-    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 # ============================================================
@@ -2392,13 +2402,6 @@ async def start_add_pattern(
     parts = callback.data.split(":")
     chat_id = int(parts[2])
 
-    # Сохраняем chat_id и значения по умолчанию
-    await state.update_data(
-        chat_id=chat_id,
-        pattern_type='phrase',
-        weight=25
-    )
-
     # Переводим в состояние ожидания паттерна
     await state.set_state(AddPatternStates.waiting_for_pattern)
 
@@ -2416,6 +2419,15 @@ async def start_add_pattern(
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     except TelegramAPIError:
         pass
+
+    # Сохраняем chat_id и значения по умолчанию + message_id для редактирования
+    await state.update_data(
+        chat_id=chat_id,
+        pattern_type='phrase',
+        weight=25,
+        bot_message_id=callback.message.message_id,
+        bot_chat_id=callback.message.chat.id
+    )
 
     await callback.answer()
 
@@ -2442,6 +2454,8 @@ async def process_add_pattern(
     chat_id = data.get('chat_id')
     pattern_type = data.get('pattern_type', 'phrase')
     weight = data.get('weight', 25)
+    bot_message_id = data.get('bot_message_id')
+    bot_chat_id = data.get('bot_chat_id')
 
     if not chat_id:
         await message.answer("❌ Ошибка: не найден chat_id. Попробуйте снова.")
@@ -2458,7 +2472,18 @@ async def process_add_pattern(
             await message.delete()
         except TelegramAPIError:
             pass
-        await message.answer("❌ Не указано ни одного паттерна. Попробуйте снова.")
+        # Редактируем сохранённое сообщение вместо создания нового
+        error_text = "❌ Не указано ни одного паттерна. Попробуйте снова."
+        keyboard = create_cancel_pattern_input_menu(chat_id)
+        try:
+            await message.bot.edit_message_text(
+                text=error_text,
+                chat_id=bot_chat_id,
+                message_id=bot_message_id,
+                reply_markup=keyboard
+            )
+        except TelegramAPIError:
+            await message.answer(error_text, reply_markup=keyboard)
         return
 
     # Добавляем каждый паттерн
@@ -2523,7 +2548,17 @@ async def process_add_pattern(
         )]
     ])
 
-    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    # Редактируем сохранённое сообщение вместо создания нового
+    try:
+        await message.bot.edit_message_text(
+            text=text,
+            chat_id=bot_chat_id,
+            message_id=bot_message_id,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    except TelegramAPIError:
+        await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 # ============================================================
@@ -2548,9 +2583,6 @@ async def start_import_patterns(
     parts = callback.data.split(":")
     chat_id = int(parts[2])
 
-    # Сохраняем chat_id
-    await state.update_data(chat_id=chat_id, import_weight=25)
-
     # Переводим в состояние ожидания текста
     await state.set_state(AddPatternStates.waiting_for_import_text)
 
@@ -2567,6 +2599,14 @@ async def start_import_patterns(
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     except TelegramAPIError:
         pass
+
+    # Сохраняем chat_id и message_id для последующего редактирования
+    await state.update_data(
+        chat_id=chat_id,
+        import_weight=25,
+        bot_message_id=callback.message.message_id,
+        bot_chat_id=callback.message.chat.id
+    )
 
     await callback.answer()
 
@@ -2591,6 +2631,8 @@ async def process_import_text(
     data = await state.get_data()
     chat_id = data.get('chat_id')
     weight = data.get('import_weight', 25)
+    bot_message_id = data.get('bot_message_id')
+    bot_chat_id = data.get('bot_chat_id')
 
     if not chat_id:
         await message.answer("❌ Ошибка: не найден chat_id. Попробуйте снова.")
@@ -2608,10 +2650,21 @@ async def process_import_text(
     phrases = pattern_service.extract_patterns_from_text(message.text)
 
     if not phrases:
-        await message.answer(
+        # Редактируем сохранённое сообщение вместо создания нового
+        error_text = (
             "⚠️ Не удалось извлечь паттерны из текста.\n"
             "Попробуйте вставить другой текст."
         )
+        keyboard = create_cancel_pattern_input_menu(chat_id)
+        try:
+            await message.bot.edit_message_text(
+                text=error_text,
+                chat_id=bot_chat_id,
+                message_id=bot_message_id,
+                reply_markup=keyboard
+            )
+        except TelegramAPIError:
+            await message.answer(error_text, reply_markup=keyboard)
         return
 
     # Сохраняем извлечённые фразы в состояние
@@ -2629,7 +2682,17 @@ async def process_import_text(
 
     keyboard = create_import_preview_menu(chat_id, len(phrases))
 
-    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    # Редактируем сохранённое сообщение вместо создания нового
+    try:
+        await message.bot.edit_message_text(
+            text=text,
+            chat_id=bot_chat_id,
+            message_id=bot_message_id,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    except TelegramAPIError:
+        await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 @settings_handler_router.callback_query(F.data.regexp(r"^cf:spic:-?\d+$"))
@@ -4310,10 +4373,33 @@ async def process_delete_delay_input(
     else:
         delay_seconds = parse_delay_seconds(text_input)
         if delay_seconds is None:
-            await message.answer(
+            # Неверный формат - удаляем сообщение пользователя
+            try:
+                await message.delete()
+            except TelegramAPIError:
+                pass
+            # Показываем ошибку в редактируемом сообщении
+            error_text = (
                 "❌ Неверный формат. Используйте: 30s, 5min, 1h\n"
-                "Или отправьте 0 для мгновенного удаления."
+                "Или отправьте 0 для мгновенного удаления.\n\n"
+                "Попробуйте ещё раз:"
             )
+            error_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Отмена", callback_data=f"cf:{category}adv:{chat_id}")]
+            ])
+            if instruction_message_id:
+                try:
+                    await message.bot.edit_message_text(
+                        chat_id=message.chat.id,
+                        message_id=instruction_message_id,
+                        text=error_text,
+                        reply_markup=error_keyboard,
+                        parse_mode="HTML"
+                    )
+                    return
+                except TelegramAPIError:
+                    pass
+            await message.answer(error_text, reply_markup=error_keyboard, parse_mode="HTML")
             return
 
     # Обновляем настройки
@@ -4461,10 +4547,33 @@ async def process_notification_delay_input(
     else:
         delay_seconds = parse_delay_seconds(text_input)
         if delay_seconds is None:
-            await message.answer(
+            # Неверный формат - удаляем сообщение пользователя
+            try:
+                await message.delete()
+            except TelegramAPIError:
+                pass
+            # Показываем ошибку в редактируемом сообщении
+            error_text = (
                 "❌ Неверный формат. Используйте: 30s, 5min, 1h\n"
-                "Или отправьте - чтобы не удалять уведомления."
+                "Или отправьте - чтобы не удалять уведомления.\n\n"
+                "Попробуйте ещё раз:"
             )
+            error_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Отмена", callback_data=f"cf:{category}adv:{chat_id}")]
+            ])
+            if instruction_message_id:
+                try:
+                    await message.bot.edit_message_text(
+                        chat_id=message.chat.id,
+                        message_id=instruction_message_id,
+                        text=error_text,
+                        reply_markup=error_keyboard,
+                        parse_mode="HTML"
+                    )
+                    return
+                except TelegramAPIError:
+                    pass
+            await message.answer(error_text, reply_markup=error_keyboard, parse_mode="HTML")
             return
 
     # Обновляем настройки
@@ -4516,3 +4625,2354 @@ async def process_notification_delay_input(
 
     # Fallback: отправляем новое сообщение
     await message.answer(result_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# КАТЕГОРИИ СИГНАЛОВ АНТИСКАМА
+# ============================================================
+# Категории позволяют админам создавать свои наборы ключевых слов
+# для обнаружения скама (например: "Наркотики", "Контакты").
+# Каждая категория имеет название, ключевые слова и вес.
+# ============================================================
+
+
+class SignalCategoryStates(StatesGroup):
+    """FSM состояния для добавления/редактирования категории."""
+    waiting_for_name = State()
+    waiting_for_keywords = State()
+    waiting_for_weight = State()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:sccat:-?\d+$"))
+async def signal_categories_menu(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """
+    Показывает список категорий сигналов антискама.
+
+    Callback: cf:sccat:{chat_id}
+    """
+    await state.clear()
+
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Загружаем категории из БД
+    from bot.database.models_content_filter import ScamSignalCategory
+    from sqlalchemy import select
+
+    query = select(ScamSignalCategory).where(
+        ScamSignalCategory.chat_id == chat_id
+    ).order_by(ScamSignalCategory.category_name)
+
+    result = await session.execute(query)
+    categories = result.scalars().all()
+
+    # Формируем текст
+    if categories:
+        text = f"📂 <b>Категории сигналов</b>\n\n"
+        for i, cat in enumerate(categories, 1):
+            status = "✅" if cat.enabled else "❌"
+            kw_count = len([k for k in cat.keywords.split(',') if k.strip()]) if cat.keywords else 0
+            text += f"{i}. {status} <b>{cat.category_name}</b>\n"
+            text += f"   Слов: {kw_count}, Вес: +{cat.weight}\n\n"
+    else:
+        text = (
+            f"📂 <b>Категории сигналов</b>\n\n"
+            f"Категорий пока нет.\n"
+            f"Создайте первую категорию для детекции скама.\n\n"
+            f"<i>Например: \"Наркотики\" с ключевыми словами\n"
+            f"drugs, cocaine, weed...</i>"
+        )
+
+    # Создаём клавиатуру
+    keyboard_buttons = []
+
+    # Список существующих категорий
+    for cat in categories:
+        status = "✅" if cat.enabled else "❌"
+        keyboard_buttons.append([
+            InlineKeyboardButton(
+                text=f"{status} {cat.category_name}",
+                callback_data=f"cf:sccatedit:{chat_id}:{cat.id}"
+            )
+        ])
+
+    # Кнопка добавления
+    keyboard_buttons.append([
+        InlineKeyboardButton(
+            text="➕ Добавить категорию",
+            callback_data=f"cf:sccatadd:{chat_id}"
+        )
+    ])
+
+    # Кнопка назад
+    keyboard_buttons.append([
+        InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"cf:scs:{chat_id}"
+        )
+    ])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:sccatadd:-?\d+$"))
+async def add_signal_category_start(
+    callback: CallbackQuery,
+    state: FSMContext
+) -> None:
+    """
+    Начинает процесс добавления новой категории.
+
+    Callback: cf:sccatadd:{chat_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    await state.update_data(chat_id=chat_id)
+    await state.set_state(SignalCategoryStates.waiting_for_name)
+
+    text = (
+        f"📂 <b>Новая категория</b>\n\n"
+        f"Введите название категории.\n"
+        f"Например: <code>Наркотики</code> или <code>Контакты</code>"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="◀️ Отмена",
+            callback_data=f"cf:sccat:{chat_id}"
+        )]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await state.update_data(
+        bot_message_id=callback.message.message_id,
+        bot_chat_id=callback.message.chat.id
+    )
+
+    await callback.answer()
+
+
+@settings_handler_router.message(SignalCategoryStates.waiting_for_name)
+async def add_signal_category_name(
+    message: Message,
+    state: FSMContext
+) -> None:
+    """Обрабатывает ввод названия категории."""
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    bot_message_id = data.get('bot_message_id')
+    bot_chat_id = data.get('bot_chat_id')
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    # Сохраняем название
+    category_name = message.text.strip()[:100]
+    await state.update_data(category_name=category_name)
+    await state.set_state(SignalCategoryStates.waiting_for_keywords)
+
+    text = (
+        f"📂 <b>Новая категория: {category_name}</b>\n\n"
+        f"Введите ключевые слова через запятую.\n"
+        f"Например: <code>drugs, cocaine, weed, meth</code>"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="◀️ Отмена",
+            callback_data=f"cf:sccat:{chat_id}"
+        )]
+    ])
+
+    try:
+        await message.bot.edit_message_text(
+            text=text,
+            chat_id=bot_chat_id,
+            message_id=bot_message_id,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    except TelegramAPIError:
+        await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@settings_handler_router.message(SignalCategoryStates.waiting_for_keywords)
+async def add_signal_category_keywords(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """Обрабатывает ввод ключевых слов и создаёт категорию."""
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    category_name = data.get('category_name')
+    bot_message_id = data.get('bot_message_id')
+    bot_chat_id = data.get('bot_chat_id')
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    # Очищаем FSM
+    await state.clear()
+
+    # Нормализуем ключевые слова
+    keywords = message.text.strip()
+
+    # Создаём категорию в БД
+    from bot.database.models_content_filter import ScamSignalCategory
+
+    new_category = ScamSignalCategory(
+        chat_id=chat_id,
+        category_name=category_name,
+        keywords=keywords,
+        weight=25,  # Вес по умолчанию
+        enabled=True,
+        created_by=message.from_user.id
+    )
+
+    session.add(new_category)
+    await session.commit()
+
+    # Показываем успех и возвращаемся к списку
+    text = (
+        f"✅ Категория <b>{category_name}</b> создана!\n\n"
+        f"Ключевые слова: {keywords[:50]}{'...' if len(keywords) > 50 else ''}\n"
+        f"Вес: +25 баллов\n\n"
+        f"<i>Вы можете изменить настройки категории в меню.</i>"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="📂 К списку категорий",
+            callback_data=f"cf:sccat:{chat_id}"
+        )]
+    ])
+
+    try:
+        await message.bot.edit_message_text(
+            text=text,
+            chat_id=bot_chat_id,
+            message_id=bot_message_id,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    except TelegramAPIError:
+        await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:sccatedit:-?\d+:\d+$"))
+async def edit_signal_category(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает меню редактирования категории.
+
+    Callback: cf:sccatedit:{chat_id}:{category_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+    category_id = int(parts[3])
+
+    # Загружаем категорию
+    from bot.database.models_content_filter import ScamSignalCategory
+    from sqlalchemy import select
+
+    query = select(ScamSignalCategory).where(ScamSignalCategory.id == category_id)
+    result = await session.execute(query)
+    category = result.scalar_one_or_none()
+
+    if not category:
+        await callback.answer("❌ Категория не найдена", show_alert=True)
+        return
+
+    # Формируем текст
+    status = "Включена ✅" if category.enabled else "Выключена ❌"
+    kw_preview = category.keywords[:100] if category.keywords else "—"
+    if len(category.keywords or '') > 100:
+        kw_preview += "..."
+
+    text = (
+        f"📂 <b>Категория: {category.category_name}</b>\n\n"
+        f"<b>Статус:</b> {status}\n"
+        f"<b>Вес:</b> +{category.weight} баллов\n"
+        f"<b>Ключевые слова:</b>\n<code>{kw_preview}</code>"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"{'❌ Выключить' if category.enabled else '✅ Включить'}",
+            callback_data=f"cf:sccattgl:{chat_id}:{category_id}"
+        )],
+        [InlineKeyboardButton(
+            text="🗑️ Удалить",
+            callback_data=f"cf:sccatdel:{chat_id}:{category_id}"
+        )],
+        [InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"cf:sccat:{chat_id}"
+        )]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:sccattgl:-?\d+:\d+$"))
+async def toggle_signal_category(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Переключает активность категории.
+
+    Callback: cf:sccattgl:{chat_id}:{category_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+    category_id = int(parts[3])
+
+    from bot.database.models_content_filter import ScamSignalCategory
+    from sqlalchemy import select, update
+
+    # Получаем текущее состояние
+    query = select(ScamSignalCategory).where(ScamSignalCategory.id == category_id)
+    result = await session.execute(query)
+    category = result.scalar_one_or_none()
+
+    if not category:
+        await callback.answer("❌ Категория не найдена", show_alert=True)
+        return
+
+    # Переключаем
+    new_status = not category.enabled
+    update_query = update(ScamSignalCategory).where(
+        ScamSignalCategory.id == category_id
+    ).values(enabled=new_status)
+
+    await session.execute(update_query)
+    await session.commit()
+
+    status_text = "включена" if new_status else "выключена"
+    await callback.answer(f"Категория {status_text}")
+
+    # Перерисовываем меню
+    # Создаём новый callback data для edit
+    callback.data = f"cf:sccatedit:{chat_id}:{category_id}"
+    await edit_signal_category(callback, session)
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:sccatdel:-?\d+:\d+$"))
+async def delete_signal_category(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Удаляет категорию.
+
+    Callback: cf:sccatdel:{chat_id}:{category_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+    category_id = int(parts[3])
+
+    from bot.database.models_content_filter import ScamSignalCategory
+    from sqlalchemy import delete
+
+    # Удаляем
+    query = delete(ScamSignalCategory).where(ScamSignalCategory.id == category_id)
+    await session.execute(query)
+    await session.commit()
+
+    await callback.answer("✅ Категория удалена")
+
+    # Возвращаемся к списку
+    callback.data = f"cf:sccat:{chat_id}"
+    await signal_categories_menu(callback, session, None)
+
+
+# ============================================================
+# ДОПОЛНИТЕЛЬНЫЕ НАСТРОЙКИ АНТИСКАМА (ТЕКСТ, ЗАДЕРЖКИ)
+# ============================================================
+# Эти настройки позволяют админам кастомизировать:
+# - Текст уведомления при муте/бане (с %user% плейсхолдером)
+# - Задержку удаления сообщения нарушителя
+# - Автоудаление уведомления бота через заданное время
+# ============================================================
+
+
+class ScamTextStates(StatesGroup):
+    """FSM состояния для ввода кастомного текста уведомлений антискама."""
+    waiting_for_mute_text = State()
+    waiting_for_ban_text = State()
+
+
+class ScamDelayStates(StatesGroup):
+    """FSM состояния для ввода задержек антискама."""
+    waiting_for_delete_delay = State()
+    waiting_for_notification_delay = State()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:scadv:-?\d+$"))
+async def scam_advanced_menu(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """
+    Показывает меню дополнительных настроек антискама.
+
+    Callback: cf:scadv:{chat_id}
+    """
+    # Очищаем FSM состояние при возврате из ввода
+    await state.clear()
+
+    # Парсим chat_id
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Получаем настройки
+    settings = await _filter_manager.get_or_create_settings(chat_id, session)
+
+    # Получаем текущие значения
+    mute_text = settings.scam_mute_text
+    ban_text = settings.scam_ban_text
+    delete_delay = settings.scam_delete_delay
+    notif_delay = settings.scam_notification_delete_delay
+
+    # Форматируем значения для отображения
+    mute_text_display = f"«{mute_text[:30]}...»" if mute_text and len(mute_text) > 30 else (f"«{mute_text}»" if mute_text else "по умолчанию")
+    ban_text_display = f"«{ban_text[:30]}...»" if ban_text and len(ban_text) > 30 else (f"«{ban_text}»" if ban_text else "по умолчанию")
+    delete_delay_display = f"{delete_delay} сек" if delete_delay else "сразу"
+    notif_delay_display = f"{notif_delay} сек" if notif_delay else "не удалять"
+
+    # Формируем текст меню
+    text = (
+        f"⚙️ <b>Доп. настройки: Антискам</b>\n\n"
+        f"<b>Текст уведомлений:</b>\n"
+        f"• При муте: {mute_text_display}\n"
+        f"• При бане: {ban_text_display}\n\n"
+        f"<b>Задержки:</b>\n"
+        f"• Удаление сообщения: {delete_delay_display}\n"
+        f"• Автоудаление уведомления: {notif_delay_display}\n\n"
+        f"<i>Используйте %user% для упоминания пользователя в тексте.</i>"
+    )
+
+    # Создаём клавиатуру
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"📝 Текст при муте: {mute_text_display[:15]}",
+            callback_data=f"cf:scmt:{chat_id}"
+        )],
+        [InlineKeyboardButton(
+            text=f"📝 Текст при бане: {ban_text_display[:15]}",
+            callback_data=f"cf:scbt:{chat_id}"
+        )],
+        [InlineKeyboardButton(
+            text=f"⏱️ Удаление сообщения: {delete_delay_display}",
+            callback_data=f"cf:scdd:{chat_id}"
+        )],
+        [InlineKeyboardButton(
+            text=f"🗑️ Автоудаление уведомления: {notif_delay_display}",
+            callback_data=f"cf:scnd:{chat_id}"
+        )],
+        [InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"cf:scs:{chat_id}"
+        )]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+# ============================================================
+# FSM: ВВОД ТЕКСТА УВЕДОМЛЕНИЯ ПРИ МУТЕ (АНТИСКАМ)
+# ============================================================
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:scmt:-?\d+$"))
+async def request_scam_mute_text_input(
+    callback: CallbackQuery,
+    state: FSMContext
+) -> None:
+    """
+    Запрашивает ввод текста уведомления при муте для антискама.
+
+    Callback: cf:scmt:{chat_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    text = (
+        f"📝 <b>Текст уведомления при муте</b>\n\n"
+        f"Введите текст, который будет показан при муте за скам.\n"
+        f"Используйте <code>%user%</code> для упоминания нарушителя.\n\n"
+        f"<b>Пример:</b>\n"
+        f"<code>%user% замьючен за скам</code>\n\n"
+        f"Отправьте <code>-</code> чтобы сбросить на стандартный текст."
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Отмена", callback_data=f"cf:scadv:{chat_id}")]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await state.set_state(ScamTextStates.waiting_for_mute_text)
+    await state.update_data(chat_id=chat_id, instruction_message_id=callback.message.message_id)
+    await callback.answer()
+
+
+@settings_handler_router.message(ScamTextStates.waiting_for_mute_text)
+async def process_scam_mute_text_input(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """Обрабатывает ввод текста уведомления при муте для антискама."""
+    data = await state.get_data()
+    chat_id = data.get("chat_id")
+    instruction_message_id = data.get("instruction_message_id")
+
+    if not chat_id:
+        await state.clear()
+        await message.answer("❌ Ошибка: данные сессии потеряны.")
+        return
+
+    text_input = message.text.strip()
+    if text_input == "-":
+        new_text = None
+    else:
+        if len(text_input) > 500:
+            try:
+                await message.delete()
+            except TelegramAPIError:
+                pass
+            error_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Отмена", callback_data=f"cf:scadv:{chat_id}")]
+            ])
+            if instruction_message_id:
+                try:
+                    await message.bot.edit_message_text(
+                        chat_id=message.chat.id,
+                        message_id=instruction_message_id,
+                        text="❌ Текст слишком длинный (макс. 500 символов).\n\nПопробуйте ещё раз:",
+                        reply_markup=error_keyboard,
+                        parse_mode="HTML"
+                    )
+                    return
+                except TelegramAPIError:
+                    pass
+            return
+        new_text = text_input
+
+    await _filter_manager.update_settings(chat_id, session, scam_mute_text=new_text)
+    await state.clear()
+
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    confirm_text = f"✅ Текст при муте установлен:\n«{new_text}»" if new_text else "✅ Текст при муте сброшен на стандартный"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад к настройкам", callback_data=f"cf:scadv:{chat_id}")]
+    ])
+
+    if instruction_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=instruction_message_id,
+                text=confirm_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            return
+        except TelegramAPIError:
+            pass
+
+    await message.answer(confirm_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# FSM: ВВОД ТЕКСТА УВЕДОМЛЕНИЯ ПРИ БАНЕ (АНТИСКАМ)
+# ============================================================
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:scbt:-?\d+$"))
+async def request_scam_ban_text_input(
+    callback: CallbackQuery,
+    state: FSMContext
+) -> None:
+    """
+    Запрашивает ввод текста уведомления при бане для антискама.
+
+    Callback: cf:scbt:{chat_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    text = (
+        f"📝 <b>Текст уведомления при бане</b>\n\n"
+        f"Введите текст, который будет показан при бане за скам.\n"
+        f"Используйте <code>%user%</code> для упоминания нарушителя.\n\n"
+        f"<b>Пример:</b>\n"
+        f"<code>%user% забанен за скам</code>\n\n"
+        f"Отправьте <code>-</code> чтобы сбросить на стандартный текст."
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Отмена", callback_data=f"cf:scadv:{chat_id}")]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await state.set_state(ScamTextStates.waiting_for_ban_text)
+    await state.update_data(chat_id=chat_id, instruction_message_id=callback.message.message_id)
+    await callback.answer()
+
+
+@settings_handler_router.message(ScamTextStates.waiting_for_ban_text)
+async def process_scam_ban_text_input(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """Обрабатывает ввод текста уведомления при бане для антискама."""
+    data = await state.get_data()
+    chat_id = data.get("chat_id")
+    instruction_message_id = data.get("instruction_message_id")
+
+    if not chat_id:
+        await state.clear()
+        await message.answer("❌ Ошибка: данные сессии потеряны.")
+        return
+
+    text_input = message.text.strip()
+    if text_input == "-":
+        new_text = None
+    else:
+        if len(text_input) > 500:
+            try:
+                await message.delete()
+            except TelegramAPIError:
+                pass
+            error_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Отмена", callback_data=f"cf:scadv:{chat_id}")]
+            ])
+            if instruction_message_id:
+                try:
+                    await message.bot.edit_message_text(
+                        chat_id=message.chat.id,
+                        message_id=instruction_message_id,
+                        text="❌ Текст слишком длинный (макс. 500 символов).\n\nПопробуйте ещё раз:",
+                        reply_markup=error_keyboard,
+                        parse_mode="HTML"
+                    )
+                    return
+                except TelegramAPIError:
+                    pass
+            return
+        new_text = text_input
+
+    await _filter_manager.update_settings(chat_id, session, scam_ban_text=new_text)
+    await state.clear()
+
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    confirm_text = f"✅ Текст при бане установлен:\n«{new_text}»" if new_text else "✅ Текст при бане сброшен на стандартный"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад к настройкам", callback_data=f"cf:scadv:{chat_id}")]
+    ])
+
+    if instruction_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=instruction_message_id,
+                text=confirm_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            return
+        except TelegramAPIError:
+            pass
+
+    await message.answer(confirm_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# FSM: ЗАДЕРЖКА УДАЛЕНИЯ СООБЩЕНИЯ НАРУШИТЕЛЯ (АНТИСКАМ)
+# ============================================================
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:scdd:-?\d+$"))
+async def request_scam_delete_delay_input(
+    callback: CallbackQuery,
+    state: FSMContext
+) -> None:
+    """
+    Запрашивает ввод задержки удаления сообщения для антискама.
+
+    Callback: cf:scdd:{chat_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    text = (
+        f"⏱️ <b>Задержка удаления сообщения</b>\n\n"
+        f"Введите время, через которое сообщение нарушителя будет удалено.\n\n"
+        f"<b>Форматы:</b>\n"
+        f"• <code>30s</code> — 30 секунд\n"
+        f"• <code>5min</code> — 5 минут\n"
+        f"• <code>1h</code> — 1 час\n\n"
+        f"Отправьте <code>-</code> чтобы удалять сразу."
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Отмена", callback_data=f"cf:scadv:{chat_id}")]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await state.set_state(ScamDelayStates.waiting_for_delete_delay)
+    await state.update_data(chat_id=chat_id, instruction_message_id=callback.message.message_id)
+    await callback.answer()
+
+
+@settings_handler_router.message(ScamDelayStates.waiting_for_delete_delay)
+async def process_scam_delete_delay_input(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """Обрабатывает ввод задержки удаления сообщения для антискама."""
+    data = await state.get_data()
+    chat_id = data.get("chat_id")
+    instruction_message_id = data.get("instruction_message_id")
+
+    if not chat_id:
+        await state.clear()
+        await message.answer("❌ Ошибка: данные сессии потеряны.")
+        return
+
+    text_input = message.text.strip()
+    if text_input == "-":
+        delay_seconds = None
+    else:
+        delay_seconds = parse_delay_seconds(text_input)
+        if delay_seconds is None:
+            try:
+                await message.delete()
+            except TelegramAPIError:
+                pass
+            error_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Отмена", callback_data=f"cf:scadv:{chat_id}")]
+            ])
+            if instruction_message_id:
+                try:
+                    await message.bot.edit_message_text(
+                        chat_id=message.chat.id,
+                        message_id=instruction_message_id,
+                        text="❌ Неверный формат. Используйте: 30s, 5min, 1h\nИли отправьте - чтобы удалять сразу.\n\nПопробуйте ещё раз:",
+                        reply_markup=error_keyboard,
+                        parse_mode="HTML"
+                    )
+                    return
+                except TelegramAPIError:
+                    pass
+            return
+
+    await _filter_manager.update_settings(chat_id, session, scam_delete_delay=delay_seconds)
+    await state.clear()
+
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    confirm_text = f"✅ Задержка удаления сообщения: {delay_seconds} сек" if delay_seconds else "✅ Сообщения будут удаляться сразу"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад к настройкам", callback_data=f"cf:scadv:{chat_id}")]
+    ])
+
+    if instruction_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=instruction_message_id,
+                text=confirm_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            return
+        except TelegramAPIError:
+            pass
+
+    await message.answer(confirm_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# FSM: АВТОУДАЛЕНИЕ УВЕДОМЛЕНИЯ БОТА (АНТИСКАМ)
+# ============================================================
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:scnd:-?\d+$"))
+async def request_scam_notification_delay_input(
+    callback: CallbackQuery,
+    state: FSMContext
+) -> None:
+    """
+    Запрашивает ввод задержки автоудаления уведомления для антискама.
+
+    Callback: cf:scnd:{chat_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    text = (
+        f"🗑️ <b>Автоудаление уведомления бота</b>\n\n"
+        f"Введите время, через которое уведомление бота будет удалено.\n\n"
+        f"<b>Форматы:</b>\n"
+        f"• <code>30s</code> — 30 секунд\n"
+        f"• <code>5min</code> — 5 минут\n"
+        f"• <code>1h</code> — 1 час\n\n"
+        f"Отправьте <code>-</code> чтобы не удалять уведомления."
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Отмена", callback_data=f"cf:scadv:{chat_id}")]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await state.set_state(ScamDelayStates.waiting_for_notification_delay)
+    await state.update_data(chat_id=chat_id, instruction_message_id=callback.message.message_id)
+    await callback.answer()
+
+
+@settings_handler_router.message(ScamDelayStates.waiting_for_notification_delay)
+async def process_scam_notification_delay_input(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """Обрабатывает ввод задержки автоудаления уведомления для антискама."""
+    data = await state.get_data()
+    chat_id = data.get("chat_id")
+    instruction_message_id = data.get("instruction_message_id")
+
+    if not chat_id:
+        await state.clear()
+        await message.answer("❌ Ошибка: данные сессии потеряны.")
+        return
+
+    text_input = message.text.strip()
+    if text_input == "-":
+        delay_seconds = None
+    else:
+        delay_seconds = parse_delay_seconds(text_input)
+        if delay_seconds is None:
+            try:
+                await message.delete()
+            except TelegramAPIError:
+                pass
+            error_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Отмена", callback_data=f"cf:scadv:{chat_id}")]
+            ])
+            if instruction_message_id:
+                try:
+                    await message.bot.edit_message_text(
+                        chat_id=message.chat.id,
+                        message_id=instruction_message_id,
+                        text="❌ Неверный формат. Используйте: 30s, 5min, 1h\nИли отправьте - чтобы не удалять уведомления.\n\nПопробуйте ещё раз:",
+                        reply_markup=error_keyboard,
+                        parse_mode="HTML"
+                    )
+                    return
+                except TelegramAPIError:
+                    pass
+            return
+
+    await _filter_manager.update_settings(chat_id, session, scam_notification_delete_delay=delay_seconds)
+    await state.clear()
+
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    confirm_text = f"✅ Автоудаление уведомления через: {delay_seconds} сек" if delay_seconds else "✅ Уведомления не будут удаляться автоматически"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад к настройкам", callback_data=f"cf:scadv:{chat_id}")]
+    ])
+
+    if instruction_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=instruction_message_id,
+                text=confirm_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            return
+        except TelegramAPIError:
+            pass
+
+    await message.answer(confirm_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# РАСШИРЕННЫЙ АНТИФЛУД: ПЕРЕКЛЮЧАТЕЛИ
+# ============================================================
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:t:flany:-?\d+$"))
+async def toggle_flood_any_messages(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Переключает детекцию флуда любых сообщений.
+
+    Callback: cf:t:flany:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        session: Сессия БД
+    """
+    # Парсим chat_id
+    parts = callback.data.split(":")
+    chat_id = int(parts[3])
+
+    # Получаем настройки
+    settings = await _filter_manager.get_or_create_settings(chat_id, session)
+
+    # Переключаем
+    new_value = not settings.flood_detect_any_messages
+    await _filter_manager.update_settings(chat_id, session, flood_detect_any_messages=new_value)
+
+    # Получаем обновлённые настройки
+    settings = await _filter_manager.get_or_create_settings(chat_id, session)
+
+    # Формируем статус расширенного антифлуда
+    any_status = "✅ Вкл" if settings.flood_detect_any_messages else "❌ Выкл"
+    media_status = "✅ Вкл" if settings.flood_detect_media else "❌ Выкл"
+
+    text = (
+        f"📢 <b>Настройки антифлуда</b>\n\n"
+        f"Флуд — это когда пользователь отправляет одинаковые "
+        f"сообщения несколько раз подряд.\n\n"
+        f"<b>Макс. повторов:</b> {settings.flood_max_repeats}\n"
+        f"<b>Временное окно:</b> {settings.flood_time_window} сек.\n\n"
+        f"<b>Расширенный антифлуд:</b>\n"
+        f"• Любые сообщения подряд: {any_status}\n"
+        f"• Медиа-флуд: {media_status}\n\n"
+        f"Если пользователь отправит больше {settings.flood_max_repeats} "
+        f"одинаковых сообщений за {settings.flood_time_window} секунд — "
+        f"сработает фильтр."
+    )
+
+    keyboard = create_flood_settings_menu(
+        chat_id,
+        settings.flood_max_repeats,
+        settings.flood_time_window,
+        settings.flood_action,
+        settings.flood_mute_duration,
+        settings.flood_detect_any_messages,
+        settings.flood_any_max_messages,
+        settings.flood_any_time_window,
+        settings.flood_detect_media
+    )
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    status_text = "включена" if new_value else "выключена"
+    await callback.answer(f"Детекция любых сообщений {status_text}")
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:t:flmedia:-?\d+$"))
+async def toggle_flood_media(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Переключает детекцию медиа-флуда.
+
+    Callback: cf:t:flmedia:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        session: Сессия БД
+    """
+    # Парсим chat_id
+    parts = callback.data.split(":")
+    chat_id = int(parts[3])
+
+    # Получаем настройки
+    settings = await _filter_manager.get_or_create_settings(chat_id, session)
+
+    # Переключаем
+    new_value = not settings.flood_detect_media
+    await _filter_manager.update_settings(chat_id, session, flood_detect_media=new_value)
+
+    # Получаем обновлённые настройки
+    settings = await _filter_manager.get_or_create_settings(chat_id, session)
+
+    # Формируем статус расширенного антифлуда
+    any_status = "✅ Вкл" if settings.flood_detect_any_messages else "❌ Выкл"
+    media_status = "✅ Вкл" if settings.flood_detect_media else "❌ Выкл"
+
+    text = (
+        f"📢 <b>Настройки антифлуда</b>\n\n"
+        f"Флуд — это когда пользователь отправляет одинаковые "
+        f"сообщения несколько раз подряд.\n\n"
+        f"<b>Макс. повторов:</b> {settings.flood_max_repeats}\n"
+        f"<b>Временное окно:</b> {settings.flood_time_window} сек.\n\n"
+        f"<b>Расширенный антифлуд:</b>\n"
+        f"• Любые сообщения подряд: {any_status}\n"
+        f"• Медиа-флуд: {media_status}\n\n"
+        f"Если пользователь отправит больше {settings.flood_max_repeats} "
+        f"одинаковых сообщений за {settings.flood_time_window} секунд — "
+        f"сработает фильтр."
+    )
+
+    keyboard = create_flood_settings_menu(
+        chat_id,
+        settings.flood_max_repeats,
+        settings.flood_time_window,
+        settings.flood_action,
+        settings.flood_mute_duration,
+        settings.flood_detect_any_messages,
+        settings.flood_any_max_messages,
+        settings.flood_any_time_window,
+        settings.flood_detect_media
+    )
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    status_text = "включена" if new_value else "выключена"
+    await callback.answer(f"Детекция медиа-флуда {status_text}")
+
+
+# ============================================================
+# РАСШИРЕННЫЙ АНТИФЛУД: МЕНЮ "ДОПОЛНИТЕЛЬНО"
+# ============================================================
+# ПРИМЕЧАНИЕ: Отдельное меню cf:flanycfg было удалено как дублирующее
+# Настройки flood_any_max_messages и flood_any_time_window теперь в меню "Дополнительно"
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:fladv:-?\d+$"))
+async def flood_advanced_menu(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает расширенные настройки антифлуда.
+
+    Callback: cf:fladv:{chat_id}
+
+    Настройки:
+    - Настройки "любые сообщения": лимит и окно
+    - Текст при предупреждении
+    - Текст при муте
+    - Текст при бане
+    - Задержка удаления сообщения
+    - Автоудаление уведомления
+
+    Args:
+        callback: CallbackQuery
+        session: Сессия БД
+    """
+    # Парсим chat_id из callback данных
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Получаем настройки группы из БД
+    settings = await _filter_manager.get_or_create_settings(chat_id, session)
+
+    # ============================================================
+    # НАСТРОЙКИ БАЗОВОГО АНТИФЛУДА (перенесены сюда из главного меню)
+    # ============================================================
+    max_repeats = settings.flood_max_repeats or 3
+    time_window = settings.flood_time_window or 60
+    flood_action = settings.flood_action or 'mute'
+    mute_duration = settings.flood_mute_duration
+
+    # Форматируем действие
+    action_map = {
+        'delete': '🗑️ Удалить',
+        'warn': '⚠️ Предупредить',
+        'mute': '🔇 Мут',
+        'ban': '🚫 Бан'
+    }
+    action_text = action_map.get(flood_action, '🔇 Мут')
+    if flood_action == 'mute' and mute_duration:
+        if mute_duration < 60:
+            action_text += f" ({mute_duration}мин)"
+        elif mute_duration < 1440:
+            action_text += f" ({mute_duration // 60}ч)"
+        else:
+            action_text += f" ({mute_duration // 1440}д)"
+
+    # ============================================================
+    # НАСТРОЙКИ "ЛЮБЫЕ СООБЩЕНИЯ"
+    # ============================================================
+    any_limit = settings.flood_any_max_messages or 5
+    any_window = settings.flood_any_time_window or 10
+
+    # Форматируем кастомные тексты уведомлений
+    # Обрезаем длинные тексты для превью
+    warn_text = settings.flood_warn_text or "По умолчанию"
+    if len(warn_text) > 30:
+        warn_text = warn_text[:30] + "..."
+
+    mute_text = settings.flood_mute_text or "По умолчанию"
+    if len(mute_text) > 30:
+        mute_text = mute_text[:30] + "..."
+
+    ban_text = settings.flood_ban_text or "По умолчанию"
+    if len(ban_text) > 30:
+        ban_text = ban_text[:30] + "..."
+
+    # Форматируем задержки
+    delete_delay = settings.flood_delete_delay or 0
+    delete_delay_text = f"{delete_delay} сек" if delete_delay else "Сразу"
+
+    notification_delay = settings.flood_notification_delete_delay or 0
+    notification_delay_text = f"{notification_delay} сек" if notification_delay else "Не удалять"
+
+    # Формируем текст меню
+    text = (
+        f"⚙️ <b>Дополнительные настройки антифлуда</b>\n\n"
+        f"<b>━━━ Базовый антифлуд ━━━</b>\n"
+        f"<b>Макс. повторов:</b> {max_repeats}\n"
+        f"<b>Временное окно:</b> {time_window} сек\n"
+        f"<b>Действие:</b> {action_text}\n\n"
+        f"<b>━━━ Любые сообщения ━━━</b>\n"
+        f"<b>Лимит:</b> {any_limit} за {any_window}с\n\n"
+        f"<b>━━━ Тексты уведомлений ━━━</b>\n"
+        f"При предупреждении: {warn_text}\n"
+        f"При муте: {mute_text}\n"
+        f"При бане: {ban_text}\n\n"
+        f"<b>━━━ Удаление ━━━</b>\n"
+        f"<b>Задержка удаления:</b> {delete_delay_text}\n"
+        f"<b>Автоудаление уведомления:</b> {notification_delay_text}"
+    )
+
+    # Определяем галочки для текущих значений max_repeats
+    rep2_check = " ✓" if max_repeats == 2 else ""
+    rep3_check = " ✓" if max_repeats == 3 else ""
+    rep5_check = " ✓" if max_repeats == 5 else ""
+    rep_custom = max_repeats not in [2, 3, 5]
+    rep_custom_text = f"✏️ {max_repeats} ✓" if rep_custom else "✏️"
+
+    # Определяем галочки для time_window
+    win30_check = " ✓" if time_window == 30 else ""
+    win60_check = " ✓" if time_window == 60 else ""
+    win120_check = " ✓" if time_window == 120 else ""
+    win180_check = " ✓" if time_window == 180 else ""
+    win_custom = time_window not in [30, 60, 120, 180]
+    win_custom_text = f"✏️ {time_window}с ✓" if win_custom else "✏️"
+
+    # Формируем клавиатуру
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            # ─────────────────────────────────────────────────────
+            # БАЗОВЫЙ АНТИФЛУД (перенесено из главного меню)
+            # ─────────────────────────────────────────────────────
+            # Заголовок: Максимум повторов
+            [
+                InlineKeyboardButton(
+                    text="📢 Макс. повторов:",
+                    callback_data="cf:noop"
+                )
+            ],
+            # Ряд выбора повторов
+            [
+                InlineKeyboardButton(
+                    text=f"2{rep2_check}",
+                    callback_data=f"cf:flr:2:{chat_id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"3{rep3_check}",
+                    callback_data=f"cf:flr:3:{chat_id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"5{rep5_check}",
+                    callback_data=f"cf:flr:5:{chat_id}"
+                ),
+                InlineKeyboardButton(
+                    text=rep_custom_text,
+                    callback_data=f"cf:flrc:{chat_id}"
+                )
+            ],
+            # Заголовок: Временное окно
+            [
+                InlineKeyboardButton(
+                    text="⏱️ Временное окно:",
+                    callback_data="cf:noop"
+                )
+            ],
+            # Ряд выбора окна
+            [
+                InlineKeyboardButton(
+                    text=f"30с{win30_check}",
+                    callback_data=f"cf:flw:30:{chat_id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"60с{win60_check}",
+                    callback_data=f"cf:flw:60:{chat_id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"120с{win120_check}",
+                    callback_data=f"cf:flw:120:{chat_id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"180с{win180_check}",
+                    callback_data=f"cf:flw:180:{chat_id}"
+                ),
+                InlineKeyboardButton(
+                    text=win_custom_text,
+                    callback_data=f"cf:flwc:{chat_id}"
+                )
+            ],
+            # Действие при срабатывании
+            [
+                InlineKeyboardButton(
+                    text=f"⚡ Действие: {action_text}",
+                    callback_data=f"cf:fact:{chat_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Настройки "любые сообщения"
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text=f"📢 Лимит сообщений: {any_limit}",
+                    callback_data=f"cf:flanylim:{chat_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"⏱️ Временное окно: {any_window}с",
+                    callback_data=f"cf:flanywin:{chat_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Кастомные тексты уведомлений
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text="📝 Текст при предупреждении",
+                    callback_data=f"cf:flwt:{chat_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📝 Текст при муте",
+                    callback_data=f"cf:flmt:{chat_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📝 Текст при бане",
+                    callback_data=f"cf:flbt:{chat_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Задержки
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text=f"⏱️ Задержка удаления: {delete_delay_text}",
+                    callback_data=f"cf:fldd:{chat_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"🗑️ Автоудаление уведомления: {notification_delay_text}",
+                    callback_data=f"cf:flnd:{chat_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Назад
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text="◀️ Назад",
+                    callback_data=f"cf:fls:{chat_id}"
+                )
+            ]
+        ]
+    )
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+# ============================================================
+# FSM СОСТОЯНИЯ ДЛЯ НАСТРОЕК АНТИФЛУДА
+# ============================================================
+
+class FloodTextStates(StatesGroup):
+    """Состояния для ввода текстов антифлуда."""
+    # Ожидание ввода текста при предупреждении
+    waiting_warn_text = State()
+    # Ожидание ввода текста при муте
+    waiting_mute_text = State()
+    # Ожидание ввода текста при бане
+    waiting_ban_text = State()
+
+
+class FloodDelayStates(StatesGroup):
+    """Состояния для ввода задержек антифлуда."""
+    # Ожидание ввода задержки удаления
+    waiting_delete_delay = State()
+    # Ожидание ввода задержки автоудаления уведомления
+    waiting_notification_delay = State()
+
+
+class FloodAnySettingsStates(StatesGroup):
+    """Состояния для настроек 'любые сообщения'."""
+    # Ожидание ввода лимита сообщений
+    waiting_any_limit = State()
+    # Ожидание ввода временного окна
+    waiting_any_window = State()
+
+
+# ============================================================
+# ВВОД ТЕКСТА МУТА ДЛЯ АНТИФЛУДА
+# ============================================================
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:flmt:-?\d+$"))
+async def request_flood_mute_text_input(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """
+    Запрашивает ввод текста для мута при флуде.
+
+    Callback: cf:flmt:{chat_id}
+    """
+    # Парсим chat_id
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Получаем настройки
+    settings = await _filter_manager.get_or_create_settings(chat_id, session)
+
+    current_text = settings.flood_mute_text or "Не задан"
+
+    text = (
+        f"📝 <b>Текст при муте за флуд</b>\n\n"
+        f"Этот текст будет отправлен как уведомление, "
+        f"когда пользователь получит мут за флуд.\n\n"
+        f"<b>Текущий текст:</b>\n<code>{current_text}</code>\n\n"
+        f"Введите новый текст или отправьте <code>-</code> чтобы сбросить.\n"
+        f"Доступные переменные: %user%, %time%"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cf:fladv:{chat_id}")]
+    ])
+
+    # Сохраняем chat_id и message_id в состояние
+    await state.set_state(FloodTextStates.waiting_mute_text)
+    msg = await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await state.update_data(chat_id=chat_id, instruction_message_id=msg.message_id)
+
+    await callback.answer()
+
+
+@settings_handler_router.message(FloodTextStates.waiting_mute_text)
+async def process_flood_mute_text_input(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """Обрабатывает ввод текста мута для антифлуда."""
+    # Получаем данные из состояния
+    data = await state.get_data()
+    chat_id = data.get("chat_id")
+    instruction_message_id = data.get("instruction_message_id")
+
+    # Очищаем состояние
+    await state.clear()
+
+    # Получаем текст
+    text = message.text.strip() if message.text else ""
+
+    # Если "-" - сбрасываем
+    if text == "-":
+        text = None
+
+    # Обновляем настройки
+    await _filter_manager.update_settings(chat_id, session, flood_mute_text=text)
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    confirm_text = f"✅ Текст при муте сохранён" if text else "✅ Текст при муте сброшен"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад к настройкам", callback_data=f"cf:fladv:{chat_id}")]
+    ])
+
+    if instruction_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=instruction_message_id,
+                text=confirm_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            return
+        except TelegramAPIError:
+            pass
+
+    await message.answer(confirm_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# ВВОД ТЕКСТА БАНА ДЛЯ АНТИФЛУДА
+# ============================================================
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:flbt:-?\d+$"))
+async def request_flood_ban_text_input(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """
+    Запрашивает ввод текста для бана при флуде.
+
+    Callback: cf:flbt:{chat_id}
+    """
+    # Парсим chat_id
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Получаем настройки
+    settings = await _filter_manager.get_or_create_settings(chat_id, session)
+
+    current_text = settings.flood_ban_text or "Не задан"
+
+    text = (
+        f"📝 <b>Текст при бане за флуд</b>\n\n"
+        f"Этот текст будет отправлен как уведомление, "
+        f"когда пользователь получит бан за флуд.\n\n"
+        f"<b>Текущий текст:</b>\n<code>{current_text}</code>\n\n"
+        f"Введите новый текст или отправьте <code>-</code> чтобы сбросить.\n"
+        f"Доступные переменные: %user%"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cf:fladv:{chat_id}")]
+    ])
+
+    # Сохраняем chat_id и message_id в состояние
+    await state.set_state(FloodTextStates.waiting_ban_text)
+    msg = await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await state.update_data(chat_id=chat_id, instruction_message_id=msg.message_id)
+
+    await callback.answer()
+
+
+@settings_handler_router.message(FloodTextStates.waiting_ban_text)
+async def process_flood_ban_text_input(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """Обрабатывает ввод текста бана для антифлуда."""
+    # Получаем данные из состояния
+    data = await state.get_data()
+    chat_id = data.get("chat_id")
+    instruction_message_id = data.get("instruction_message_id")
+
+    # Очищаем состояние
+    await state.clear()
+
+    # Получаем текст
+    text = message.text.strip() if message.text else ""
+
+    # Если "-" - сбрасываем
+    if text == "-":
+        text = None
+
+    # Обновляем настройки
+    await _filter_manager.update_settings(chat_id, session, flood_ban_text=text)
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    confirm_text = f"✅ Текст при бане сохранён" if text else "✅ Текст при бане сброшен"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад к настройкам", callback_data=f"cf:fladv:{chat_id}")]
+    ])
+
+    if instruction_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=instruction_message_id,
+                text=confirm_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            return
+        except TelegramAPIError:
+            pass
+
+    await message.answer(confirm_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# ВВОД ЗАДЕРЖКИ УДАЛЕНИЯ ДЛЯ АНТИФЛУДА
+# ============================================================
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:fldd:-?\d+$"))
+async def request_flood_delete_delay_input(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """
+    Запрашивает ввод задержки удаления при флуде.
+
+    Callback: cf:fldd:{chat_id}
+    """
+    # Парсим chat_id
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Получаем настройки
+    settings = await _filter_manager.get_or_create_settings(chat_id, session)
+
+    current_delay = settings.flood_delete_delay or 0
+
+    text = (
+        f"⏱️ <b>Задержка удаления сообщения</b>\n\n"
+        f"Задержка перед удалением сообщения-флуда.\n"
+        f"Полезно, чтобы пользователь увидел что его сообщение "
+        f"было обнаружено как флуд.\n\n"
+        f"<b>Текущая задержка:</b> {current_delay} сек\n\n"
+        f"Введите задержку в секундах или <code>0</code> для мгновенного удаления."
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cf:fladv:{chat_id}")]
+    ])
+
+    # Сохраняем chat_id и message_id в состояние
+    await state.set_state(FloodDelayStates.waiting_delete_delay)
+    msg = await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await state.update_data(chat_id=chat_id, instruction_message_id=msg.message_id)
+
+    await callback.answer()
+
+
+@settings_handler_router.message(FloodDelayStates.waiting_delete_delay)
+async def process_flood_delete_delay_input(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """Обрабатывает ввод задержки удаления для антифлуда."""
+    # Получаем данные из состояния
+    data = await state.get_data()
+    chat_id = data.get("chat_id")
+    instruction_message_id = data.get("instruction_message_id")
+
+    # Кнопка отмены для редактирования сообщения при ошибке
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cf:fladv:{chat_id}")]
+    ])
+
+    # Пробуем получить число (без верхнего лимита — админ решает сам)
+    try:
+        delay_seconds = int(message.text.strip())
+        if delay_seconds < 0:
+            raise ValueError("Значение должно быть неотрицательным")
+    except (ValueError, TypeError):
+        # Удаляем сообщение пользователя чтобы не засорять чат
+        try:
+            await message.delete()
+        except TelegramAPIError:
+            pass
+        # Ошибка валидации — редактируем сообщение-инструкцию
+        if instruction_message_id:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=instruction_message_id,
+                    text=(
+                        f"❌ <b>Ошибка:</b> введите неотрицательное число.\n\n"
+                        f"Введите задержку в секундах:"
+                    ),
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+                return
+            except TelegramAPIError:
+                pass
+        await message.answer("❌ Введите неотрицательное число")
+        return
+
+    # Очищаем состояние
+    await state.clear()
+
+    # Обновляем настройки
+    await _filter_manager.update_settings(chat_id, session, flood_delete_delay=delay_seconds)
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    confirm_text = f"✅ Задержка удаления: {delay_seconds} сек" if delay_seconds else "✅ Мгновенное удаление"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад к настройкам", callback_data=f"cf:fladv:{chat_id}")]
+    ])
+
+    if instruction_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=instruction_message_id,
+                text=confirm_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            return
+        except TelegramAPIError:
+            pass
+
+    await message.answer(confirm_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# ВВОД АВТОУДАЛЕНИЯ УВЕДОМЛЕНИЯ ДЛЯ АНТИФЛУДА
+# ============================================================
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:flnd:-?\d+$"))
+async def request_flood_notification_delay_input(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """
+    Запрашивает ввод времени автоудаления уведомления.
+
+    Callback: cf:flnd:{chat_id}
+    """
+    # Парсим chat_id
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Получаем настройки
+    settings = await _filter_manager.get_or_create_settings(chat_id, session)
+
+    current_delay = settings.flood_notification_delete_delay or 0
+
+    text = (
+        f"🗑️ <b>Автоудаление уведомления</b>\n\n"
+        f"Через сколько секунд удалять уведомление о флуде.\n"
+        f"Полезно, чтобы не засорять чат.\n\n"
+        f"<b>Текущее значение:</b> {current_delay} сек\n\n"
+        f"Введите значение в секундах или <code>0</code> чтобы не удалять."
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cf:fladv:{chat_id}")]
+    ])
+
+    # Сохраняем chat_id и message_id в состояние
+    await state.set_state(FloodDelayStates.waiting_notification_delay)
+    msg = await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await state.update_data(chat_id=chat_id, instruction_message_id=msg.message_id)
+
+    await callback.answer()
+
+
+@settings_handler_router.message(FloodDelayStates.waiting_notification_delay)
+async def process_flood_notification_delay_input(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """Обрабатывает ввод времени автоудаления уведомления."""
+    # Получаем данные из состояния
+    data = await state.get_data()
+    chat_id = data.get("chat_id")
+    instruction_message_id = data.get("instruction_message_id")
+
+    # Кнопка отмены для редактирования сообщения при ошибке
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cf:fladv:{chat_id}")]
+    ])
+
+    # Пробуем получить число (без верхнего лимита — админ решает сам)
+    try:
+        delay_seconds = int(message.text.strip())
+        if delay_seconds < 0:
+            raise ValueError("Значение должно быть неотрицательным")
+    except (ValueError, TypeError):
+        # Удаляем сообщение пользователя чтобы не засорять чат
+        try:
+            await message.delete()
+        except TelegramAPIError:
+            pass
+        # Ошибка валидации — редактируем сообщение-инструкцию
+        if instruction_message_id:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=instruction_message_id,
+                    text=(
+                        f"❌ <b>Ошибка:</b> введите неотрицательное число.\n\n"
+                        f"Введите время автоудаления в секундах:"
+                    ),
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+                return
+            except TelegramAPIError:
+                pass
+        await message.answer("❌ Введите неотрицательное число")
+        return
+
+    # Очищаем состояние
+    await state.clear()
+
+    # Обновляем настройки
+    await _filter_manager.update_settings(chat_id, session, flood_notification_delete_delay=delay_seconds)
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    confirm_text = f"✅ Автоудаление уведомления через: {delay_seconds} сек" if delay_seconds else "✅ Уведомления не будут удаляться автоматически"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад к настройкам", callback_data=f"cf:fladv:{chat_id}")]
+    ])
+
+    if instruction_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=instruction_message_id,
+                text=confirm_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            return
+        except TelegramAPIError:
+            pass
+
+    await message.answer(confirm_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# НАСТРОЙКИ "ЛЮБЫЕ СООБЩЕНИЯ": ЛИМИТ
+# ============================================================
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:flanylim:-?\d+$"))
+async def request_flood_any_limit_input(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """
+    Запрашивает ввод лимита для детекции любых сообщений.
+
+    Callback: cf:flanylim:{chat_id}
+
+    Лимит — максимальное количество любых сообщений подряд
+    за временное окно. При превышении срабатывает фильтр.
+
+    Args:
+        callback: CallbackQuery
+        session: Сессия БД
+        state: FSM контекст
+    """
+    # Парсим chat_id из callback данных
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Получаем текущие настройки группы
+    settings = await _filter_manager.get_or_create_settings(chat_id, session)
+    # Получаем текущий лимит
+    current_limit = settings.flood_any_max_messages or 5
+
+    # Формируем текст инструкции
+    text = (
+        f"📢 <b>Лимит сообщений (любые сообщения)</b>\n\n"
+        f"Введите максимальное количество любых сообщений подряд,\n"
+        f"после которого сработает фильтр.\n\n"
+        f"<b>Текущее значение:</b> {current_limit}\n\n"
+        f"Введите положительное число (минимум 2):"
+    )
+
+    # Кнопка отмены
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cf:fladv:{chat_id}")]
+    ])
+
+    # Сохраняем chat_id и message_id в состояние FSM
+    await state.set_state(FloodAnySettingsStates.waiting_any_limit)
+    msg = await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await state.update_data(chat_id=chat_id, instruction_message_id=msg.message_id)
+
+    await callback.answer()
+
+
+@settings_handler_router.message(FloodAnySettingsStates.waiting_any_limit)
+async def process_flood_any_limit_input(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """
+    Обрабатывает ввод лимита для детекции любых сообщений.
+
+    Проверяет что введено положительное число (минимум 2).
+    """
+    # Получаем данные из состояния
+    data = await state.get_data()
+    chat_id = data.get("chat_id")
+    instruction_message_id = data.get("instruction_message_id")
+
+    # Кнопка отмены для редактирования сообщения при ошибке
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cf:fladv:{chat_id}")]
+    ])
+
+    # Пробуем преобразовать в число
+    try:
+        # Извлекаем и проверяем число
+        limit = int(message.text.strip())
+        # Проверяем минимум (без верхнего лимита — админ решает сам)
+        if limit < 2:
+            raise ValueError("Значение должно быть минимум 2")
+    except (ValueError, TypeError):
+        # Удаляем сообщение пользователя чтобы не засорять чат
+        try:
+            await message.delete()
+        except TelegramAPIError:
+            pass
+        # Ошибка валидации — редактируем сообщение-инструкцию вместо нового сообщения
+        if instruction_message_id:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=instruction_message_id,
+                    text=(
+                        f"❌ <b>Ошибка:</b> введите число (минимум 2).\n\n"
+                        f"Введите лимит сообщений:"
+                    ),
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+                return
+            except TelegramAPIError:
+                pass
+        # Fallback если не получилось отредактировать
+        await message.answer("❌ Введите число (минимум 2)")
+        return
+
+    # Очищаем состояние FSM
+    await state.clear()
+
+    # Обновляем настройки в БД
+    await _filter_manager.update_settings(chat_id, session, flood_any_max_messages=limit)
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    # Формируем подтверждение
+    confirm_text = f"✅ Лимит сообщений установлен: {limit}"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад к настройкам", callback_data=f"cf:fladv:{chat_id}")]
+    ])
+
+    # Редактируем сообщение-инструкцию
+    if instruction_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=instruction_message_id,
+                text=confirm_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            return
+        except TelegramAPIError:
+            pass
+
+    await message.answer(confirm_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# НАСТРОЙКИ "ЛЮБЫЕ СООБЩЕНИЯ": ВРЕМЕННОЕ ОКНО
+# ============================================================
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:flanywin:-?\d+$"))
+async def request_flood_any_window_input(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """
+    Запрашивает ввод временного окна для детекции любых сообщений.
+
+    Callback: cf:flanywin:{chat_id}
+
+    Временное окно — период в секундах за который считаются сообщения.
+    Если за это время пользователь отправит больше лимита — фильтр сработает.
+
+    Args:
+        callback: CallbackQuery
+        session: Сессия БД
+        state: FSM контекст
+    """
+    # Парсим chat_id из callback данных
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Получаем текущие настройки группы
+    settings = await _filter_manager.get_or_create_settings(chat_id, session)
+    # Получаем текущее временное окно
+    current_window = settings.flood_any_time_window or 10
+
+    # Формируем текст инструкции
+    text = (
+        f"⏱️ <b>Временное окно (любые сообщения)</b>\n\n"
+        f"Введите временное окно в секундах.\n\n"
+        f"Если пользователь отправит больше лимита сообщений\n"
+        f"за это время — сработает фильтр.\n\n"
+        f"<b>Текущее значение:</b> {current_window} сек\n\n"
+        f"Введите положительное число в секундах:"
+    )
+
+    # Кнопка отмены
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cf:fladv:{chat_id}")]
+    ])
+
+    # Сохраняем chat_id и message_id в состояние FSM
+    await state.set_state(FloodAnySettingsStates.waiting_any_window)
+    msg = await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await state.update_data(chat_id=chat_id, instruction_message_id=msg.message_id)
+
+    await callback.answer()
+
+
+@settings_handler_router.message(FloodAnySettingsStates.waiting_any_window)
+async def process_flood_any_window_input(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """
+    Обрабатывает ввод временного окна для детекции любых сообщений.
+
+    Проверяет что введено положительное число.
+    """
+    # Получаем данные из состояния
+    data = await state.get_data()
+    chat_id = data.get("chat_id")
+    instruction_message_id = data.get("instruction_message_id")
+
+    # Кнопка отмены для редактирования сообщения при ошибке
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cf:fladv:{chat_id}")]
+    ])
+
+    # Пробуем преобразовать в число
+    try:
+        # Извлекаем и проверяем число
+        window = int(message.text.strip())
+        # Проверяем что число положительное (без верхнего лимита — админ решает сам)
+        if window < 1:
+            raise ValueError("Значение должно быть положительным")
+    except (ValueError, TypeError):
+        # Удаляем сообщение пользователя чтобы не засорять чат
+        try:
+            await message.delete()
+        except TelegramAPIError:
+            pass
+        # Ошибка валидации — редактируем сообщение-инструкцию вместо нового сообщения
+        if instruction_message_id:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=instruction_message_id,
+                    text=(
+                        f"❌ <b>Ошибка:</b> введите положительное число.\n\n"
+                        f"Введите временное окно в секундах:"
+                    ),
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+                return
+            except TelegramAPIError:
+                pass
+        # Fallback если не получилось отредактировать
+        await message.answer("❌ Введите положительное число")
+        return
+
+    # Очищаем состояние FSM
+    await state.clear()
+
+    # Обновляем настройки в БД
+    await _filter_manager.update_settings(chat_id, session, flood_any_time_window=window)
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    # Формируем подтверждение
+    confirm_text = f"✅ Временное окно установлено: {window} сек"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад к настройкам", callback_data=f"cf:fladv:{chat_id}")]
+    ])
+
+    # Редактируем сообщение-инструкцию
+    if instruction_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=instruction_message_id,
+                text=confirm_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            return
+        except TelegramAPIError:
+            pass
+
+    await message.answer(confirm_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# ВВОД ТЕКСТА ПРЕДУПРЕЖДЕНИЯ ДЛЯ АНТИФЛУДА
+# ============================================================
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:flwt:-?\d+$"))
+async def request_flood_warn_text_input(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """
+    Запрашивает ввод текста для предупреждения при флуде.
+
+    Callback: cf:flwt:{chat_id}
+
+    Этот текст отправляется когда действие = "предупреждение".
+
+    Args:
+        callback: CallbackQuery
+        session: Сессия БД
+        state: FSM контекст
+    """
+    # Парсим chat_id из callback данных
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Получаем текущие настройки
+    settings = await _filter_manager.get_or_create_settings(chat_id, session)
+    # Получаем текущий текст или "Не задан"
+    current_text = settings.flood_warn_text or "Не задан"
+
+    # Формируем текст инструкции
+    text = (
+        f"📝 <b>Текст при предупреждении за флуд</b>\n\n"
+        f"Этот текст будет отправлен как уведомление,\n"
+        f"когда пользователь получит предупреждение за флуд.\n\n"
+        f"<b>Текущий текст:</b>\n<code>{current_text}</code>\n\n"
+        f"Введите новый текст или отправьте <code>-</code> чтобы сбросить.\n"
+        f"Доступные переменные: %user%, %time%"
+    )
+
+    # Кнопка отмены
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cf:fladv:{chat_id}")]
+    ])
+
+    # Сохраняем chat_id и message_id в состояние FSM
+    await state.set_state(FloodTextStates.waiting_warn_text)
+    msg = await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await state.update_data(chat_id=chat_id, instruction_message_id=msg.message_id)
+
+    await callback.answer()
+
+
+@settings_handler_router.message(FloodTextStates.waiting_warn_text)
+async def process_flood_warn_text_input(
+    message: Message,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """
+    Обрабатывает ввод текста предупреждения для антифлуда.
+
+    Если введён "-" — сбрасывает текст на дефолтный.
+    """
+    # Получаем данные из состояния
+    data = await state.get_data()
+    chat_id = data.get("chat_id")
+    instruction_message_id = data.get("instruction_message_id")
+
+    # Очищаем состояние FSM
+    await state.clear()
+
+    # Получаем введённый текст
+    text = message.text.strip() if message.text else ""
+
+    # Если "-" — сбрасываем на NULL
+    if text == "-":
+        text = None
+
+    # Обновляем настройки в БД
+    await _filter_manager.update_settings(chat_id, session, flood_warn_text=text)
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    # Формируем подтверждение
+    confirm_text = f"✅ Текст при предупреждении сохранён" if text else "✅ Текст при предупреждении сброшен"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад к настройкам", callback_data=f"cf:fladv:{chat_id}")]
+    ])
+
+    # Редактируем сообщение-инструкцию
+    if instruction_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=instruction_message_id,
+                text=confirm_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            return
+        except TelegramAPIError:
+            pass
+
+    await message.answer(confirm_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# МОДУЛЬ УДАЛЕНИЯ СООБЩЕНИЙ
+# ============================================================
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:cleanup:-?\d+$"))
+async def cleanup_settings_menu(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает меню настроек модуля удаления сообщений.
+
+    Callback: cf:cleanup:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        session: Сессия БД
+    """
+    # Парсим chat_id
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Получаем настройки
+    settings = await _filter_manager.get_or_create_settings(chat_id, session)
+
+    # Формируем статусы
+    commands_status = "✅ Вкл" if settings.delete_user_commands else "❌ Выкл"
+    system_status = "✅ Вкл" if settings.delete_system_messages else "❌ Выкл"
+
+    text = (
+        f"🗑️ <b>Удаление сообщений</b>\n\n"
+        f"Этот модуль автоматически удаляет лишние сообщения в группе.\n\n"
+        f"<b>Команды от пользователей:</b> {commands_status}\n"
+        f"Удаляет команды типа /start, /help, /settings от обычных пользователей.\n"
+        f"Команды от админов выполняются, но тоже удаляются.\n\n"
+        f"<b>Системные сообщения:</b> {system_status}\n"
+        f"Удаляет сообщения о входе/выходе участников, закреплённые и т.д."
+    )
+
+    # Создаём клавиатуру
+    cmd_emoji = "✅" if settings.delete_user_commands else "❌"
+    sys_emoji = "✅" if settings.delete_system_messages else "❌"
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            # Удаление команд
+            [
+                InlineKeyboardButton(
+                    text=f"📝 Команды {cmd_emoji}",
+                    callback_data=f"cf:t:delcmd:{chat_id}"
+                )
+            ],
+            # Удаление системных сообщений
+            [
+                InlineKeyboardButton(
+                    text=f"⚙️ Системные {sys_emoji}",
+                    callback_data=f"cf:t:delsys:{chat_id}"
+                )
+            ],
+            # Назад
+            [
+                InlineKeyboardButton(
+                    text="◀️ Назад",
+                    callback_data=f"cf:s:{chat_id}"
+                )
+            ]
+        ]
+    )
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:t:delcmd:-?\d+$"))
+async def toggle_delete_user_commands(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Переключает удаление команд от пользователей.
+
+    Callback: cf:t:delcmd:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        session: Сессия БД
+    """
+    # Парсим chat_id
+    parts = callback.data.split(":")
+    chat_id = int(parts[3])
+
+    # Получаем настройки
+    settings = await _filter_manager.get_or_create_settings(chat_id, session)
+
+    # Переключаем
+    new_value = not settings.delete_user_commands
+    await _filter_manager.update_settings(chat_id, session, delete_user_commands=new_value)
+
+    # Возвращаемся в меню
+    callback.data = f"cf:cleanup:{chat_id}"
+    await cleanup_settings_menu(callback, session)
+
+    status_text = "включено" if new_value else "выключено"
+    await callback.answer(f"Удаление команд {status_text}")
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:t:delsys:-?\d+$"))
+async def toggle_delete_system_messages(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Переключает удаление системных сообщений.
+
+    Callback: cf:t:delsys:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        session: Сессия БД
+    """
+    # Парсим chat_id
+    parts = callback.data.split(":")
+    chat_id = int(parts[3])
+
+    # Получаем настройки
+    settings = await _filter_manager.get_or_create_settings(chat_id, session)
+
+    # Переключаем
+    new_value = not settings.delete_system_messages
+    await _filter_manager.update_settings(chat_id, session, delete_system_messages=new_value)
+
+    # Возвращаемся в меню
+    callback.data = f"cf:cleanup:{chat_id}"
+    await cleanup_settings_menu(callback, session)
+
+    status_text = "включено" if new_value else "выключено"
+    await callback.answer(f"Удаление системных сообщений {status_text}")

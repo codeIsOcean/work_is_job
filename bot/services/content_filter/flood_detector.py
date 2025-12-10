@@ -269,6 +269,173 @@ class FloodDetector:
                 flood_message_ids=[]
             )
 
+    async def check_any_messages(
+        self,
+        chat_id: int,
+        user_id: int,
+        message_id: int,
+        max_messages: int = 5,
+        time_window: int = 10
+    ) -> FloodCheckResult:
+        """
+        Проверяет флуд по количеству любых сообщений (не только одинаковых).
+
+        Считает количество сообщений от пользователя за временное окно,
+        независимо от их содержимого.
+
+        Args:
+            chat_id: ID чата
+            user_id: ID пользователя
+            message_id: ID сообщения
+            max_messages: Максимум сообщений за время (по умолчанию 5)
+            time_window: Временное окно в секундах (по умолчанию 10)
+
+        Returns:
+            FloodCheckResult с результатом проверки
+        """
+        # Ключ для счётчика любых сообщений
+        any_count_key = f"{self.REDIS_PREFIX}:{chat_id}:{user_id}:any:count"
+        any_messages_key = f"{self.REDIS_PREFIX}:{chat_id}:{user_id}:any:msgs"
+
+        try:
+            # Инкрементируем счётчик
+            current_count = await self._redis.incr(any_count_key)
+
+            # Добавляем message_id в список
+            await self._redis.rpush(any_messages_key, str(message_id))
+
+            # Устанавливаем TTL при первом создании
+            if current_count == 1:
+                await self._redis.expire(any_count_key, time_window)
+                await self._redis.expire(any_messages_key, time_window)
+
+            # Проверяем превышение порога
+            is_flood = current_count > max_messages
+            flood_message_ids = []
+
+            if is_flood:
+                # Получаем все ID сообщений для удаления
+                all_msg_ids = await self._redis.lrange(any_messages_key, 0, -1)
+                flood_message_ids = [int(mid) for mid in all_msg_ids if mid]
+
+                # Очищаем после получения
+                await self._redis.delete(any_messages_key)
+                await self._redis.delete(any_count_key)
+
+                logger.info(
+                    f"[FloodDetector] Обнаружен флуд (любые сообщения)! "
+                    f"chat={chat_id}, user={user_id}, "
+                    f"count={current_count} > {max_messages}, "
+                    f"messages_to_delete={len(flood_message_ids)}"
+                )
+            else:
+                logger.debug(
+                    f"[FloodDetector] Не флуд (любые). "
+                    f"count={current_count} <= {max_messages}"
+                )
+
+            return FloodCheckResult(
+                is_flood=is_flood,
+                repeat_count=current_count,
+                max_allowed=max_messages,
+                message_hash="any",
+                flood_message_ids=flood_message_ids
+            )
+
+        except Exception as e:
+            logger.error(f"[FloodDetector] Ошибка Redis (any): {e}")
+            return FloodCheckResult(
+                is_flood=False,
+                repeat_count=0,
+                max_allowed=max_messages,
+                message_hash="any",
+                flood_message_ids=[]
+            )
+
+    async def check_media(
+        self,
+        chat_id: int,
+        user_id: int,
+        message_id: int,
+        media_type: str,
+        max_repeats: int = 2,
+        time_window: int = 60
+    ) -> FloodCheckResult:
+        """
+        Проверяет медиа-флуд (фото, стикеры, видео, войсы).
+
+        Считает количество медиа одного типа от пользователя.
+
+        Args:
+            chat_id: ID чата
+            user_id: ID пользователя
+            message_id: ID сообщения
+            media_type: Тип медиа (photo, sticker, video, voice, video_note)
+            max_repeats: Максимум медиа одного типа (по умолчанию 2)
+            time_window: Временное окно в секундах (по умолчанию 60)
+
+        Returns:
+            FloodCheckResult с результатом проверки
+        """
+        # Ключ для счётчика медиа определённого типа
+        media_count_key = f"{self.REDIS_PREFIX}:{chat_id}:{user_id}:media:{media_type}:count"
+        media_messages_key = f"{self.REDIS_PREFIX}:{chat_id}:{user_id}:media:{media_type}:msgs"
+
+        try:
+            # Инкрементируем счётчик
+            current_count = await self._redis.incr(media_count_key)
+
+            # Добавляем message_id в список
+            await self._redis.rpush(media_messages_key, str(message_id))
+
+            # Устанавливаем TTL при первом создании
+            if current_count == 1:
+                await self._redis.expire(media_count_key, time_window)
+                await self._redis.expire(media_messages_key, time_window)
+
+            # Проверяем превышение порога
+            is_flood = current_count > max_repeats
+            flood_message_ids = []
+
+            if is_flood:
+                # Получаем все ID сообщений для удаления
+                all_msg_ids = await self._redis.lrange(media_messages_key, 0, -1)
+                flood_message_ids = [int(mid) for mid in all_msg_ids if mid]
+
+                # Очищаем после получения
+                await self._redis.delete(media_messages_key)
+                await self._redis.delete(media_count_key)
+
+                logger.info(
+                    f"[FloodDetector] Обнаружен медиа-флуд ({media_type})! "
+                    f"chat={chat_id}, user={user_id}, "
+                    f"count={current_count} > {max_repeats}, "
+                    f"messages_to_delete={len(flood_message_ids)}"
+                )
+            else:
+                logger.debug(
+                    f"[FloodDetector] Не медиа-флуд ({media_type}). "
+                    f"count={current_count} <= {max_repeats}"
+                )
+
+            return FloodCheckResult(
+                is_flood=is_flood,
+                repeat_count=current_count,
+                max_allowed=max_repeats,
+                message_hash=f"media:{media_type}",
+                flood_message_ids=flood_message_ids
+            )
+
+        except Exception as e:
+            logger.error(f"[FloodDetector] Ошибка Redis (media): {e}")
+            return FloodCheckResult(
+                is_flood=False,
+                repeat_count=0,
+                max_allowed=max_repeats,
+                message_hash=f"media:{media_type}",
+                flood_message_ids=[]
+            )
+
     async def reset_user_history(
         self,
         chat_id: int,

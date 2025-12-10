@@ -14,9 +14,18 @@ from .enhanced_analysis_test_handler import enhanced_analysis_router
 from .settings_captcha_handler import captcha_settings_router
 from .journal_link_handler import journal_link_router
 from .unscam_handler import unscam_router
-from .antispam_handlers import antispam_router, antispam_filter_router
-# Импортируем роутер модуля content_filter (фильтрация слов, скама, флуда)
+# Импортируем только antispam_router (настройки UI)
+# antispam_filter_router перенесён в group_message_coordinator
+from .antispam_handlers import antispam_router
+# Импортируем роутер модуля content_filter (только UI настроек)
+# filter_handler перенесён в group_message_coordinator
 from .content_filter import content_filter_router
+# Импортируем роутер модуля message_management (UI + команды)
+# filter_handler вызывается из group_message_coordinator
+from .message_management import message_management_router
+# Импортируем координатор сообщений в группах
+# Это единая точка входа для ContentFilter, Antispam и MessageManagement
+from .group_message_coordinator import group_message_coordinator_router
 
 # Объединяем все роутеры в один
 from aiogram import Router, F
@@ -41,9 +50,16 @@ handlers_router.include_router(journal_link_router)           # Привязка
 handlers_router.include_router(reaction_mute_router)
 handlers_router.include_router(captcha_settings_router)
 handlers_router.include_router(unscam_router)                 # Команда /unscam в ЛС
-handlers_router.include_router(antispam_router)               # Антиспам настройки
-handlers_router.include_router(content_filter_router)         # Content filter (слова, скам, флуд) ПЕРЕД antispam
-handlers_router.include_router(antispam_filter_router)        # Антиспам фильтр сообщений ПОСЛЕДНИМ
+handlers_router.include_router(antispam_router)               # Антиспам настройки UI
+handlers_router.include_router(content_filter_router)         # Content filter настройки UI
+handlers_router.include_router(message_management_router)     # Message management UI + команды
+# ============================================================
+# GROUP MESSAGE COORDINATOR - единый хендлер для сообщений в группах
+# ============================================================
+# Координирует работу ContentFilter и Antispam.
+# Решает проблему конфликта хендлеров с одинаковыми фильтрами.
+# Подробнее: docs/ARCHITECTURE.md
+handlers_router.include_router(group_message_coordinator_router)
 
 
 def create_fresh_handlers_router():
@@ -66,8 +82,10 @@ def create_fresh_handlers_router():
     fresh_router.include_router(captcha_settings_router)
     fresh_router.include_router(unscam_router)
     fresh_router.include_router(antispam_router)
-    fresh_router.include_router(content_filter_router)         # Content filter ПЕРЕД antispam_filter
-    fresh_router.include_router(antispam_filter_router)
+    fresh_router.include_router(content_filter_router)
+    fresh_router.include_router(message_management_router)
+    # Group Message Coordinator - единый хендлер для групповых сообщений
+    fresh_router.include_router(group_message_coordinator_router)
     return fresh_router
 
 

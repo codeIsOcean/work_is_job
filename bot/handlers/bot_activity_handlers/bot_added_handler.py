@@ -77,23 +77,33 @@ def _go_to_pm_keyboard(bot_username: str) -> InlineKeyboardMarkup:
 
 
 # =======================================
-# ОБРАБОТКА СМЕНЫ СТАТУСА САМОГО БОТА
+# ОБРАБОТКА СМЕНЫ СТАТУСА САМОГО БОТА (ДОБАВЛЕНИЕ)
 # =======================================
-@bot_added_router.my_chat_member() 
+# ВАЖНО: Используем фильтр ChatMemberUpdatedFilter чтобы срабатывало
+# ТОЛЬКО когда бот добавлен (переход из NOT_MEMBER в MEMBER/ADMIN),
+# а НЕ при удалении (когда статус меняется на left/kicked)
+
+from aiogram.filters.chat_member_updated import IS_NOT_MEMBER, JOIN_TRANSITION
+
+# Фильтр: бот был НЕ участником, а стал участником или админом
+# JOIN_TRANSITION = IS_NOT_MEMBER >> IS_MEMBER (включает переход в member и administrator)
+_BOT_ADDED_FILTER = ChatMemberUpdatedFilter(member_status_changed=JOIN_TRANSITION)
+
+@bot_added_router.my_chat_member(_BOT_ADDED_FILTER)
 async def on_my_status_change(
         event: ChatMemberUpdated,
         bot: Bot,
         session: AsyncSession,
 ):
     """
-    Реагируем, когда меняется статус ИМЕННО нашего бота в группе (my_chat_member).
+    Реагируем, когда бот ДОБАВЛЕН в группу (переход из NOT_MEMBER в MEMBER/ADMIN).
+    НЕ срабатывает при удалении бота из группы.
     """
-    print("🛠 Хендлер my_chat_member сработал")
-    print(f"📥 Новый статус: {event.new_chat_member.status}")
+    logger.info(f"🛠 Хендлер on_my_status_change сработал: статус {event.new_chat_member.status}")
 
-    # Проверяем, что бот получил статус member или administrator
+    # Проверяем, что бот получил статус member или administrator (дополнительная проверка)
     if event.new_chat_member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.MEMBER]:
-        print("⛔️ бот не получил нужный статус")
+        logger.debug(f"⛔️ бот не получил нужный статус: {event.new_chat_member.status}")
         return
 
     chat = event.chat

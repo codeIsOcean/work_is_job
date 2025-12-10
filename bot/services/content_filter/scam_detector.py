@@ -16,11 +16,13 @@
 # Импортируем модуль регулярных выражений
 import re
 # Импортируем типы для аннотаций
-from typing import Optional, List, NamedTuple, Dict, TYPE_CHECKING
+from typing import Optional, List, NamedTuple, Dict, Set, TYPE_CHECKING
 # Импортируем логгер для записи событий
 import logging
 # Импортируем datetime для обновления времени срабатывания
 from datetime import datetime
+# Импортируем difflib для fuzzy matching
+from difflib import SequenceMatcher
 
 # Импортируем нормализатор текста
 from bot.services.content_filter.text_normalizer import TextNormalizer, get_normalizer
@@ -216,6 +218,106 @@ SCAM_SIGNALS: Dict[str, Dict] = {
         'description': 'Уникальное предложение'
     },
 }
+
+
+# ============================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ПРОДВИНУТОЙ ДЕТЕКЦИИ
+# ============================================================
+
+def fuzzy_match(text: str, pattern: str, threshold: float = 0.8) -> bool:
+    """
+    Проверяет нечёткое совпадение текста с паттерном.
+
+    Использует SequenceMatcher для определения сходства строк.
+    Полезно для обнаружения текста с опечатками или небольшими изменениями.
+
+    Args:
+        text: Текст для проверки (нормализованный)
+        pattern: Паттерн для поиска (нормализованный)
+        threshold: Порог сходства (0.0-1.0), по умолчанию 0.8
+
+    Returns:
+        True если найдено совпадение >= threshold
+    """
+    # Если паттерн короткий, ищем его как подстроку с fuzzy
+    pattern_lower = pattern.lower()
+    text_lower = text.lower()
+
+    # Проверяем скользящим окном по тексту
+    pattern_len = len(pattern_lower)
+
+    # Минимальная длина для проверки
+    if pattern_len < 3:
+        return pattern_lower in text_lower
+
+    # Проходим по тексту окном размера pattern_len
+    for i in range(len(text_lower) - pattern_len + 1):
+        window = text_lower[i:i + pattern_len]
+        ratio = SequenceMatcher(None, pattern_lower, window).ratio()
+        if ratio >= threshold:
+            return True
+
+    # Также проверяем слова целиком
+    words = text_lower.split()
+    for word in words:
+        if len(word) >= 3:
+            ratio = SequenceMatcher(None, pattern_lower, word).ratio()
+            if ratio >= threshold:
+                return True
+
+    return False
+
+
+def extract_ngrams(text: str, n: int = 2) -> Set[str]:
+    """
+    Извлекает n-граммы из текста.
+
+    N-граммы полезны для обнаружения фраз даже при
+    изменении порядка слов или частичном присутствии.
+
+    Args:
+        text: Текст для извлечения (должен быть нормализован)
+        n: Размер n-граммы (по умолчанию 2 - биграммы)
+
+    Returns:
+        Множество n-грамм
+    """
+    # Разбиваем на слова
+    words = text.lower().split()
+
+    # Если слов меньше n, возвращаем пустое множество
+    if len(words) < n:
+        return set()
+
+    # Генерируем n-граммы
+    ngrams = set()
+    for i in range(len(words) - n + 1):
+        ngram = ' '.join(words[i:i + n])
+        ngrams.add(ngram)
+
+    return ngrams
+
+
+def ngram_match(text_ngrams: Set[str], pattern_ngrams: Set[str], min_overlap: float = 0.5) -> bool:
+    """
+    Проверяет совпадение n-грамм текста и паттерна.
+
+    Args:
+        text_ngrams: N-граммы текста
+        pattern_ngrams: N-граммы паттерна
+        min_overlap: Минимальная доля совпадающих n-грамм (0.0-1.0)
+
+    Returns:
+        True если достаточное количество n-грамм совпадает
+    """
+    if not pattern_ngrams:
+        return False
+
+    # Считаем пересечение
+    common = text_ngrams & pattern_ngrams
+    overlap = len(common) / len(pattern_ngrams)
+
+    return overlap >= min_overlap
 
 
 # ============================================================
@@ -435,51 +537,94 @@ class ScamDetector:
         # Список ID паттернов которые сработали (для обновления счётчика)
         triggered_pattern_ids: List[int] = []
 
-        # Проверяем каждый кастомный паттерн
+        # Предварительно извлекаем n-граммы из текста для n-gram matching
+        text_bigrams = extract_ngrams(normalized_text, n=2)
+        text_trigrams = extract_ngrams(normalized_text, n=3)
+
+        # Проверяем каждый кастомный паттерн используя 4 метода
         for pattern in custom_patterns:
             matched = False
+            match_method = None  # Для логирования какой метод сработал
 
+            # ─────────────────────────────────────────────────────
+            # МЕТОД 1: REGEX (точное совпадение по регулярке)
+            # ─────────────────────────────────────────────────────
             if pattern.pattern_type == 'regex':
-                # Регулярное выражение
                 try:
                     regex = re.compile(pattern.pattern, re.IGNORECASE | re.UNICODE)
                     if regex.search(normalized_text) or regex.search(lower_text):
                         matched = True
+                        match_method = 'regex'
                 except re.error:
-                    # Некорректный regex - пропускаем
                     logger.warning(
                         f"[ScamDetector] Некорректный regex паттерн #{pattern.id}: "
                         f"{pattern.pattern}"
                     )
                     continue
 
+            # ─────────────────────────────────────────────────────
+            # МЕТОД 2: KEYWORD (точное совпадение слова)
+            # ─────────────────────────────────────────────────────
             elif pattern.pattern_type == 'word':
-                # Как отдельное слово (с границами)
+                # Сначала точное совпадение
                 word_pattern = r'\b' + re.escape(pattern.normalized) + r'\b'
                 try:
                     if re.search(word_pattern, normalized_text, re.IGNORECASE):
                         matched = True
+                        match_method = 'keyword'
                 except re.error:
-                    continue
+                    pass
 
+                # Если не нашли точное совпадение - пробуем fuzzy matching
+                if not matched:
+                    if fuzzy_match(normalized_text, pattern.normalized, threshold=0.85):
+                        matched = True
+                        match_method = 'fuzzy'
+
+            # ─────────────────────────────────────────────────────
+            # МЕТОД 3: PHRASE (подстрока + fuzzy + n-grams)
+            # ─────────────────────────────────────────────────────
             else:
-                # phrase (по умолчанию) - как подстрока
+                # Сначала точное совпадение подстроки
                 if pattern.normalized in normalized_text.lower():
                     matched = True
+                    match_method = 'phrase'
+
+                # Если не нашли - пробуем fuzzy matching
+                if not matched:
+                    if fuzzy_match(normalized_text, pattern.normalized, threshold=0.8):
+                        matched = True
+                        match_method = 'fuzzy'
+
+                # Если не нашли - пробуем n-gram matching
+                if not matched:
+                    # Извлекаем n-граммы из паттерна
+                    pattern_words = pattern.normalized.split()
+                    if len(pattern_words) >= 2:
+                        pattern_bigrams = extract_ngrams(pattern.normalized, n=2)
+                        if ngram_match(text_bigrams, pattern_bigrams, min_overlap=0.6):
+                            matched = True
+                            match_method = 'ngram'
+
+                    if not matched and len(pattern_words) >= 3:
+                        pattern_trigrams = extract_ngrams(pattern.normalized, n=3)
+                        if ngram_match(text_trigrams, pattern_trigrams, min_overlap=0.5):
+                            matched = True
+                            match_method = 'ngram'
 
             # Если паттерн сработал
             if matched:
                 total_score += pattern.weight
-                # Формируем описание для триггера
-                pattern_desc = pattern.pattern[:30]
-                if len(pattern.pattern) > 30:
+                # Формируем описание для триггера с методом совпадения
+                pattern_desc = pattern.pattern[:25]
+                if len(pattern.pattern) > 25:
                     pattern_desc += '...'
-                triggered.append(f"custom:{pattern_desc} (+{pattern.weight})")
+                triggered.append(f"custom[{match_method}]:{pattern_desc} (+{pattern.weight})")
                 triggered_pattern_ids.append(pattern.id)
 
                 logger.debug(
-                    f"[ScamDetector] Кастомный паттерн #{pattern.id} сработал: "
-                    f"'{pattern.pattern}' +{pattern.weight} баллов"
+                    f"[ScamDetector] Кастомный паттерн #{pattern.id} сработал "
+                    f"методом '{match_method}': '{pattern.pattern}' +{pattern.weight} баллов"
                 )
 
         # ─────────────────────────────────────────────────────────
@@ -491,6 +636,63 @@ class ScamDetector:
                     pattern_id=pattern_id,
                     session=session
                 )
+
+        # ─────────────────────────────────────────────────────────
+        # ШАГ 4.5: Загружаем и проверяем категории сигналов
+        # ─────────────────────────────────────────────────────────
+        # Категории позволяют админам создавать свои наборы ключевых слов
+        # (например: "Наркотики", "Контакты для связи" и т.д.)
+        from bot.database.models_content_filter import ScamSignalCategory
+        from sqlalchemy import select
+
+        try:
+            # Загружаем активные категории для этой группы
+            category_query = select(ScamSignalCategory).where(
+                ScamSignalCategory.chat_id == chat_id,
+                ScamSignalCategory.enabled == True
+            )
+            category_result = await session.execute(category_query)
+            categories = category_result.scalars().all()
+
+            # Проверяем каждую категорию
+            for category in categories:
+                if not category.keywords:
+                    continue
+
+                # Разбиваем keywords по запятым
+                keywords = [kw.strip().lower() for kw in category.keywords.split(',') if kw.strip()]
+
+                # Проверяем каждое ключевое слово
+                category_matched = False
+                matched_keyword = None
+
+                for keyword in keywords:
+                    # Пробуем точное совпадение
+                    if keyword in normalized_text.lower():
+                        category_matched = True
+                        matched_keyword = keyword
+                        break
+
+                    # Пробуем fuzzy matching для длинных ключевых слов
+                    if len(keyword) >= 4:
+                        if fuzzy_match(normalized_text, keyword, threshold=0.85):
+                            category_matched = True
+                            matched_keyword = keyword
+                            break
+
+                # Если категория сработала
+                if category_matched:
+                    total_score += category.weight
+                    triggered.append(
+                        f"category[{category.category_name}]:{matched_keyword} (+{category.weight})"
+                    )
+                    logger.debug(
+                        f"[ScamDetector] Категория '{category.category_name}' сработала "
+                        f"на ключевом слове '{matched_keyword}': +{category.weight} баллов"
+                    )
+
+        except Exception as e:
+            logger.warning(f"[ScamDetector] Ошибка проверки категорий: {e}")
 
         # ─────────────────────────────────────────────────────────
         # ШАГ 5: Сравниваем с порогом

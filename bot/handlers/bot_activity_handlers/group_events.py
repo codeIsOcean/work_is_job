@@ -172,7 +172,19 @@ async def bot_added_to_group(event: types.ChatMemberUpdated, session: AsyncSessi
 
 @group_events_router.my_chat_member(ChatMemberUpdatedFilter(member_status_changed=IS_MEMBER >> IS_NOT_MEMBER))
 async def bot_removed_from_group(event: types.ChatMemberUpdated, session: AsyncSession):
-    """Удаляем группу и связи, когда бота удаляют из группы."""
+    """
+    Обработка удаления бота из группы.
+
+    ВАЖНО: НЕ удаляем группу из БД! Только очищаем связи UserGroup.
+
+    Причина: событие IS_MEMBER >> IS_NOT_MEMBER может срабатывать ложно
+    при глитчах Telegram API или изменении прав бота. Если удалить группу,
+    она исчезнет из /settings и пользователю придётся заново настраивать бота.
+
+    При реальном удалении бота:
+    - AUTO_SYNC не сможет синхронизировать группу (бота нет)
+    - При восстановлении бота группа уже будет в БД с сохранёнными настройками
+    """
     chat = event.chat
     user = event.from_user
 
@@ -181,34 +193,33 @@ async def bot_removed_from_group(event: types.ChatMemberUpdated, session: AsyncS
     )
 
     try:
-        # Удаляем все связи UserGroup для этой группы
-        await session.execute(
+        # Удаляем только связи UserGroup (права админов)
+        # Группа остаётся в БД с сохранёнными настройками
+        result = await session.execute(
             delete(UserGroup).where(UserGroup.group_id == chat.id)
         )
+        deleted_count = result.rowcount
 
-        # Удаляем записи участников группы (GroupUsers) по on delete CASCADE сохранится целостность,
-        # но на всякий случай можно почистить явно, если нужно: оставим базовую чистку группой
-
-        # Удаляем саму группу, если существует
-        result = await session.execute(select(Group).where(Group.chat_id == chat.id))
-        group = result.scalar_one_or_none()
+        # Помечаем группу как неактивную (опционально, для отладки)
+        group_result = await session.execute(select(Group).where(Group.chat_id == chat.id))
+        group = group_result.scalar_one_or_none()
         if group:
-            await session.delete(group)
+            # НЕ удаляем группу! Настройки сохраняются.
+            logger.info(f"📝 Группа {chat.id} ({chat.title}) сохранена в БД, удалено {deleted_count} связей UserGroup")
 
         await session.commit()
 
-        # Чистим связанные ключи в Redis (лениво и безопасно)
+        # Чистим кэш синхронизации в Redis (группа может быть ресинхронизирована позже)
         try:
             from bot.services.redis_conn import redis
-            await redis.delete(f"visual_captcha_enabled:{chat.id}")
-            await redis.delete(f"group:{chat.id}:mute_new_members")
-            await redis.delete(f"group_link:private_{chat.id}")
+            await redis.delete(f"group_synced:{chat.id}")
+            # Остальные ключи НЕ удаляем - настройки сохраняются
         except Exception as re:
-            logger.warning(f"Не удалось очистить Redis для группы {chat.id}: {re}")
+            logger.warning(f"Не удалось очистить Redis кэш для группы {chat.id}: {re}")
 
-        logger.info(f"✅ Группа {chat.id} и связи удалены")
+        logger.info(f"✅ Обработано удаление бота из группы {chat.id}. Группа и настройки СОХРАНЕНЫ в БД.")
     except Exception as e:
-        logger.error(f"❌ Ошибка при удалении группы {chat.id}: {e}")
+        logger.error(f"❌ Ошибка при обработке удаления бота из группы {chat.id}: {e}")
         await session.rollback()
 
 @bot_activity_handlers_router.chat_join_request()

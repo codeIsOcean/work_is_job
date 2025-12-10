@@ -169,12 +169,21 @@ class FilterManager:
         # Получаем текст сообщения
         text = message.text or message.caption or ''
 
-        # Если текста нет - нечего проверять
-        if not text.strip():
-            return FilterResult(should_act=False)
-
         # Получаем user_id для детекторов
         user_id = message.from_user.id if message.from_user else 0
+
+        # Определяем тип медиа (для медиа-флуда)
+        media_type: Optional[str] = None
+        if message.photo:
+            media_type = 'photo'
+        elif message.sticker:
+            media_type = 'sticker'
+        elif message.video:
+            media_type = 'video'
+        elif message.voice:
+            media_type = 'voice'
+        elif message.video_note:
+            media_type = 'video_note'
 
         # ─────────────────────────────────────────────────────────
         # ШАГ 2: Flood Detector (самый быстрый)
@@ -210,6 +219,84 @@ class FilterManager:
                     action_duration=flood_duration,
                     flood_message_ids=flood_result.flood_message_ids
                 )
+
+        # ─────────────────────────────────────────────────────────
+        # ШАГ 2.1: Расширенный антифлуд - любые сообщения подряд
+        # ─────────────────────────────────────────────────────────
+        if settings.flood_detect_any_messages and self._flood_detector:
+            # Проверяем на флуд любых сообщений (не только одинаковых)
+            any_msg_result = await self._flood_detector.check_any_messages(
+                chat_id=chat_id,
+                user_id=user_id,
+                message_id=message.message_id,
+                max_messages=settings.flood_any_max_messages,
+                time_window=settings.flood_any_time_window
+            )
+
+            # Если обнаружен флуд любых сообщений
+            if any_msg_result.is_flood:
+                flood_action = settings.flood_action or settings.default_action
+                flood_duration = settings.flood_mute_duration or settings.default_mute_duration
+
+                logger.info(
+                    f"[FilterManager] AnyMessagesFlood сработал в чате {chat_id}: "
+                    f"сообщений={any_msg_result.repeat_count}, action={flood_action}"
+                )
+
+                return FilterResult(
+                    should_act=True,
+                    detector_type='flood',
+                    trigger=f"Сообщений подряд: {any_msg_result.repeat_count}",
+                    action=flood_action,
+                    action_duration=flood_duration,
+                    flood_message_ids=any_msg_result.flood_message_ids
+                )
+
+        # ─────────────────────────────────────────────────────────
+        # ШАГ 2.2: Расширенный антифлуд - медиа (фото, стикеры, видео, войсы)
+        # ─────────────────────────────────────────────────────────
+        if settings.flood_detect_media and self._flood_detector and media_type:
+            # Проверяем на медиа-флуд
+            media_result = await self._flood_detector.check_media(
+                chat_id=chat_id,
+                user_id=user_id,
+                message_id=message.message_id,
+                media_type=media_type,
+                max_repeats=settings.flood_max_repeats,
+                time_window=settings.flood_time_window
+            )
+
+            # Если обнаружен медиа-флуд
+            if media_result.is_flood:
+                flood_action = settings.flood_action or settings.default_action
+                flood_duration = settings.flood_mute_duration or settings.default_mute_duration
+
+                media_names = {
+                    'photo': 'фото',
+                    'sticker': 'стикеров',
+                    'video': 'видео',
+                    'voice': 'голосовых',
+                    'video_note': 'кружков'
+                }
+                media_name = media_names.get(media_type, media_type)
+
+                logger.info(
+                    f"[FilterManager] MediaFlood сработал в чате {chat_id}: "
+                    f"тип={media_type}, кол-во={media_result.repeat_count}, action={flood_action}"
+                )
+
+                return FilterResult(
+                    should_act=True,
+                    detector_type='flood',
+                    trigger=f"Флуд {media_name}: {media_result.repeat_count}",
+                    action=flood_action,
+                    action_duration=flood_duration,
+                    flood_message_ids=media_result.flood_message_ids
+                )
+
+        # Если текста нет - дальше проверять нечего (word_filter и scam_detector работают с текстом)
+        if not text.strip():
+            return FilterResult(should_act=False)
 
         # ─────────────────────────────────────────────────────────
         # ШАГ 3: Word Filter (запрещённые слова)

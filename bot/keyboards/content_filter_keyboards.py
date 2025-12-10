@@ -290,7 +290,16 @@ def create_content_filter_settings_menu(
                 )
             ],
             # ─────────────────────────────────────────────────────
-            # Ряд 7: Назад
+            # Ряд 5: Удаление сообщений
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text="🗑️ Удаление сообщений",
+                    callback_data=f"cf:cleanup:{chat_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Ряд 6: Назад
             # ─────────────────────────────────────────────────────
             [
                 InlineKeyboardButton(
@@ -599,6 +608,24 @@ def create_scam_settings_menu(
                 InlineKeyboardButton(
                     text=f"Логирование {EMOJI_ON if settings.log_violations else EMOJI_OFF}",
                     callback_data=f"cf:t:log:{chat_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Категории сигналов (кастомные наборы ключевых слов)
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text="📂 Категории сигналов",
+                    callback_data=f"cf:sccat:{chat_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Дополнительно (тексты уведомлений, задержки удаления)
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text="⚙️ Дополнительно",
+                    callback_data=f"cf:scadv:{chat_id}"
                 )
             ],
             # ─────────────────────────────────────────────────────
@@ -977,11 +1004,11 @@ def create_flood_action_menu(
                     callback_data=f"cf:fact:ban:{chat_id}"
                 )
             ],
-            # Назад к главному меню фильтра контента
+            # Назад к меню "Дополнительно" антифлуда
             [
                 InlineKeyboardButton(
                     text=f"{EMOJI_BACK} Назад",
-                    callback_data=f"cf:m:{chat_id}"
+                    callback_data=f"cf:fladv:{chat_id}"
                 )
             ]
         ]
@@ -1082,110 +1109,77 @@ def create_flood_settings_menu(
     max_repeats: int = 2,
     time_window: int = 60,
     action: str = None,
-    mute_duration: int = None
+    mute_duration: int = None,
+    detect_any_messages: bool = False,
+    any_max_messages: int = 5,
+    any_time_window: int = 10,
+    detect_media: bool = False
 ) -> InlineKeyboardMarkup:
     """
     Создаёт меню настроек антифлуда.
 
-    Настройки:
-    - Максимум повторов (2, 3, 5 + ручной ввод)
-    - Временное окно (30с, 60с, 120с + ручной ввод)
-    - Действие при срабатывании
+    СТРУКТУРА МЕНЮ (по запросу пользователя):
+    - Расширенный антифлуд: любые сообщения (toggle)
+    - Расширенный антифлуд: медиа (toggle)
+    - Дополнительно (ведёт в детальные настройки)
+    - Назад
+
+    ВАЖНО: Настройки "Макс. повторов", "Временное окно", "Действие"
+    теперь ТОЛЬКО в меню "Дополнительно" (cf:fladv), чтобы не было дублирования!
 
     Args:
         chat_id: ID группы
-        max_repeats: Текущий порог повторов
-        time_window: Текущее временное окно в секундах
-        action: Текущее действие (delete/mute/ban или None для дефолта)
-        mute_duration: Длительность мута в минутах
+        max_repeats: Текущий порог повторов (отображается в тексте сообщения)
+        time_window: Текущее временное окно в секундах (отображается в тексте)
+        action: Текущее действие (для отображения в тексте)
+        mute_duration: Длительность мута в минутах (для отображения)
+        detect_any_messages: Включена ли детекция любых сообщений
+        any_max_messages: Лимит любых сообщений (для отображения)
+        any_time_window: Временное окно для любых сообщений (для отображения)
+        detect_media: Включена ли детекция медиа-флуда
 
     Returns:
         InlineKeyboardMarkup: Клавиатура настроек флуда
     """
-    # Определяем галочки для текущих значений
-    rep2_check = " ✓" if max_repeats == 2 else ""
-    rep3_check = " ✓" if max_repeats == 3 else ""
-    rep5_check = " ✓" if max_repeats == 5 else ""
-    # Если значение не стандартное - показываем его в кнопке "Другое"
-    rep_custom = max_repeats not in [2, 3, 5]
-    rep_custom_text = f"✏️ {max_repeats} ✓" if rep_custom else "✏️"
-
-    win30_check = " ✓" if time_window == 30 else ""
-    win60_check = " ✓" if time_window == 60 else ""
-    win120_check = " ✓" if time_window == 120 else ""
-    # Если значение не стандартное - показываем его в кнопке "Другое"
-    win_custom = time_window not in [30, 60, 120]
-    win_custom_text = f"✏️ {time_window}с ✓" if win_custom else "✏️"
+    # УБРАНЫ: кнопки "Макс. повторов", "Временное окно", "Действие"
+    # Теперь они ТОЛЬКО в меню "Дополнительно" (cf:fladv)
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             # ─────────────────────────────────────────────────────
-            # Заголовок: Максимум повторов
+            # Разделитель: Расширенный антифлуд
             # ─────────────────────────────────────────────────────
             [
                 InlineKeyboardButton(
-                    text="📢 Макс. повторов:",
+                    text="─── Расширенный антифлуд ───",
                     callback_data="cf:noop"
                 )
             ],
             # ─────────────────────────────────────────────────────
-            # Ряд выбора повторов + ручной ввод
+            # Ряд: Любые сообщения подряд
             # ─────────────────────────────────────────────────────
             [
                 InlineKeyboardButton(
-                    text=f"2{rep2_check}",
-                    callback_data=f"cf:flr:2:{chat_id}"
-                ),
-                InlineKeyboardButton(
-                    text=f"3{rep3_check}",
-                    callback_data=f"cf:flr:3:{chat_id}"
-                ),
-                InlineKeyboardButton(
-                    text=f"5{rep5_check}",
-                    callback_data=f"cf:flr:5:{chat_id}"
-                ),
-                InlineKeyboardButton(
-                    text=rep_custom_text,
-                    callback_data=f"cf:flrc:{chat_id}"
+                    text=f"💬 Любые сообщения {EMOJI_ON if detect_any_messages else EMOJI_OFF}",
+                    callback_data=f"cf:t:flany:{chat_id}"
                 )
             ],
             # ─────────────────────────────────────────────────────
-            # Заголовок: Временное окно
+            # Ряд: Медиа-флуд (фото, стикеры, видео, войсы)
             # ─────────────────────────────────────────────────────
             [
                 InlineKeyboardButton(
-                    text="⏱️ Временное окно:",
-                    callback_data="cf:noop"
+                    text=f"🖼️ Медиа-флуд {EMOJI_ON if detect_media else EMOJI_OFF}",
+                    callback_data=f"cf:t:flmedia:{chat_id}"
                 )
             ],
             # ─────────────────────────────────────────────────────
-            # Ряд выбора окна + ручной ввод
+            # Ряд: Дополнительно (здесь ВСЕ детальные настройки)
             # ─────────────────────────────────────────────────────
             [
                 InlineKeyboardButton(
-                    text=f"30с{win30_check}",
-                    callback_data=f"cf:flw:30:{chat_id}"
-                ),
-                InlineKeyboardButton(
-                    text=f"60с{win60_check}",
-                    callback_data=f"cf:flw:60:{chat_id}"
-                ),
-                InlineKeyboardButton(
-                    text=f"120с{win120_check}",
-                    callback_data=f"cf:flw:120:{chat_id}"
-                ),
-                InlineKeyboardButton(
-                    text=win_custom_text,
-                    callback_data=f"cf:flwc:{chat_id}"
-                )
-            ],
-            # ─────────────────────────────────────────────────────
-            # Ряд: Действие при срабатывании
-            # ─────────────────────────────────────────────────────
-            [
-                InlineKeyboardButton(
-                    text=f"⚡ Действие: {_format_flood_action(action, mute_duration)}",
-                    callback_data=f"cf:fact:{chat_id}"
+                    text="⚙️ Дополнительно",
+                    callback_data=f"cf:fladv:{chat_id}"
                 )
             ],
             # ─────────────────────────────────────────────────────

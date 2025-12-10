@@ -1,7 +1,10 @@
 # handlers/journal_link_handler.py
 """
-Handler для автоматической привязки журнала к группе через пересылку сообщений.
-Паттерн: админ пересылает сообщение из канала журнала в группу с ботом.
+Handler для привязки журнала к группе через пересылку сообщений.
+Паттерн: админ вводит /linkjournal, затем пересылает сообщение из канала журнала.
+
+ВАЖНО: Привязка работает ТОЛЬКО после команды /linkjournal (FSM состояние).
+Это предотвращает случайную привязку журнала при обычных пересылках.
 """
 import logging
 import html
@@ -9,6 +12,8 @@ from datetime import datetime
 from aiogram import Router, F
 from aiogram.types import Message
 from aiogram.filters import Command, Filter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy.ext.asyncio import AsyncSession
 from bot.services.group_journal_service import (
     link_journal_channel,
@@ -20,6 +25,11 @@ from bot.services.groups_settings_in_private_logic import check_granular_permiss
 logger = logging.getLogger(__name__)
 
 journal_link_router = Router()
+
+
+class JournalLinkStates(StatesGroup):
+    """FSM состояния для привязки журнала."""
+    waiting_for_forward = State()  # Ожидание пересылки после /linkjournal
 
 
 class IsAdminWithChangeInfoFilter(Filter):
@@ -55,10 +65,12 @@ class IsAdminWithChangeInfoFilter(Filter):
 
 
 @journal_link_router.message(Command("linkjournal"))
-async def link_journal_command(message: Message, session: AsyncSession):
+async def link_journal_command(message: Message, session: AsyncSession, state: FSMContext):
     """
     Команда для привязки журнала через пересылку сообщения.
     Использование: /linkjournal и затем переслать сообщение из канала журнала.
+
+    Устанавливает FSM состояние waiting_for_forward для ожидания пересылки.
     """
     if message.chat.type not in ("group", "supergroup"):
         await message.reply("❌ Эта команда работает только в группах!")
@@ -90,27 +102,34 @@ async def link_journal_command(message: Message, session: AsyncSession):
                 "Нужно право 'Изменять информацию о группе' для привязки журнала."
             )
             return
-    
+
     # Проверяем, есть ли уже привязанный журнал
     existing = await get_group_journal_channel(session, chat_id)
-    
+
+    # Устанавливаем FSM состояние ожидания пересылки
+    await state.set_state(JournalLinkStates.waiting_for_forward)
+    await state.update_data(chat_id=chat_id, user_id=user_id)
+
     if existing:
         text = (
             f"📢 <b>Журнал уже привязан</b>\n\n"
             f"Канал журнала: <b>{existing.journal_title or f'ID: {existing.journal_channel_id}'}</b>\n"
             f"Привязан: {existing.linked_at.strftime('%d.%m.%Y %H:%M') if existing.linked_at else 'Неизвестно'}\n\n"
-            f"Чтобы перепривязать, перешлите сообщение из нового канала журнала в эту группу.\n"
-            f"Чтобы отвязать, используйте /unlinkjournal"
+            f"⏳ <b>Ожидаю пересылку...</b>\n"
+            f"Перешлите сообщение из нового канала журнала, чтобы перепривязать.\n"
+            f"Или используйте /unlinkjournal для отвязки.\n\n"
+            f"<i>Для отмены введите /cancel</i>"
         )
     else:
         text = (
             f"📢 <b>Привязка журнала</b>\n\n"
-            f"Чтобы привязать журнал к этой группе:\n"
-            f"1. Перешлите любое сообщение из канала/группы журнала в эту группу\n"
-            f"2. Бот автоматически определит канал и привяжет его\n\n"
-            f"<i>Журнал будет получать все события этой группы</i>"
+            f"⏳ <b>Ожидаю пересылку...</b>\n"
+            f"Перешлите любое сообщение из канала/группы журнала в эту группу.\n"
+            f"Бот автоматически определит канал и привяжет его.\n\n"
+            f"<i>Журнал будет получать все события этой группы.</i>\n"
+            f"<i>Для отмены введите /cancel</i>"
         )
-    
+
     await message.reply(text, parse_mode="HTML")
 
 
@@ -162,38 +181,48 @@ async def unlink_journal_command(message: Message, session: AsyncSession):
         await message.reply("❌ Ошибка при отвязке журнала.")
 
 
-@journal_link_router.message(F.forward_from_chat, IsAdminWithChangeInfoFilter())
-async def handle_journal_link_forward(message: Message, session: AsyncSession):
+@journal_link_router.message(Command("cancel"), JournalLinkStates.waiting_for_forward)
+async def cancel_journal_link(message: Message, state: FSMContext):
     """
-    Обрабатывает пересылку сообщения для автоматической привязки журнала.
-    Когда админ пересылает сообщение из канала в группу - привязываем канал как журнал.
-
-    ВАЖНО: Фильтр IsAdminWithChangeInfoFilter проверяет права админа.
-    Если НЕ админ - хендлер НЕ вызывается и сообщение идёт в антиспам фильтр.
+    Отмена привязки журнала.
     """
-    # Пропускаем команды
-    if message.text and message.text.startswith("/"):
-        return
+    await state.clear()
+    await message.reply("❌ Привязка журнала отменена.")
 
+
+@journal_link_router.message(JournalLinkStates.waiting_for_forward, F.forward_from_chat)
+async def handle_journal_link_forward(message: Message, session: AsyncSession, state: FSMContext):
+    """
+    Обрабатывает пересылку сообщения для привязки журнала.
+    Срабатывает ТОЛЬКО когда активно FSM состояние waiting_for_forward (после /linkjournal).
+
+    ВАЖНО: Без FSM состояния этот хендлер НЕ срабатывает!
+    Это предотвращает случайную привязку журнала при обычных пересылках.
+    """
     forward_from_chat = message.forward_from_chat
 
     # Проверяем, что пересылка из канала или группы
     if not forward_from_chat or forward_from_chat.type not in ("channel", "group", "supergroup"):
+        await message.reply(
+            "❌ Пересылка должна быть из канала или группы.\n"
+            "Перешлите сообщение из канала журнала."
+        )
         return
 
-    user_id = message.from_user.id
+    user_id = message.from_user.id if message.from_user else None
     chat_id = message.chat.id
 
     # Проверяем, что канал не является самой группой
     if forward_from_chat.id == chat_id:
+        await message.reply("❌ Нельзя привязать группу саму к себе как журнал.")
         return
-    
+
     try:
         # Получаем информацию о канале
         journal_channel_id = forward_from_chat.id
         journal_title = forward_from_chat.title or forward_from_chat.username or f"Канал {journal_channel_id}"
         journal_type = "channel" if forward_from_chat.type == "channel" else "group"
-        
+
         # Привязываем журнал
         success = await link_journal_channel(
             session=session,
@@ -203,7 +232,10 @@ async def handle_journal_link_forward(message: Message, session: AsyncSession):
             journal_title=journal_title,
             linked_by_user_id=user_id
         )
-        
+
+        # Очищаем FSM состояние
+        await state.clear()
+
         if success:
             # Проверяем, новая ли это привязка
             existing = await get_group_journal_channel(session, chat_id)
@@ -247,15 +279,34 @@ async def handle_journal_link_forward(message: Message, session: AsyncSession):
                     f"🏢 Группа: <b>{message.chat.title}</b>",
                     parse_mode="HTML"
                 )
-            
+
             logger.info(
                 f"✅ Журнал привязан: группа {chat_id} -> канал {journal_channel_id} "
                 f"(привязал пользователь {user_id})"
             )
         else:
             await message.reply("❌ Ошибка при привязке журнала.")
-            
+
     except Exception as e:
         logger.error(f"❌ Ошибка при обработке пересылки для привязки журнала: {e}")
+        await state.clear()
         await message.reply("❌ Ошибка при привязке журнала. Проверьте логи.")
+
+
+@journal_link_router.message(JournalLinkStates.waiting_for_forward)
+async def handle_non_forward_in_waiting_state(message: Message, state: FSMContext):
+    """
+    Обрабатывает любое НЕ-пересылку сообщение, когда ожидаем пересылку.
+    Напоминаем пользователю что нужно сделать.
+    """
+    # Игнорируем команды (они обрабатываются другими хендлерами)
+    if message.text and message.text.startswith("/"):
+        return
+
+    await message.reply(
+        "⏳ Ожидаю пересылку сообщения из канала журнала.\n"
+        "Перешлите любое сообщение из канала/группы, который хотите привязать.\n\n"
+        "<i>Для отмены введите /cancel</i>",
+        parse_mode="HTML"
+    )
 
