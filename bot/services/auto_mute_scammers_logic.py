@@ -1,7 +1,7 @@
 # services/auto_mute_scammers_logic.py
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from aiogram import Bot
@@ -14,6 +14,7 @@ from bot.services.redis_conn import redis
 from bot.database.models import ChatSettings, ScammerTracker, Group
 from bot.database.session import get_session
 from bot.utils.logger import send_formatted_log
+from bot.services.restriction_service import save_restriction
 
 logger = logging.getLogger(__name__)
 
@@ -250,6 +251,8 @@ async def mute_scammer_in_all_groups(bot: Bot, user_id: int, user_username: str 
                     # ШАГ 2.4: МУТИМ пользователя в этой группе
                     logger.info(f"🌍 [GLOBAL_MUTE] Мутим в группе {group.title} ({chat_id})...")
 
+                    until_date_mute = datetime.now(timezone.utc) + timedelta(days=366 * 10)
+
                     await bot.restrict_chat_member(
                         chat_id=chat_id,
                         user_id=user_id,
@@ -263,7 +266,19 @@ async def mute_scammer_in_all_groups(bot: Bot, user_id: int, user_username: str 
                             can_invite_users=False,         # Запрет приглашать пользователей
                             can_pin_messages=False          # Запрет закреплять сообщения
                         ),
-                        until_date=datetime.now() + timedelta(days=366 * 10)  # Мут на 10 лет
+                        until_date=until_date_mute
+                    )
+
+                    # Сохраняем ограничение в БД для восстановления после повторного входа
+                    bot_info = await bot.me()
+                    await save_restriction(
+                        session=session,
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        restriction_type="mute",
+                        reason="risk_gate",
+                        restricted_by=bot_info.id,
+                        until_date=until_date_mute,
                     )
 
                     # Успешно замучен
@@ -390,8 +405,10 @@ async def auto_mute_scammer_on_join(bot: Bot, event: ChatMemberUpdated) -> bool:
                 return False
             
             logger.info(f"🔇 [AUTO_MUTE_DEBUG] Мутим скаммера @{user.username or user.first_name or user.id} [{user.id}] автоматически (причина: {mute_reason})")
-            
+
             # Применяем мут
+            until_date_mute = datetime.now(timezone.utc) + timedelta(days=366 * 10)
+
             await bot.restrict_chat_member(
                 chat_id=chat_id,
                 user_id=user.id,
@@ -405,9 +422,22 @@ async def auto_mute_scammer_on_join(bot: Bot, event: ChatMemberUpdated) -> bool:
                     can_invite_users=False,
                     can_pin_messages=False
                 ),
-                until_date=datetime.now() + timedelta(days=366 * 10)  # 10 лет
+                until_date=until_date_mute
             )
-            
+
+            # Сохраняем ограничение в БД для восстановления после повторного входа
+            async with get_session() as db_session:
+                bot_info = await bot.me()
+                await save_restriction(
+                    session=db_session,
+                    chat_id=chat_id,
+                    user_id=user.id,
+                    restriction_type="mute",
+                    reason="risk_gate",
+                    restricted_by=bot_info.id,
+                    until_date=until_date_mute,
+                )
+
             await asyncio.sleep(1)
             logger.info(f"🔇 Скаммер @{user.username or user.first_name or user.id} [{user.id}] был автоматически замьючен в текущей группе (причина: {mute_reason})")
 

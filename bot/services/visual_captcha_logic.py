@@ -28,6 +28,7 @@ from datetime import datetime, timedelta
 import time
 from bot.services.enhanced_profile_analyzer import enhanced_profile_analyzer
 from bot.database.session import get_session
+from bot.services.restriction_service import check_and_restore_restriction
 
 logger = logging.getLogger(__name__)
 
@@ -910,6 +911,19 @@ async def approve_chat_join_request(bot: Bot, chat_id: int, user_id: int) -> Dic
 
         # Создаем ссылку на группу
         if result["success"]:
+            # КРИТИЧНО: После одобрения join_request Telegram СНИМАЕТ все restrictions!
+            # Проверяем БД и восстанавливаем мут если он был
+            try:
+                async with get_session() as session:
+                    restored = await check_and_restore_restriction(bot, session, chat_id, user_id)
+                    if restored:
+                        logger.info(
+                            f"🔇 [CAPTCHA] Восстановлен мут для user={user_id} в chat={chat_id} "
+                            f"(причина: {restored.reason}, до: {restored.until_date})"
+                        )
+            except Exception as e:
+                logger.error(f"[CAPTCHA] Ошибка восстановления мута: {e}")
+
             if chat.username:
                 # Публичная группа — можно зайти по username
                 result["group_link"] = f"https://t.me/{chat.username}"

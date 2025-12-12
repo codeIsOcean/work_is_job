@@ -38,3 +38,5 @@ class SpammerRecord(Base):
     reason = Column(String, nullable=True)
     incidents = Column(Integer, nullable=False, default=1)
     last_incident_at = Column(DateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+

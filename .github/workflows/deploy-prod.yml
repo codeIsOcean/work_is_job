@@ -77,5 +77,15 @@ jobs:
             # Build and start updated containers
             $COMPOSE -f docker-compose.prod.yml up -d --build
 
+            # Wait for containers to be ready
+            echo "Waiting for containers to start..."
+            sleep 10
+
+            # Apply database migrations
+            echo "Applying Alembic migrations..."
+            $COMPOSE -f docker-compose.prod.yml exec -T bot_prod alembic upgrade head || {
+              echo "WARNING: Migration failed, but continuing..."
+            }
+
             # Show status
             $COMPOSE -f docker-compose.prod.yml ps

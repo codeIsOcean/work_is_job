@@ -3,7 +3,7 @@ import logging
 # Импорт asyncio для отложенных задач
 import asyncio
 # Импорт datetime для работы с временем ограничений
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 # Импорт Router для создания отдельного роутера антиспам фильтра
 from aiogram import Router, F
 # Импорт типов aiogram для работы с сообщениями и чатами
@@ -23,6 +23,8 @@ from bot.database.models_antispam import ActionType
 from bot.database.models import ChatSettings
 # Импорт функции логирования в журнал группы
 from bot.services.group_journal_service import send_journal_event
+# Импорт сервиса сохранения ограничений в БД
+from bot.services.restriction_service import save_restriction
 
 # Создаем логгер для этого модуля
 logger = logging.getLogger(__name__)
@@ -329,6 +331,23 @@ async def filter_message_for_spam(message: Message, session: AsyncSession):
                     until_date=until_date
                 )
 
+                # Вычисляем дату окончания для сохранения в БД
+                until_datetime = None
+                if decision.restrict_minutes and decision.restrict_minutes > 0:
+                    until_datetime = datetime.now(timezone.utc) + timedelta(minutes=decision.restrict_minutes)
+
+                # Сохраняем ограничение в БД для восстановления после повторного входа
+                bot_info = await message.bot.me()
+                await save_restriction(
+                    session=session,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    restriction_type="mute",
+                    reason="antispam",
+                    restricted_by=bot_info.id,
+                    until_date=until_datetime,
+                )
+
                 # Логируем успешное применение мута
                 logger.info(
                     f"[ANTISPAM_FILTER] Пользователь {user_id} ограничен "
@@ -391,6 +410,19 @@ async def filter_message_for_spam(message: Message, session: AsyncSession):
             try:
                 # Баним пользователя через API (без автоматического разбана)
                 await message.bot.ban_chat_member(chat_id, user_id)
+
+                # Сохраняем бан в БД для восстановления после повторного входа
+                bot_info = await message.bot.me()
+                await save_restriction(
+                    session=session,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    restriction_type="ban",
+                    reason="antispam",
+                    restricted_by=bot_info.id,
+                    until_date=None,  # Бан навсегда
+                )
+
                 # Логируем успешный бан
                 logger.info(f"[ANTISPAM_FILTER] Пользователь {user_id} заблокирован навсегда")
 

@@ -37,6 +37,9 @@ from bot.services.content_filter import FilterManager
 # Импортируем функцию отправки в журнал группы
 from bot.services.group_journal_service import send_journal_event
 
+# Импортируем сервис сохранения ограничений в БД
+from bot.services.restriction_service import save_restriction
+
 # Импортируем Redis клиент для FloodDetector
 from bot.services.redis_conn import redis
 
@@ -179,7 +182,7 @@ async def content_filter_message_handler(
         settings = await _filter_manager.get_or_create_settings(chat_id, session)
 
         # Применяем действие в зависимости от типа
-        await _apply_action(message, result, settings)
+        await _apply_action(message, result, settings, session)
 
         # Логируем нарушение в БД
         await _filter_manager.log_violation(message, result, session)
@@ -205,7 +208,8 @@ async def content_filter_message_handler(
 async def _apply_action(
     message: Message,
     result,
-    settings
+    settings,
+    session: AsyncSession
 ) -> None:
     """
     Применяет действие к нарушителю.
@@ -221,6 +225,7 @@ async def _apply_action(
         message: Сообщение-нарушитель
         result: Результат проверки с действием
         settings: Настройки фильтра группы
+        session: Сессия БД
     """
     chat_id = message.chat.id
     user_id = message.from_user.id
@@ -312,7 +317,7 @@ async def _apply_action(
     elif action == 'mute':
         # Мутим пользователя
         duration_minutes = result.action_duration or 1440  # 24 часа по умолчанию
-        await _mute_user(message, duration_minutes, result, custom_mute_text, notification_delay)
+        await _mute_user(message, duration_minutes, result, custom_mute_text, notification_delay, session)
 
     elif action == 'kick':
         # Кикаем пользователя
@@ -320,7 +325,7 @@ async def _apply_action(
 
     elif action == 'ban':
         # Баним пользователя
-        await _ban_user(message, result, custom_ban_text, notification_delay)
+        await _ban_user(message, result, custom_ban_text, notification_delay, session)
 
     else:
         # Неизвестное действие - логируем
@@ -416,7 +421,8 @@ async def _mute_user(
     duration_minutes: int,
     result,
     custom_text: str = None,
-    notification_delay: int = None
+    notification_delay: int = None,
+    session: AsyncSession = None
 ) -> None:
     """
     Мутит пользователя на указанное время.
@@ -427,6 +433,7 @@ async def _mute_user(
         result: Результат проверки
         custom_text: Кастомный текст уведомления (с %user% плейсхолдером) или None
         notification_delay: Задержка автоудаления уведомления (сек) или None
+        session: Сессия БД для сохранения ограничения
     """
     try:
         # ─────────────────────────────────────────────────────────
@@ -448,6 +455,20 @@ async def _mute_user(
             },
             until_date=until_timestamp
         )
+
+        # Сохраняем ограничение в БД для восстановления после повторного входа
+        if session:
+            until_datetime = datetime.now(timezone.utc) + timedelta(minutes=duration_minutes)
+            bot_info = await message.bot.me()
+            await save_restriction(
+                session=session,
+                chat_id=message.chat.id,
+                user_id=message.from_user.id,
+                restriction_type="mute",
+                reason="content_filter",
+                restricted_by=bot_info.id,
+                until_date=until_datetime,
+            )
 
         # Формируем текст уведомления
         user_mention = message.from_user.mention_html()
@@ -531,7 +552,8 @@ async def _ban_user(
     message: Message,
     result,
     custom_text: str = None,
-    notification_delay: int = None
+    notification_delay: int = None,
+    session: AsyncSession = None
 ) -> None:
     """
     Банит пользователя в группе.
@@ -541,10 +563,24 @@ async def _ban_user(
         result: Результат проверки
         custom_text: Кастомный текст уведомления (с %user% плейсхолдером) или None
         notification_delay: Задержка автоудаления уведомления (сек) или None
+        session: Сессия БД для сохранения ограничения
     """
     try:
         # Баним навсегда
         await message.chat.ban(user_id=message.from_user.id)
+
+        # Сохраняем бан в БД для восстановления после повторного входа
+        if session:
+            bot_info = await message.bot.me()
+            await save_restriction(
+                session=session,
+                chat_id=message.chat.id,
+                user_id=message.from_user.id,
+                restriction_type="ban",
+                reason="content_filter",
+                restricted_by=bot_info.id,
+                until_date=None,  # Бан навсегда
+            )
 
         # Уведомление
         user_mention = message.from_user.mention_html()

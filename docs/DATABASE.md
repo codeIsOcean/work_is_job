@@ -1,0 +1,532 @@
+# Database Schema / Схема базы данных
+
+## Overview
+
+**СУБД:** PostgreSQL 15
+**ORM:** SQLAlchemy 2.x (async)
+**Миграции:** Alembic
+
+**Файлы моделей:**
+- `bot/database/models.py` — основные модели
+- `bot/database/models_antispam.py` — модели антиспам
+- `bot/database/models_content_filter.py` — модели фильтра контента
+- `bot/database/models_message_management.py` — модели управления сообщениями
+- `bot/database/mute_models.py` — модели мутов
+
+---
+
+## ER Diagram (упрощённая)
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────────┐
+│   users     │────<│  user_group │>────│     groups      │
+└─────────────┘     └─────────────┘     └─────────────────┘
+      │                                         │
+      │                                         │
+      ▼                                         ▼
+┌─────────────┐                         ┌─────────────────┐
+│ group_users │                         │  chat_settings  │
+└─────────────┘                         └─────────────────┘
+                                                │
+                    ┌───────────────────────────┼───────────────────────────┐
+                    ▼                           ▼                           ▼
+            ┌───────────────┐           ┌───────────────┐           ┌───────────────┐
+            │ antispam_rules│           │captcha_settings│          │ user_restrict │
+            └───────────────┘           └───────────────┘           └───────────────┘
+                                                │
+                    ┌───────────────────────────┼───────────────────────────┐
+                    ▼                           ▼                           ▼
+            ┌───────────────┐           ┌───────────────┐           ┌───────────────┐
+            │content_filter │           │  filter_words │           │filter_whitelist│
+            │   _settings   │           └───────────────┘           └───────────────┘
+            └───────────────┘
+```
+
+---
+
+## Основные таблицы
+
+### users
+Пользователи Telegram.
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| id | INTEGER PK | Автоинкремент |
+| user_id | BIGINT UNIQUE | Telegram user ID |
+| username | VARCHAR | @username |
+| full_name | VARCHAR | Полное имя |
+| first_name | VARCHAR | Имя |
+| last_name | VARCHAR | Фамилия |
+| language_code | VARCHAR | Язык |
+| is_bot | BOOLEAN | Является ботом |
+| is_premium | BOOLEAN | Premium подписка |
+| created_at | DATETIME | Дата создания |
+| updated_at | DATETIME | Дата обновления |
+
+### groups
+Группы, в которых работает бот.
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| id | INTEGER PK | Автоинкремент |
+| chat_id | BIGINT UNIQUE | Telegram chat ID |
+| title | VARCHAR | Название группы |
+| creator_user_id | BIGINT FK | ID создателя |
+| added_by_user_id | BIGINT FK | Кто добавил бота |
+| bot_id | BIGINT | ID бота |
+
+### user_group
+Связь администраторов с группами (Many-to-Many).
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| id | INTEGER PK | Автоинкремент |
+| user_id | BIGINT FK | ID пользователя |
+| group_id | BIGINT FK | ID группы (chat_id) |
+
+**Индексы:** `ix_user_group_unique(user_id, group_id)`
+
+### group_users
+Все участники групп с дополнительной информацией.
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| id | INTEGER PK | Автоинкремент |
+| user_id | BIGINT FK | ID пользователя |
+| chat_id | BIGINT FK | ID группы |
+| username | VARCHAR | @username |
+| first_name | VARCHAR | Имя |
+| last_name | VARCHAR | Фамилия |
+| joined_at | DATETIME | Дата вступления |
+| last_activity | DATETIME | Последняя активность |
+| is_admin | BOOLEAN | Администратор |
+| is_creator | BOOLEAN | Создатель группы |
+
+---
+
+## Настройки
+
+### chat_settings
+Настройки групп.
+
+| Колонка | Тип | По умолчанию | Описание |
+|---------|-----|--------------|----------|
+| chat_id | BIGINT PK FK | - | ID группы |
+| username | VARCHAR | NULL | @username группы |
+| enable_photo_filter | BOOLEAN | false | Фильтр фото |
+| photo_filter_mute_minutes | INTEGER | 60 | Время мута за фото |
+| mute_new_members | BOOLEAN | false | Мутить новых |
+| auto_mute_scammers | BOOLEAN | true | Автомут скаммеров |
+| global_mute_enabled | BOOLEAN | false | Глобальный мут |
+| reaction_mute_enabled | BOOLEAN | false | Мут по реакции |
+| reaction_mute_announce_enabled | BOOLEAN | true | Анонс мута |
+| captcha_join_enabled | BOOLEAN | false | Капча при вступлении |
+| captcha_invite_enabled | BOOLEAN | false | Капча при инвайте |
+| captcha_timeout_seconds | INTEGER | 300 | Таймаут капчи |
+| captcha_message_ttl_seconds | INTEGER | 900 | TTL сообщения капчи |
+| captcha_flood_threshold | INTEGER | 5 | Порог антифлуда |
+| captcha_flood_window_seconds | INTEGER | 180 | Окно антифлуда |
+| captcha_flood_action | VARCHAR(16) | "warn" | Действие при флуде |
+| antispam_warning_ttl_seconds | INTEGER | 0 | TTL предупреждений |
+
+### captcha_settings
+Настройки капчи (legacy).
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| group_id | BIGINT PK FK | ID группы |
+| is_enabled | BOOLEAN | Капча включена |
+| is_visual_enabled | BOOLEAN | Визуальная капча |
+| created_at | DATETIME | Дата создания |
+
+---
+
+## Антиспам
+
+### antispam_rules
+Правила антиспам для групп.
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| id | INTEGER PK | Автоинкремент |
+| chat_id | BIGINT FK | ID группы |
+| rule_type | ENUM | Тип правила (см. ниже) |
+| action | ENUM | Действие (см. ниже) |
+| delete_message | BOOLEAN | Удалять сообщение |
+| restrict_minutes | INTEGER | Время ограничения |
+| created_at | DATETIME | Дата создания |
+| updated_at | DATETIME | Дата обновления |
+
+**ENUM rule_type_enum:**
+- `TELEGRAM_LINK` — ссылки t.me, telegram.me
+- `ANY_LINK` — любые HTTP/HTTPS ссылки
+- `FORWARD_CHANNEL` — пересылки из каналов
+- `FORWARD_GROUP` — пересылки из групп
+- `FORWARD_USER` — пересылки от пользователей
+- `FORWARD_BOT` — пересылки от ботов
+- `QUOTE_CHANNEL` — цитаты из каналов
+- `QUOTE_GROUP` — цитаты из групп
+- `QUOTE_USER` — цитаты от пользователей
+- `QUOTE_BOT` — цитаты от ботов
+
+**ENUM action_type_enum:**
+- `OFF` — выключено
+- `DELETE` — только удаление
+- `WARN` — предупреждение
+- `KICK` — исключение
+- `RESTRICT` — мут
+- `BAN` — бан
+
+### antispam_whitelist
+Белый список для антиспам.
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| id | INTEGER PK | Автоинкремент |
+| chat_id | BIGINT FK | ID группы |
+| scope | ENUM | Область применения |
+| pattern | TEXT | Паттерн (URL, ID) |
+| added_by | BIGINT | Кто добавил |
+| added_at | DATETIME | Дата добавления |
+
+**ENUM whitelist_scope_enum:**
+- `TELEGRAM_LINK` — для Telegram ссылок
+- `ANY_LINK` — для любых ссылок
+- `FORWARD` — для пересылок
+- `QUOTE` — для цитат
+
+---
+
+## Муты и ограничения
+
+### user_restrictions
+Активные ограничения пользователей с возможностью восстановления после повторного входа.
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| id | INTEGER PK | Автоинкремент |
+| user_id | BIGINT | Telegram user ID |
+| chat_id | BIGINT FK | ID группы (→ groups.chat_id) |
+| restriction_type | VARCHAR(50) | Тип ограничения (mute, ban, kick) |
+| reason | VARCHAR(50) | Причина (antispam, content_filter, reaction, manual, risk_gate) |
+| restricted_by | BIGINT | ID админа или бота, применившего ограничение |
+| until_date | DATETIME | Дата окончания (NULL = бессрочно) |
+| is_active | BOOLEAN | Активно ли ограничение (true = действует) |
+| created_at | DATETIME | Дата создания записи |
+| updated_at | DATETIME | Дата последнего обновления |
+
+**Важно:** Таблица используется для восстановления ограничений после `approve_chat_join_request()`.
+При одобрении заявки на вступление Telegram автоматически снимает все restrictions,
+поэтому после approve бот проверяет БД и восстанавливает мут/бан если запись is_active=True.
+
+### group_mutes
+История мутов по реакции.
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| id | INTEGER PK | Автоинкремент |
+| group_id | BIGINT | ID группы |
+| target_user_id | BIGINT | Кого замутили |
+| admin_user_id | BIGINT | Кто замутил |
+| reaction | VARCHAR(16) | Реакция |
+| mute_until | DATETIME | До какого времени |
+| reason | VARCHAR | Причина |
+| created_at | DATETIME | Дата создания |
+
+### spammers
+Глобальный реестр спаммеров.
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| user_id | BIGINT PK | ID пользователя |
+| risk_score | INTEGER | Балл риска |
+| reason | VARCHAR | Причина |
+| incidents | INTEGER | Количество инцидентов |
+| last_incident_at | DATETIME | Последний инцидент |
+
+### scammer_tracker
+Отслеживание скаммеров по группам.
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| id | INTEGER PK | Автоинкремент |
+| user_id | BIGINT | ID пользователя |
+| chat_id | BIGINT FK | ID группы |
+| username | VARCHAR | @username |
+| violation_type | VARCHAR(50) | Тип нарушения |
+| violation_count | INTEGER | Количество |
+| is_scammer | BOOLEAN | Является скаммером |
+| scammer_level | INTEGER | Уровень (0-5) |
+| is_whitelisted | BOOLEAN | В белом списке |
+
+---
+
+## Капча
+
+### visual_captcha
+Данные визуальной капчи.
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| id | INTEGER PK | Автоинкремент |
+| user_id | BIGINT | ID пользователя |
+| chat_id | BIGINT FK | ID группы |
+| answer | VARCHAR(10) | Правильный ответ |
+| message_id | BIGINT | ID сообщения |
+| expires_at | DATETIME | Истечение |
+| created_at | DATETIME | Дата создания |
+
+### captcha_answers
+Ответы на капчу (legacy).
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| id | INTEGER PK | Автоинкремент |
+| user_id | BIGINT | ID пользователя |
+| chat_id | BIGINT FK | ID группы |
+| answer | VARCHAR(50) | Ответ |
+| expires_at | DATETIME | Истечение |
+
+---
+
+## Журнал
+
+### group_journal_channels
+Привязка журналов к группам.
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| id | INTEGER PK | Автоинкремент |
+| group_id | BIGINT FK UNIQUE | ID группы |
+| journal_channel_id | BIGINT | ID канала журнала |
+| journal_type | VARCHAR(20) | channel/group |
+| journal_title | VARCHAR | Название |
+| is_active | BOOLEAN | Активен |
+| linked_at | DATETIME | Дата привязки |
+| linked_by_user_id | BIGINT | Кто привязал |
+| last_event_at | DATETIME | Последнее событие |
+
+---
+
+## Фильтр контента
+
+### content_filter_settings
+Настройки фильтра контента для групп.
+
+| Колонка | Тип | По умолчанию | Описание |
+|---------|-----|--------------|----------|
+| chat_id | BIGINT PK FK | - | ID группы |
+| enabled | BOOLEAN | false | Фильтр включён |
+| word_filter_enabled | BOOLEAN | true | Фильтр слов |
+| scam_detection_enabled | BOOLEAN | true | Детектор скама |
+| flood_detection_enabled | BOOLEAN | true | Детектор флуда |
+| referral_detection_enabled | BOOLEAN | false | Детектор рефералов |
+| scam_sensitivity | INTEGER | 60 | Чувствительность (40-90) |
+| flood_max_repeats | INTEGER | 2 | Макс. повторов для флуда |
+| flood_time_window | INTEGER | 60 | Временное окно флуда (сек) |
+| default_action | VARCHAR(20) | "delete" | Действие по умолчанию |
+| default_mute_duration | INTEGER | 1440 | Длительность мута (минуты) |
+| word_filter_action | VARCHAR(20) | NULL | Действие для слов (NULL=default) |
+| word_filter_mute_duration | INTEGER | NULL | Длительность мута для слов |
+| flood_action | VARCHAR(20) | NULL | Действие для флуда (NULL=default) |
+| flood_mute_duration | INTEGER | NULL | Длительность мута для флуда |
+| word_filter_normalize | BOOLEAN | true | Применять нормализатор к словам |
+| flood_detect_any_messages | BOOLEAN | false | Детектировать любые сообщения подряд |
+| flood_any_max_messages | INTEGER | 5 | Макс. сообщений для любых |
+| flood_any_time_window | INTEGER | 10 | Окно для любых сообщений (сек) |
+| flood_detect_media | BOOLEAN | false | Детектировать медиа-флуд |
+| flood_mute_text | VARCHAR(500) | NULL | Кастомный текст при муте за флуд |
+| flood_ban_text | VARCHAR(500) | NULL | Кастомный текст при бане за флуд |
+| flood_warn_text | VARCHAR(500) | NULL | Кастомный текст предупреждения за флуд |
+| delete_user_commands | BOOLEAN | false | Удалять команды от обычных пользователей |
+| delete_system_messages | BOOLEAN | false | Удалять системные сообщения |
+| log_violations | BOOLEAN | true | Логировать нарушения |
+| simple_words_enabled | BOOLEAN | true | Простые слова включены |
+| simple_words_action | VARCHAR(20) | "delete" | Действие для простых слов |
+| simple_words_mute_duration | INTEGER | NULL | Длительность мута для простых |
+| simple_words_mute_text | VARCHAR(500) | NULL | Кастомный текст при муте |
+| simple_words_ban_text | VARCHAR(500) | NULL | Кастомный текст при бане |
+| simple_words_delete_delay | INTEGER | NULL | Задержка удаления сообщения (сек) |
+| simple_words_notification_delete_delay | INTEGER | NULL | Автоудаление уведомления (сек) |
+| harmful_words_enabled | BOOLEAN | true | Вредные слова включены |
+| harmful_words_action | VARCHAR(20) | "ban" | Действие для вредных слов |
+| harmful_words_mute_duration | INTEGER | NULL | Длительность мута для вредных |
+| harmful_words_mute_text | VARCHAR(500) | NULL | Кастомный текст при муте |
+| harmful_words_ban_text | VARCHAR(500) | NULL | Кастомный текст при бане |
+| harmful_words_delete_delay | INTEGER | NULL | Задержка удаления сообщения (сек) |
+| harmful_words_notification_delete_delay | INTEGER | NULL | Автоудаление уведомления (сек) |
+| obfuscated_words_enabled | BOOLEAN | true | Обфускация включена |
+| obfuscated_words_action | VARCHAR(20) | "mute" | Действие для обфускации |
+| obfuscated_words_mute_duration | INTEGER | 1440 | Длительность мута для обфускации |
+| obfuscated_words_mute_text | VARCHAR(500) | NULL | Кастомный текст при муте |
+| obfuscated_words_ban_text | VARCHAR(500) | NULL | Кастомный текст при бане |
+| obfuscated_words_delete_delay | INTEGER | NULL | Задержка удаления сообщения (сек) |
+| obfuscated_words_notification_delete_delay | INTEGER | NULL | Автоудаление уведомления (сек) |
+| created_at | DATETIME | now | Дата создания |
+| updated_at | DATETIME | now | Дата обновления |
+
+**Примечания к кастомному тексту:**
+- Поддерживает плейсхолдер `%user%` — заменяется на упоминание нарушителя
+- Пример: `%user% получил мут за спам` → `@username получил мут за спам`
+- Если NULL — используется стандартный текст бота
+
+### filter_words
+Запрещённые слова/фразы.
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| id | INTEGER PK | Автоинкремент |
+| chat_id | BIGINT FK | ID группы |
+| word | VARCHAR(255) | Оригинальное слово |
+| normalized | VARCHAR(255) | Нормализованная версия |
+| match_type | VARCHAR(20) | word/phrase/regex |
+| action | VARCHAR(20) | Индивидуальное действие |
+| action_duration | INTEGER | Длительность мута |
+| category | VARCHAR(50) | Категория (drugs, profanity) |
+| created_by | BIGINT | Кто добавил |
+| created_at | DATETIME | Дата добавления |
+
+**Индексы:** `ix_filter_words_chat_id`, `ix_filter_words_normalized`
+
+### filter_whitelist
+Исключения (слова которые НЕ фильтруются).
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| id | INTEGER PK | Автоинкремент |
+| chat_id | BIGINT FK | ID группы |
+| word | VARCHAR(255) | Оригинальное слово |
+| normalized | VARCHAR(255) | Нормализованная версия |
+| created_by | BIGINT | Кто добавил |
+| created_at | DATETIME | Дата добавления |
+
+**Индексы:** `ix_filter_whitelist_chat_id`
+
+### filter_violations
+Лог нарушений.
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| id | INTEGER PK | Автоинкремент |
+| chat_id | BIGINT FK | ID группы |
+| user_id | BIGINT | ID нарушителя |
+| message_id | BIGINT | ID сообщения |
+| detector_type | VARCHAR(50) | word_filter/scam/flood/referral |
+| trigger | TEXT | Что сработало |
+| action_taken | VARCHAR(20) | Применённое действие |
+| created_at | DATETIME | Дата нарушения |
+
+**Индексы:** `ix_filter_violations_chat_id`, `ix_filter_violations_user_id`
+
+### scam_signal_categories
+Категории сигналов для антискама с настраиваемыми ключевыми словами.
+
+| Колонка | Тип | По умолчанию | Описание |
+|---------|-----|--------------|----------|
+| id | INTEGER PK | - | Автоинкремент |
+| chat_id | BIGINT FK | - | ID группы |
+| category_name | VARCHAR(100) | - | Название категории |
+| keywords | TEXT | - | Ключевые слова через запятую |
+| weight | INTEGER | 25 | Вес при подсчёте score |
+| enabled | BOOLEAN | true | Категория активна |
+| created_at | DATETIME | now | Дата создания |
+
+**Индексы:** `ix_scam_signal_categories_chat_id`
+
+**Пример использования:**
+| Категория | Keywords | Weight | Описание |
+|-----------|----------|--------|----------|
+| Наркотики | drugs, наркота, weed, hashish | 40 | +40 к score |
+| Финансовый скам | перевод, обмен, swift, sepa | 25 | +25 к score |
+| Документы | диплом, права, паспорт | 30 | +30 к score |
+
+### scam_patterns
+Кастомные паттерны для антискама.
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| id | INTEGER PK | Автоинкремент |
+| chat_id | BIGINT FK | ID группы |
+| pattern | TEXT | Оригинальный паттерн |
+| normalized | TEXT | Нормализованная версия |
+| pattern_type | VARCHAR(20) | keyword/phrase/regex |
+| weight | INTEGER | Вес при подсчёте (15/25/40) |
+| hit_count | INTEGER | Количество срабатываний |
+| created_by | BIGINT | Кто добавил |
+| created_at | DATETIME | Дата добавления |
+
+**Индексы:** `ix_scam_patterns_chat_id`
+
+---
+
+## Управление сообщениями
+
+### message_management_settings
+Настройки модуля управления сообщениями для групп.
+
+| Колонка | Тип | По умолчанию | Описание |
+|---------|-----|--------------|----------|
+| id | INTEGER PK | - | Автоинкремент |
+| chat_id | BIGINT UNIQUE | - | ID группы |
+| delete_admin_commands | BOOLEAN | false | Удалять команды от админов |
+| delete_user_commands | BOOLEAN | false | Удалять команды от пользователей |
+| delete_join_messages | BOOLEAN | false | Удалять сообщения о входе участников |
+| delete_leave_messages | BOOLEAN | false | Удалять сообщения о выходе участников |
+| delete_pin_messages | BOOLEAN | false | Удалять уведомления о закрепе |
+| delete_chat_photo_messages | BOOLEAN | false | Удалять сообщения об изменении фото/названия |
+| repin_enabled | BOOLEAN | false | Включён ли автозакреп |
+| repin_message_id | BIGINT | NULL | ID сообщения для автозакрепа |
+| created_at | DATETIME | now | Дата создания |
+| updated_at | DATETIME | - | Дата обновления |
+
+**Индексы:** `ix_message_management_settings_chat_id` (unique)
+
+**Использование:**
+- Удаление команд работает отдельно для админов и пользователей
+- Системные сообщения: вход (new_chat_members), выход (left_chat_member), закреп (pinned_message), изменение фото/названия
+- Репин: при закрепе другого сообщения бот автоматически перезакрепляет `repin_message_id`
+- Закрепы от связанного канала игнорируются при репине
+
+---
+
+## Миграции Alembic
+
+### Важные миграции
+
+| Revision | Описание |
+|----------|----------|
+| d62bd1141646 | init — начальная структура |
+| a1b2c3d4e5f6 | add_antispam_tables — таблицы антиспам |
+| b2c3d4e5f6g7 | add_antispam_warning_ttl |
+| c3d4e5f6g7h8 | add_delete_action_type — DELETE в enum |
+| d4e5f6g7h8i9 | add_content_filter_tables — таблицы фильтра контента |
+| e5f6g7h8i9j0 | add_scam_patterns_table — кастомные паттерны антискама |
+| f6g7h8i9j0k1 | add_separate_actions_columns — раздельные действия для word/flood |
+| g7h8i9j0k1l2 | add_word_categories_columns — категории слов (simple/harmful/obfuscated) |
+| h8i9j0k1l2m3 | add_category_notification_settings — текст уведомлений и задержки |
+| j0k1l2m3n4o5 | add_extended_flood_settings — расширенный антифлуд (any, media) |
+| k1l2m3n4o5p6 | add_message_cleanup_settings — модуль удаления сообщений |
+| l2m3n4o5p6q7 | add_scam_signal_categories — категории сигналов + flood_warn_text |
+| m3n4o5p6q7r8 | add_message_management_settings — модуль управления сообщениями |
+| n4o5p6q7r8s9 | add_user_restrictions_table — расширение таблицы user_restrictions |
+
+### Паттерн для ENUM в миграциях
+
+```python
+from sqlalchemy.dialects import postgresql
+
+# Создание (идемпотентно)
+connection.execute(sa.text("""
+    DO $$ BEGIN
+        CREATE TYPE my_enum AS ENUM ('A', 'B');
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END $$;
+"""))
+
+# Использование
+my_enum = postgresql.ENUM('A', 'B', name='my_enum', create_type=False)
+```
+
+---
+
+*Последнее обновление: 2025-12-13 (расширена таблица user_restrictions для восстановления мутов)*

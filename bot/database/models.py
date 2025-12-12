@@ -182,17 +182,26 @@ class ChatSettings(Base):
 
 # 🚫 Ограничения пользователей (муты, причины, срок действия)
 class UserRestriction(Base):
+    """
+    Хранит все ограничения (муты/баны), применённые к пользователям.
+    Используется для восстановления мута после повторного входа через капчу.
+    """
     __tablename__ = "user_restrictions"
 
     id = Column(Integer, primary_key=True)
     user_id = Column(BigInteger, nullable=False)
     chat_id = Column(BigInteger, ForeignKey("groups.chat_id", ondelete="CASCADE"), nullable=False)
-    restriction_type = Column(String(50), nullable=False)  # mute, ban и т.п.
-    reason = Column(String, nullable=True)
-    expires_at = Column(DateTime, nullable=True)
+    restriction_type = Column(String(50), nullable=False)  # mute, ban, kick
+    reason = Column(String(50), nullable=True)  # antispam, content_filter, reaction, manual, risk_gate
+    restricted_by = Column(BigInteger, nullable=True)  # bot ID или admin user_id
+    until_date = Column(DateTime, nullable=True)  # NULL = бессрочно (заменяет expires_at)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False, default=utcnow)
+    updated_at = Column(DateTime, nullable=False, default=utcnow, onupdate=utcnow)
 
     __table_args__ = (
         Index("ix_user_restriction_user_chat", "user_id", "chat_id"),
+        Index("ix_user_restrictions_active", "is_active"),
     )
 
 
