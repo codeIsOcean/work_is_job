@@ -259,7 +259,7 @@ async def _process_content_filter(
         settings = await _filter_manager.get_or_create_settings(chat_id, session)
 
         # Применяем действие (delete, warn, mute, ban)
-        await content_filter_apply_action(message, result, settings)
+        await content_filter_apply_action(message, result, settings, session)
 
         # Логируем нарушение в БД
         await _filter_manager.log_violation(message, result, session)
