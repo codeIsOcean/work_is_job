@@ -552,6 +552,48 @@ async def set_captcha_message_ttl(session: AsyncSession, chat_id: int, seconds: 
     return settings.captcha_message_ttl_seconds
 
 
+async def set_join_captcha_message_ttl(session: AsyncSession, chat_id: int, seconds: int) -> int:
+    """
+    Устанавливает TTL автоудаления сообщения Join Captcha в группе.
+
+    Args:
+        session: Асинхронная сессия SQLAlchemy
+        chat_id: ID группы
+        seconds: Через сколько секунд удалить сообщение
+
+    Returns:
+        Установленное значение TTL в секундах
+    """
+    # Получаем или создаём настройки чата
+    settings = await _ensure_chat_settings(session, chat_id)
+    # Устанавливаем TTL сообщения Join Captcha
+    settings.join_captcha_message_ttl_seconds = seconds
+    # Сохраняем изменения в БД
+    await session.commit()
+    return settings.join_captcha_message_ttl_seconds
+
+
+async def set_invite_captcha_message_ttl(session: AsyncSession, chat_id: int, seconds: int) -> int:
+    """
+    Устанавливает TTL автоудаления сообщения Invite Captcha в группе.
+
+    Args:
+        session: Асинхронная сессия SQLAlchemy
+        chat_id: ID группы
+        seconds: Через сколько секунд удалить сообщение
+
+    Returns:
+        Установленное значение TTL в секундах
+    """
+    # Получаем или создаём настройки чата
+    settings = await _ensure_chat_settings(session, chat_id)
+    # Устанавливаем TTL сообщения Invite Captcha
+    settings.invite_captcha_message_ttl_seconds = seconds
+    # Сохраняем изменения в БД
+    await session.commit()
+    return settings.invite_captcha_message_ttl_seconds
+
+
 async def set_captcha_flood_threshold(session: AsyncSession, chat_id: int, threshold: int) -> int:
     settings = await _ensure_chat_settings(session, chat_id)
     settings.captcha_flood_threshold = threshold

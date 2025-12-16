@@ -170,7 +170,8 @@ async def send_journal_event(
         journal = await get_group_journal_channel(session, group_id)
         
         if not journal:
-            logger.debug(f"⚠️ Журнал не привязан для группы {group_id}, пропускаем отправку")
+            # INFO уровень чтобы видеть в логах когда журнал не привязан
+            logger.info(f"⚠️ Журнал не привязан для группы {group_id}, пропускаем отправку")
             return False
         
         # Отправляем сообщение в канал

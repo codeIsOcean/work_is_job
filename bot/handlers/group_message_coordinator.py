@@ -59,6 +59,13 @@ from bot.handlers.message_management.filter_handler import (
     is_command_message
 )
 
+# ProfileMonitor - импортируем функцию проверки профиля
+from bot.handlers.profile_monitor.monitor_handler import (
+    process_message_profile_check
+)
+# ProfileMonitor - импортируем функцию трекинга сообщений для удаления
+from bot.services.profile_monitor import track_user_message
+
 # Импорт для ограничения прав (мут)
 from aiogram.types import ChatPermissions
 # Импорт для работы со временем
@@ -190,6 +197,18 @@ async def group_message_handler(
         return
 
     # ─────────────────────────────────────────────────────────
+    # ТРЕКИНГ СООБЩЕНИЙ ДЛЯ PROFILE MONITOR
+    # ─────────────────────────────────────────────────────────
+    # Сохраняем message_id в Redis для возможного удаления
+    # Если Profile Monitor обнаружит подозрительное поведение,
+    # он сможет удалить все сообщения пользователя
+    try:
+        await track_user_message(chat_id, user_id, message.message_id)
+    except Exception as e:
+        # Ошибка трекинга не должна блокировать обработку
+        logger.warning(f"[COORDINATOR] Ошибка трекинга сообщения: {e}")
+
+    # ─────────────────────────────────────────────────────────
     # ШАГ 1: CONTENT FILTER (слова, скам, флуд)
     # ─────────────────────────────────────────────────────────
     # Проверяем сообщение через ContentFilter
@@ -205,7 +224,19 @@ async def group_message_handler(
     # ШАГ 2: ANTISPAM (ссылки, пересылки, цитаты)
     # ─────────────────────────────────────────────────────────
     # ContentFilter не сработал - проверяем Antispam
-    await _process_antispam(message, session)
+    antispam_triggered = await _process_antispam(message, session)
+
+    # Если Antispam сработал - Profile Monitor пропускаем
+    if antispam_triggered:
+        logger.info(f"[COORDINATOR] Antispam сработал, пропускаем ProfileMonitor")
+        return
+
+    # ─────────────────────────────────────────────────────────
+    # ШАГ 3: PROFILE MONITOR (отслеживание изменений профиля)
+    # ─────────────────────────────────────────────────────────
+    # ContentFilter и Antispam не сработали - проверяем Profile Monitor
+    # Этот модуль отслеживает изменения профиля и применяет автомут
+    await _process_profile_monitor(message, session)
 
 
 # ============================================================
@@ -591,3 +622,59 @@ async def _apply_antispam_action(
             logger.error(f"[COORDINATOR/AS] Не удалось забанить пользователя: {e}")
         except TelegramForbiddenError:
             logger.error("[COORDINATOR/AS] У бота нет прав на блокировку участников")
+
+
+# ============================================================
+# ОБРАБОТКА PROFILE MONITOR
+# ============================================================
+
+async def _process_profile_monitor(
+    message: Message,
+    session: AsyncSession
+) -> bool:
+    """
+    Обрабатывает сообщение через Profile Monitor.
+
+    Проверяет изменения профиля пользователя и применяет автомут
+    по заданным критериям (нет фото + молодой аккаунт, смена имени и т.д.)
+
+    Args:
+        message: Входящее сообщение
+        session: Сессия БД
+
+    Returns:
+        bool: True если модуль сработал (автомут), False если пропущен
+    """
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+
+    try:
+        # Вызываем функцию проверки профиля из monitor_handler
+        result = await process_message_profile_check(
+            message=message,
+            session=session,
+            bot=message.bot,
+        )
+
+        # Если модуль выключен или нет результата
+        if not result:
+            return False
+
+        # Логируем результат
+        action = result.get("action_taken")
+        if action:
+            logger.info(
+                f"[COORDINATOR/PM] Действие: chat={chat_id}, user={user_id}, "
+                f"action={action}, reason={result.get('reason')}"
+            )
+            return action == "auto_mute"
+
+        return False
+
+    except Exception as e:
+        # Логируем ошибку, но не падаем
+        logger.exception(
+            f"[COORDINATOR/PM] Ошибка обработки: {e}, "
+            f"chat={chat_id}, user={user_id}"
+        )
+        return False

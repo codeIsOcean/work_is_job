@@ -20,6 +20,9 @@ from bot.services.groups_settings_in_private_logic import (
     set_captcha_invite_enabled,
     set_captcha_timeout,
     set_captcha_message_ttl,
+    # Новые сеттеры для TTL сообщений в группе
+    set_join_captcha_message_ttl,
+    set_invite_captcha_message_ttl,
     set_captcha_flood_threshold,
     set_captcha_flood_window,
     set_captcha_flood_action,
@@ -106,12 +109,26 @@ async def _render_settings_text(chat, settings, *, visual_enabled: bool) -> str:
 
 
 def _build_keyboard(chat_id: int, settings) -> list[list[tuple[str, str]]]:
+    """
+    Строит клавиатуру настроек капчи.
+
+    Кнопки:
+    - Переключатели режимов капчи (Visual, Join, Invite)
+    - Настройки времени и TTL
+    - Настройки анти-флуда
+    """
     return [
+        # Переключатели режимов капчи
         [("Визуальная капча", f"captcha_toggle:visual:{chat_id}"), ("Капча при вступлении", f"captcha_toggle:join:{chat_id}")],
         [("Капча для инвайтов", f"captcha_toggle:invite:{chat_id}"), ("Системные сообщения", f"captcha_toggle:announce:{chat_id}")],
+        # Общее время на решение и legacy TTL
         [("⏳ Время на решение", f"captcha_input:timeout:{chat_id}"), ("🗑 TTL сообщения", f"captcha_input:ttl:{chat_id}")],
+        # TTL автоудаления сообщений в группе для Join и Invite капчи
+        [("🗑 TTL Join капчи", f"captcha_input:join_ttl:{chat_id}"), ("🗑 TTL Invite капчи", f"captcha_input:invite_ttl:{chat_id}")],
+        # Настройки анти-флуда
         [("🛡 Порог анти-флуда", f"captcha_input:flood_threshold:{chat_id}"), ("⏱ Окно анти-флуда", f"captcha_input:flood_window:{chat_id}")],
         [("⚡️ Действие анти-флуда", f"captcha_cycle:flood_action:{chat_id}")],
+        # Кнопка назад
         [("🔙 Назад", f"captcha_back:{chat_id}")],
     ]
 
@@ -162,7 +179,26 @@ async def toggle_captcha_setting(callback: CallbackQuery, session: AsyncSession)
     chat_info = await callback.bot.get_chat(chat_id)
 
     if toggle_type == "visual":
+        # Проверяем текущее состояние
         visual_enabled = await get_visual_captcha_status(chat_id)
+
+        # Если пытаемся ВКЛЮЧИТЬ - проверяем что группа ЗАКРЫТА
+        if not visual_enabled:
+            # Импортируем функцию проверки типа группы
+            from bot.services.captcha.flow_service import is_group_closed
+
+            # Проверяем закрыта ли группа (есть ли Join Request)
+            is_closed = await is_group_closed(callback.bot, chat_id)
+
+            # Visual Captcha работает ТОЛЬКО в закрытой группе
+            if not is_closed:
+                await callback.answer(
+                    "❌ Visual Captcha работает только в закрытых группах.\n\n"
+                    "Включите 'Одобрение заявок' в настройках группы.",
+                    show_alert=True,
+                )
+                return
+
         logger.info(
             f"🔄 [CAPTCHA_TOGGLE] Переключение visual_captcha для chat={chat_id}: "
             f"текущее значение={visual_enabled}, новое значение={not visual_enabled}"
@@ -193,6 +229,24 @@ async def toggle_captcha_setting(callback: CallbackQuery, session: AsyncSession)
         )
     elif toggle_type == "join":
         settings = await get_captcha_settings(session, chat_id)
+
+        # Если пытаемся ВКЛЮЧИТЬ - проверяем что группа ОТКРЫТА
+        if not settings.captcha_join_enabled:
+            # Импортируем функцию проверки типа группы
+            from bot.services.captcha.flow_service import is_group_closed
+
+            # Проверяем закрыта ли группа (есть ли Join Request)
+            is_closed = await is_group_closed(callback.bot, chat_id)
+
+            # Join Captcha работает ТОЛЬКО в открытой группе
+            if is_closed:
+                await callback.answer(
+                    "❌ Капча при вступлении работает только в открытых группах.\n\n"
+                    "Отключите 'Одобрение заявок' в настройках группы.",
+                    show_alert=True,
+                )
+                return
+
         new_value = await set_captcha_join_enabled(session, chat_id, not settings.captcha_join_enabled)
         await log_captcha_setting_change(
             bot=callback.bot,
@@ -282,9 +336,17 @@ async def request_value_input(callback: CallbackQuery, state: FSMContext, sessio
         ).__dict__
     )
 
+    # Подсказки для каждого параметра
     prompts = {
+        # Общее время на решение капчи
         "timeout": "Введите время на решение капчи (например, 2m, 3h, 1h30m)",
+        # Legacy TTL сообщения
         "ttl": "Введите TTL удаления сообщения с капчей",
+        # TTL сообщения Join Captcha в группе (автоудаление)
+        "join_ttl": "Введите TTL автоудаления сообщения Join капчи в группе (например, 5m, 10m)",
+        # TTL сообщения Invite Captcha в группе (автоудаление)
+        "invite_ttl": "Введите TTL автоудаления сообщения Invite капчи в группе (например, 5m, 10m)",
+        # Анти-флуд настройки
         "flood_threshold": "Введите порог анти-флуда (количество приглашений)",
         "flood_window": "Введите окно анти-флуда (например, 10m, 1h)",
     }
@@ -302,22 +364,38 @@ async def process_value_input(message: Message, state: FSMContext, session: Asyn
     value_text = message.text.strip()
 
     try:
-        if parameter in {"timeout", "ttl", "flood_window"}:
+        # Обработка параметров с длительностью (timeout, ttl, flood_window, join_ttl, invite_ttl)
+        if parameter in {"timeout", "ttl", "flood_window", "join_ttl", "invite_ttl"}:
+            # Парсим введённое значение в секунды
             seconds = _parse_duration_to_seconds(value_text)
+            # Проверяем что значение корректное
             if seconds is None or seconds <= 0:
                 await message.reply("❌ Неверный формат длительности")
                 return
 
+            # Применяем настройку в зависимости от параметра
             if parameter == "timeout":
+                # Общее время на решение капчи
                 await set_captcha_timeout(session, chat_id, seconds)
                 setting_name = "captcha_timeout_seconds"
             elif parameter == "ttl":
+                # Legacy TTL сообщения
                 await set_captcha_message_ttl(session, chat_id, seconds)
                 setting_name = "captcha_message_ttl_seconds"
+            elif parameter == "join_ttl":
+                # TTL автоудаления сообщения Join Captcha в группе
+                await set_join_captcha_message_ttl(session, chat_id, seconds)
+                setting_name = "join_captcha_message_ttl_seconds"
+            elif parameter == "invite_ttl":
+                # TTL автоудаления сообщения Invite Captcha в группе
+                await set_invite_captcha_message_ttl(session, chat_id, seconds)
+                setting_name = "invite_captcha_message_ttl_seconds"
             else:
+                # flood_window - окно анти-флуда
                 await set_captcha_flood_window(session, chat_id, seconds)
                 setting_name = "captcha_flood_window_seconds"
 
+            # Логируем изменение настройки
             await log_captcha_setting_change(
                 bot=message.bot,
                 user=message.from_user,

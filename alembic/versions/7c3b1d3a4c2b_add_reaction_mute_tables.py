@@ -41,7 +41,7 @@ def upgrade() -> None:
             "reaction_mute_enabled",
             sa.Boolean(),
             nullable=False,
-            server_default=sa.text("0"),
+            server_default=sa.text("false"),
         ),
     )
     op.alter_column(
@@ -55,7 +55,7 @@ def upgrade() -> None:
             "reaction_mute_announce_enabled",
             sa.Boolean(),
             nullable=False,
-            server_default=sa.text("1"),
+            server_default=sa.text("true"),
         ),
     )
     op.alter_column(
@@ -64,9 +64,10 @@ def upgrade() -> None:
         server_default=None,
     )
 
-    op.create_index("ix_group_mutes_group_id", "group_mutes", ["group_id"])
-    op.create_index("ix_group_mutes_target_user_id", "group_mutes", ["target_user_id"])
-    op.create_index("ix_group_mutes_admin_user_id", "group_mutes", ["admin_user_id"])
+    # Индексы создаются идемпотентно, т.к. они уже определены в модели
+    op.execute("CREATE INDEX IF NOT EXISTS ix_group_mutes_group_id ON group_mutes (group_id)")
+    op.execute("CREATE INDEX IF NOT EXISTS ix_group_mutes_target_user_id ON group_mutes (target_user_id)")
+    op.execute("CREATE INDEX IF NOT EXISTS ix_group_mutes_admin_user_id ON group_mutes (admin_user_id)")
 
 
 def downgrade() -> None:

@@ -4,7 +4,9 @@ from .bot_activity_journal.bot_activity_journal import bot_activity_journal_rout
 from .deep_link_handlers import universal_deeplink_router
 from .group_settings_handler import group_settings_router
 from .moderation_handlers import moderation_handlers_router
-from .visual_captcha import visual_captcha_router
+# РЕДИЗАЙН КАПЧИ: Новый модуль капчи (единая точка входа)
+# Полностью заменяет старый visual_captcha
+from .captcha import captcha_router
 from .broadcast_handlers.broadcast_handlers import broadcast_router
 from .bot_moderation_handlers.new_member_requested_to_join_mute_handlers import new_member_requested_handler
 from .auto_mute_scammers_handlers import auto_mute_scammers_router
@@ -23,8 +25,11 @@ from .content_filter import content_filter_router
 # Импортируем роутер модуля message_management (UI + команды)
 # filter_handler вызывается из group_message_coordinator
 from .message_management import message_management_router
+# Импортируем роутер модуля profile_monitor (callbacks + settings UI)
+# monitor_handler вызывается из group_message_coordinator
+from .profile_monitor import router as profile_monitor_router
 # Импортируем координатор сообщений в группах
-# Это единая точка входа для ContentFilter, Antispam и MessageManagement
+# Это единая точка входа для ContentFilter, Antispam, ProfileMonitor
 from .group_message_coordinator import group_message_coordinator_router
 
 # Объединяем все роутеры в один
@@ -40,7 +45,8 @@ handlers_router.include_router(bot_activity_journal_router)
 handlers_router.include_router(universal_deeplink_router)
 handlers_router.include_router(group_settings_router)
 handlers_router.include_router(moderation_handlers_router)
-handlers_router.include_router(visual_captcha_router)
+# РЕДИЗАЙН КАПЧИ: Новый модуль капчи (единая точка входа)
+handlers_router.include_router(captcha_router)
 handlers_router.include_router(broadcast_router)
 handlers_router.include_router(new_member_requested_handler)  # Ручной мут ПЕРВЫМ
 handlers_router.include_router(auto_mute_scammers_router)     # Автомут ВТОРЫМ
@@ -53,10 +59,11 @@ handlers_router.include_router(unscam_router)                 # Команда /
 handlers_router.include_router(antispam_router)               # Антиспам настройки UI
 handlers_router.include_router(content_filter_router)         # Content filter настройки UI
 handlers_router.include_router(message_management_router)     # Message management UI + команды
+handlers_router.include_router(profile_monitor_router)        # Profile monitor callbacks + settings
 # ============================================================
 # GROUP MESSAGE COORDINATOR - единый хендлер для сообщений в группах
 # ============================================================
-# Координирует работу ContentFilter и Antispam.
+# Координирует работу ContentFilter, Antispam и ProfileMonitor.
 # Решает проблему конфликта хендлеров с одинаковыми фильтрами.
 # Подробнее: docs/ARCHITECTURE.md
 handlers_router.include_router(group_message_coordinator_router)
@@ -71,7 +78,8 @@ def create_fresh_handlers_router():
     fresh_router.include_router(universal_deeplink_router)
     fresh_router.include_router(group_settings_router)
     fresh_router.include_router(moderation_handlers_router)
-    fresh_router.include_router(visual_captcha_router)
+    # РЕДИЗАЙН КАПЧИ: Новый модуль капчи (единая точка входа)
+    fresh_router.include_router(captcha_router)
     fresh_router.include_router(broadcast_router)
     fresh_router.include_router(new_member_requested_handler)
     fresh_router.include_router(auto_mute_scammers_router)
@@ -84,6 +92,7 @@ def create_fresh_handlers_router():
     fresh_router.include_router(antispam_router)
     fresh_router.include_router(content_filter_router)
     fresh_router.include_router(message_management_router)
+    fresh_router.include_router(profile_monitor_router)
     # Group Message Coordinator - единый хендлер для групповых сообщений
     fresh_router.include_router(group_message_coordinator_router)
     return fresh_router

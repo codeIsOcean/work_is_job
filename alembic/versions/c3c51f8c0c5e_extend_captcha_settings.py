@@ -21,11 +21,11 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     op.add_column(
         "chat_settings",
-        sa.Column("captcha_join_enabled", sa.Boolean(), nullable=False, server_default=sa.text("0")),
+        sa.Column("captcha_join_enabled", sa.Boolean(), nullable=False, server_default=sa.text("false")),
     )
     op.add_column(
         "chat_settings",
-        sa.Column("captcha_invite_enabled", sa.Boolean(), nullable=False, server_default=sa.text("0")),
+        sa.Column("captcha_invite_enabled", sa.Boolean(), nullable=False, server_default=sa.text("false")),
     )
     op.add_column(
         "chat_settings",
@@ -49,7 +49,7 @@ def upgrade() -> None:
     )
     op.add_column(
         "chat_settings",
-        sa.Column("system_mute_announcements_enabled", sa.Boolean(), nullable=False, server_default=sa.text("1")),
+        sa.Column("system_mute_announcements_enabled", sa.Boolean(), nullable=False, server_default=sa.text("true")),
     )
 
     for column in (

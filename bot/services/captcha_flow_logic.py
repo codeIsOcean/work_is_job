@@ -485,13 +485,21 @@ async def send_captcha_prompt(
             "Нажмите на кнопку ниже."
         )
 
-    msg = await bot.send_message(
-        chat_id=target_chat_id,
-        text=message_text,
-        reply_markup=keyboard,
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-    )
+    # DEBUG: Логируем перед отправкой
+    logger.info(f"📤 [SEND_CAPTCHA] Отправляем капчу: target_chat_id={target_chat_id}, user_id={user.id}, source={source}")
+
+    try:
+        msg = await bot.send_message(
+            chat_id=target_chat_id,
+            text=message_text,
+            reply_markup=keyboard,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        logger.info(f"✅ [SEND_CAPTCHA] Сообщение отправлено: message_id={msg.message_id}")
+    except Exception as send_err:
+        logger.error(f"❌ [SEND_CAPTCHA] Ошибка отправки: {send_err}")
+        raise
 
     await register_captcha_message(
         chat_id=chat.id,

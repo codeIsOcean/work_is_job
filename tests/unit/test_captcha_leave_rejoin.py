@@ -162,10 +162,13 @@ async def test_rejoin_requires_captcha_after_leave():
 
     # Step 3: User rejoins
     join_event = MagicMock(spec=ChatMemberUpdated)
-    join_event.chat = MagicMock(spec=Chat, id=chat_id, title="Test Group")
+    join_event.chat = MagicMock(spec=Chat, id=chat_id, title="Test Group", username=None)
     join_event.bot = AsyncMock()
     join_event.new_chat_member = MagicMock(spec=ChatMember)
-    join_event.new_chat_member.user = MagicMock(spec=TgUser, id=user_id, username="testuser")
+    join_event.new_chat_member.user = MagicMock(
+        spec=TgUser, id=user_id, username="testuser",
+        first_name="Test", last_name="User", is_premium=False
+    )
     join_event.new_chat_member.status = ChatMemberStatus.MEMBER
     join_event.old_chat_member = MagicMock(spec=ChatMember)
     join_event.old_chat_member.status = ChatMemberStatus.LEFT
@@ -175,7 +178,8 @@ async def test_rejoin_requires_captcha_after_leave():
     with patch('bot.handlers.visual_captcha.visual_captcha_handler.classify_join_event') as mock_classify, \
          patch('bot.handlers.visual_captcha.visual_captcha_handler.prepare_manual_approval_flow') as mock_prepare, \
          patch('bot.handlers.visual_captcha.visual_captcha_handler.load_captcha_settings') as mock_settings, \
-         patch('bot.handlers.visual_captcha.visual_captcha_handler.send_captcha_prompt') as mock_send_captcha:
+         patch('bot.handlers.visual_captcha.visual_captcha_handler.send_captcha_prompt') as mock_send_captcha, \
+         patch('bot.handlers.visual_captcha.visual_captcha_handler.create_snapshot_on_join') as mock_snapshot:
 
         from bot.services.event_classifier import JoinEventType
         from bot.services.captcha_flow_logic import CaptchaDecision
@@ -392,10 +396,13 @@ async def test_rejoin_db_fallback_when_redis_stale():
 
     # Step 2: User rejoins with stale Redis cache
     join_event = MagicMock(spec=ChatMemberUpdated)
-    join_event.chat = MagicMock(spec=Chat, id=chat_id, title="Test Group")
+    join_event.chat = MagicMock(spec=Chat, id=chat_id, title="Test Group", username=None)
     join_event.bot = AsyncMock()
     join_event.new_chat_member = MagicMock(spec=ChatMember)
-    join_event.new_chat_member.user = MagicMock(spec=TgUser, id=user_id, username="testuser")
+    join_event.new_chat_member.user = MagicMock(
+        spec=TgUser, id=user_id, username="testuser",
+        first_name="Test", last_name="User", is_premium=False
+    )
     join_event.new_chat_member.status = ChatMemberStatus.MEMBER
     join_event.old_chat_member = MagicMock(spec=ChatMember)
     join_event.old_chat_member.status = ChatMemberStatus.LEFT
@@ -407,7 +414,8 @@ async def test_rejoin_db_fallback_when_redis_stale():
          patch('bot.handlers.visual_captcha.visual_captcha_handler.load_captcha_settings') as mock_settings, \
          patch('bot.handlers.visual_captcha.visual_captcha_handler.get_visual_captcha_status') as mock_get_visual, \
          patch('bot.handlers.visual_captcha.visual_captcha_handler.redis') as mock_redis, \
-         patch('bot.handlers.visual_captcha.visual_captcha_handler.send_captcha_prompt') as mock_send_captcha:
+         patch('bot.handlers.visual_captcha.visual_captcha_handler.send_captcha_prompt') as mock_send_captcha, \
+         patch('bot.handlers.visual_captcha.visual_captcha_handler.create_snapshot_on_join') as mock_snapshot:
 
         from bot.services.event_classifier import JoinEventType
         from bot.services.captcha_flow_logic import CaptchaDecision
@@ -476,10 +484,13 @@ async def test_send_captcha_error_handling():
 
     # User rejoins
     join_event = MagicMock(spec=ChatMemberUpdated)
-    join_event.chat = MagicMock(spec=Chat, id=chat_id, title="Test Group")
+    join_event.chat = MagicMock(spec=Chat, id=chat_id, title="Test Group", username=None)
     join_event.bot = AsyncMock()
     join_event.new_chat_member = MagicMock(spec=ChatMember)
-    join_event.new_chat_member.user = MagicMock(spec=TgUser, id=user_id, username="testuser")
+    join_event.new_chat_member.user = MagicMock(
+        spec=TgUser, id=user_id, username="testuser",
+        first_name="Test", last_name="User", is_premium=False
+    )
     join_event.new_chat_member.status = ChatMemberStatus.MEMBER
     join_event.old_chat_member = MagicMock(spec=ChatMember)
     join_event.old_chat_member.status = ChatMemberStatus.LEFT
@@ -490,7 +501,8 @@ async def test_send_captcha_error_handling():
          patch('bot.handlers.visual_captcha.visual_captcha_handler.load_captcha_settings') as mock_settings, \
          patch('bot.handlers.visual_captcha.visual_captcha_handler.get_visual_captcha_status') as mock_get_visual, \
          patch('bot.handlers.visual_captcha.visual_captcha_handler.send_captcha_prompt') as mock_send_captcha, \
-         patch('bot.handlers.visual_captcha.visual_captcha_handler.build_restriction_permissions') as mock_build_perm:
+         patch('bot.handlers.visual_captcha.visual_captcha_handler.build_restriction_permissions') as mock_build_perm, \
+         patch('bot.handlers.visual_captcha.visual_captcha_handler.create_snapshot_on_join') as mock_snapshot:
 
         from bot.services.event_classifier import JoinEventType
         from bot.services.captcha_flow_logic import CaptchaDecision

@@ -30,6 +30,18 @@ from bot.handlers import handlers_router
 # - Даты загрузки фото профиля
 from bot.services.pyrogram_client import pyrogram_service
 
+# ============================================================
+# ИМПОРТ СЕРВИСА ЗАЩИТЫ ГРУПП от потери данных
+# ============================================================
+# Решает проблему исчезновения групп после перезапуска:
+# - Бэкап групп в Redis при старте
+# - Автоматическое восстановление при потере
+# - Логирование попыток удаления Group записей
+from bot.services.group_protection import (
+    setup_group_delete_listeners,
+    check_and_protect_groups,
+)
+
 # Логгер
 import logging
 from bot.utils.logger import TelegramLogHandler
@@ -69,6 +81,12 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)  # Добавляем под�
 async def main():
     logging.info("🤖 Бот успешно запущен и готов к работе.")
 
+    # ============================================================
+    # ЗАЩИТА ГРУПП: Настройка логирования удаления Group записей
+    # ============================================================
+    # Должно быть вызвано ДО любых операций с БД
+    setup_group_delete_listeners()
+
     # Создаем отказоустойчивое хранилище - если Redis недоступен, используем MemoryStorage
     try:
         # пробуем подключиться к Redis
@@ -85,6 +103,22 @@ async def main():
     # ✅ (Опционально) создаём таблицы в БД на основе моделей (если они не существуют)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # ============================================================
+    # ЗАЩИТА ГРУПП: Проверка и восстановление при потере данных
+    # ============================================================
+    # Если groups таблица пустая, но есть бэкап в Redis - восстанавливаем
+    # Иначе создаём свежий бэкап для защиты от потери
+    try:
+        from bot.database.session import get_session
+        async with get_session() as db_session:
+            protection_result = await check_and_protect_groups(db_session)
+            if protection_result:
+                logging.info("✅ [GROUP_PROTECTION] Проверка групп завершена успешно")
+            else:
+                logging.warning("⚠️ [GROUP_PROTECTION] Проверка групп выявила проблемы")
+    except Exception as e:
+        logging.error(f"❌ [GROUP_PROTECTION] Ошибка проверки групп: {e}")
 
     # ✅ Создание бота по токену из .env
     session = AiohttpSession(timeout=60.0)
@@ -223,7 +257,8 @@ async def main():
             logging.info(f"🔧 Установка webhook: {WEBHOOK_URL}")
             set_result = await bot.set_webhook(
                 WEBHOOK_URL,
-                drop_pending_updates=True
+                drop_pending_updates=True,
+                allowed_updates=["message", "callback_query", "chat_member", "my_chat_member", "chat_join_request"]
             )
             logging.info(f"📤 Результат set_webhook: {set_result}")
             

@@ -679,7 +679,7 @@ async def create_group_management_keyboard(session: AsyncSession, chat_id: int):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text="🛡️ Настройки капчи",
-            callback_data=f"captcha_settings:{chat_id}"
+            callback_data=f"captcha:settings:{chat_id}"
         )],
         [InlineKeyboardButton(
             text=mute_text,
@@ -704,6 +704,10 @@ async def create_group_management_keyboard(session: AsyncSession, chat_id: int):
         [InlineKeyboardButton(
             text="📨 Управление сообщениями",
             callback_data=f"mm:m:{chat_id}"
+        )],
+        [InlineKeyboardButton(
+            text="📊 Мониторинг профилей",
+            callback_data=f"pm_settings_main:{chat_id}"
         )],
         [InlineKeyboardButton(
             text="📢 Рассылки",

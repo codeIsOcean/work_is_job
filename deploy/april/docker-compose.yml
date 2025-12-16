@@ -40,7 +40,7 @@ services:
 
   bot:
     build:
-      context: .
+      context: ../..
       dockerfile: Dockerfile.prod
     container_name: april_test_bot
     env_file:

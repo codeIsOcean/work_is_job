@@ -1,25 +1,16 @@
 # group_events.py
+# Обработка событий добавления/удаления бота из группы
 import logging
 from aiogram import Router, types
 from aiogram.filters import ChatMemberUpdatedFilter, IS_MEMBER, IS_NOT_MEMBER
-from aiogram.types import ChatJoinRequest
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 
 from bot.database.models import Group, User, GroupUsers, UserGroup, ChatSettings
-from bot.services.visual_captcha_logic import (
-    get_visual_captcha_status,
-    generate_visual_captcha,
-    save_captcha_data,
-    create_deeplink_for_captcha,
-    get_captcha_keyboard,
-    is_visual_captcha_enabled
-)
 
 logger = logging.getLogger(__name__)
 
 group_events_router = Router()
-bot_activity_handlers_router = group_events_router  # Алиас для роутера группы
 
 
 @group_events_router.my_chat_member(ChatMemberUpdatedFilter(member_status_changed=IS_NOT_MEMBER >> IS_MEMBER))
@@ -222,96 +213,7 @@ async def bot_removed_from_group(event: types.ChatMemberUpdated, session: AsyncS
         logger.error(f"❌ Ошибка при обработке удаления бота из группы {chat.id}: {e}")
         await session.rollback()
 
-@bot_activity_handlers_router.chat_join_request()
-async def handle_join_request(chat_join_request: ChatJoinRequest, session: AsyncSession):
-    """Обработчик запроса на вступление в группу"""
-    chat_id = chat_join_request.chat.id
-    user = chat_join_request.from_user
-
-    logger.info(f"📨 Получен запрос на вступление от пользователя {user.id} в группу {chat_id}")
-
-    try:
-        # Проверяем активна ли визуальная капча
-        if not await is_visual_captcha_enabled(session, chat_id):
-            logger.info(f"⛔ Визуальная капча не активирована в группе {chat_id}, выходим из handle_join_request")
-            return
-
-        logger.info(f"✅ Визуальная капча активирована в группе {chat_id}, отправляем капчу пользователю")
-
-        # НЕ ГЕНЕРИРУЕМ КАПЧУ СРАЗУ - только создаем кнопку
-        group_name = str(chat_id)
-
-        # Создаем deep link
-        deep_link = await create_deeplink_for_captcha(chat_join_request.bot, group_name)
-
-        # Создаем клавиатуру
-        keyboard = await get_captcha_keyboard(deep_link)
-
-        # Формируем текст с кликабельным названием группы
-        chat = chat_join_request.chat
-        group_title = (
-            chat.title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            if chat.title else "группа"
-        )
-        logger.info(f"📝 Название группы для сообщения: '{group_title}' (исходное: '{chat.title}')")
-
-        # Создаем ссылку на группу
-        group_link = None
-        if chat.username:
-            # Публичная группа - используем username
-            group_link = f"https://t.me/{chat.username}"
-        else:
-            # Приватная группа - создаем invite link
-            try:
-                invite_link = await chat_join_request.bot.create_chat_invite_link(
-                    chat_id=chat.id,
-                    creates_join_request=False
-                )
-                # Преобразуем invite_link.invite_link в строку явно
-                group_link = str(invite_link.invite_link) if invite_link.invite_link else None
-            except Exception as e:
-                logger.warning(f"Не удалось создать invite link для группы {chat.id}: {e}")
-
-        # Формируем сообщение с кликабельным названием группы
-        if group_link:
-            message_text = (
-                f"🔒 Для вступления в группу <a href='{group_link}'>{group_title}</a> необходимо пройти проверку.\n"
-                f"Нажмите на кнопку ниже:"
-            )
-        else:
-            # Fallback если не удалось создать ссылку
-            message_text = (
-                f"🔒 Для вступления в группу <b>{group_title}</b> необходимо пройти проверку.\n"
-                f"Нажмите на кнопку ниже:"
-            )
-
-        # Отправляем ТОЛЬКО текст с кнопкой (БЕЗ ФОТО)
-        try:
-            msg = await chat_join_request.bot.send_message(
-                chat_id=user.id,
-                text=message_text,
-                reply_markup=keyboard,
-                parse_mode="HTML",
-                disable_web_page_preview=True
-            )
-            logger.info(f"📤 Капча отправлена пользователю {user.id}")
-            
-            # Удаляем сообщение через 2-3 минуты (150 секунд = 2.5 минуты)
-            import asyncio
-            from bot.services.visual_captcha_logic import delete_message_after_delay
-            asyncio.create_task(delete_message_after_delay(chat_join_request.bot, user.id, msg.message_id, 150))
-        except Exception as send_error:
-            error_msg = str(send_error)
-            if "bot can't initiate conversation with a user" in error_msg:
-                logger.warning(f"⚠️ Пользователь {user.id} не начал диалог с ботом. Запрос на вступление будет отклонен.")
-            elif "bot was blocked by the user" in error_msg:
-                logger.warning(f"⚠️ Пользователь {user.id} заблокировал бота. Запрос на вступление будет отклонен.")
-            else:
-                logger.warning(f"⚠️ Не удалось отправить капчу пользователю {user.id}: {send_error}")
-            # Пользователь заблокировал бота или не начал диалог
-            return
-        
-    except Exception as e:
-        logger.error(f"Ошибка при обработке запроса на вступление: {e}")
-        await session.rollback()
-        raise
+# УДАЛЕНО: Дублирующий хендлер handle_join_request
+# Основная логика капчи находится в visual_captcha_handler.py
+# Этот хендлер перехватывал события и блокировал работу основного хендлера
+# Удалено 2025-12-14 для решения бага с неработающей капчей

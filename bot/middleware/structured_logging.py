@@ -26,7 +26,18 @@ class StructuredLoggingMiddleware(BaseMiddleware):
         data: Dict[str, Any]
     ) -> Any:
         """Логирует апдейт в структурированном виде"""
-        
+
+        # DEBUG: Логируем RAW update для диагностики проблем
+        # Показывает какие поля апдейта заполнены
+        logger.debug(
+            f"🔍 [RAW_UPDATE] id={event.update_id} "
+            f"message={bool(event.message)} "
+            f"callback={bool(event.callback_query)} "
+            f"chat_member={bool(event.chat_member)} "
+            f"my_chat_member={bool(event.my_chat_member)} "
+            f"chat_join_request={bool(event.chat_join_request)}"
+        )
+
         # КРИТИЧНО: Отключаем старое логирование aiogram ПЕРЕД обработкой
         # Это должно быть первым действием в middleware
         # Сохраняем старые уровни для восстановления

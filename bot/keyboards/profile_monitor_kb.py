@@ -1,0 +1,359 @@
+# bot/keyboards/profile_monitor_kb.py
+"""
+Клавиатуры для модуля Profile Monitor.
+
+Содержит:
+- Клавиатуры для уведомлений в журнале
+- Клавиатуры для настроек в ЛС
+"""
+
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+
+# ============================================================
+# КЛАВИАТУРА: ДЕЙСТВИЯ В ЖУРНАЛЕ
+# ============================================================
+def get_journal_action_kb(
+    chat_id: int,
+    user_id: int,
+    log_id: int,
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура для действий в журнале при обнаружении изменения профиля.
+
+    Кнопки:
+    - Мут | Бан | Кик
+    - Отправить в группу | ОК
+
+    Args:
+        chat_id: ID группы
+        user_id: ID пользователя
+        log_id: ID записи в журнале (для отслеживания)
+
+    Returns:
+        InlineKeyboardMarkup с кнопками действий
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            # Первая строка: Модерация
+            [
+                InlineKeyboardButton(
+                    text="🔇 Мут",
+                    callback_data=f"pm_mute:{chat_id}:{user_id}:{log_id}"
+                ),
+                InlineKeyboardButton(
+                    text="🚫 Бан",
+                    callback_data=f"pm_ban:{chat_id}:{user_id}:{log_id}"
+                ),
+                InlineKeyboardButton(
+                    text="👢 Кик",
+                    callback_data=f"pm_kick:{chat_id}:{user_id}:{log_id}"
+                ),
+            ],
+            # Вторая строка: Отправка и подтверждение
+            [
+                InlineKeyboardButton(
+                    text="📢 В группу",
+                    callback_data=f"pm_send_group:{chat_id}:{user_id}:{log_id}"
+                ),
+                InlineKeyboardButton(
+                    text="✅ ОК",
+                    callback_data=f"pm_ok:{chat_id}:{user_id}:{log_id}"
+                ),
+            ],
+        ]
+    )
+
+
+# ============================================================
+# КЛАВИАТУРА: ПОСЛЕ АВТОМУТА
+# ============================================================
+def get_auto_mute_kb(
+    chat_id: int,
+    user_id: int,
+    log_id: int,
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура после автоматического мута.
+
+    Кнопки:
+    - Размут | Бан
+    - Отправить в группу | ОК
+
+    Args:
+        chat_id: ID группы
+        user_id: ID пользователя
+        log_id: ID записи в журнале
+
+    Returns:
+        InlineKeyboardMarkup
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            # Первая строка: Отмена или усиление
+            [
+                InlineKeyboardButton(
+                    text="🔊 Размут",
+                    callback_data=f"pm_unmute:{chat_id}:{user_id}:{log_id}"
+                ),
+                InlineKeyboardButton(
+                    text="🚫 Бан",
+                    callback_data=f"pm_ban:{chat_id}:{user_id}:{log_id}"
+                ),
+            ],
+            # Вторая строка: Отправка и подтверждение
+            [
+                InlineKeyboardButton(
+                    text="📢 В группу",
+                    callback_data=f"pm_send_group:{chat_id}:{user_id}:{log_id}"
+                ),
+                InlineKeyboardButton(
+                    text="✅ ОК",
+                    callback_data=f"pm_ok:{chat_id}:{user_id}:{log_id}"
+                ),
+            ],
+        ]
+    )
+
+
+# ============================================================
+# КЛАВИАТУРА: НАСТРОЙКИ МОДУЛЯ В ЛС
+# ============================================================
+def get_settings_main_kb(
+    chat_id: int,
+    enabled: bool,
+) -> InlineKeyboardMarkup:
+    """
+    Главная клавиатура настроек Profile Monitor.
+
+    Args:
+        chat_id: ID группы
+        enabled: Включён ли модуль
+
+    Returns:
+        InlineKeyboardMarkup
+    """
+    # Текст кнопки включения/выключения
+    toggle_text = "🔴 Выключить" if enabled else "🟢 Включить"
+    toggle_value = "off" if enabled else "on"
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            # Переключатель модуля
+            [
+                InlineKeyboardButton(
+                    text=toggle_text,
+                    callback_data=f"pm_toggle:{toggle_value}:{chat_id}"
+                ),
+            ],
+            # Настройки логирования
+            [
+                InlineKeyboardButton(
+                    text="📝 Настройки логирования",
+                    callback_data=f"pm_settings_log:{chat_id}"
+                ),
+            ],
+            # Настройки автомута
+            [
+                InlineKeyboardButton(
+                    text="⚡ Настройки автомута",
+                    callback_data=f"pm_settings_mute:{chat_id}"
+                ),
+            ],
+            # Назад к меню настроек группы
+            [
+                InlineKeyboardButton(
+                    text="◀️ Назад",
+                    callback_data=f"manage_group_{chat_id}"
+                ),
+            ],
+        ]
+    )
+
+
+# ============================================================
+# КЛАВИАТУРА: НАСТРОЙКИ ЛОГИРОВАНИЯ
+# ============================================================
+def get_log_settings_kb(
+    chat_id: int,
+    log_name: bool,
+    log_username: bool,
+    log_photo: bool,
+    send_to_journal: bool,
+    send_to_group: bool,
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура настроек логирования.
+
+    Args:
+        chat_id: ID группы
+        log_name: Логировать имена
+        log_username: Логировать username
+        log_photo: Логировать фото
+        send_to_journal: Отправлять в журнал (для админов)
+        send_to_group: Отправлять простые уведомления в группу (для всех)
+
+    Returns:
+        InlineKeyboardMarkup
+    """
+    # Формируем иконки состояния для каждой опции
+    name_icon = "✅" if log_name else "❌"
+    username_icon = "✅" if log_username else "❌"
+    photo_icon = "✅" if log_photo else "❌"
+    journal_icon = "✅" if send_to_journal else "❌"
+    # Иконка для отправки в группу (новая опция)
+    group_icon = "✅" if send_to_group else "❌"
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            # Кнопка: логирование имён
+            [
+                InlineKeyboardButton(
+                    text=f"{name_icon} Имена",
+                    callback_data=f"pm_log_name:{'off' if log_name else 'on'}:{chat_id}"
+                ),
+            ],
+            # Кнопка: логирование username
+            [
+                InlineKeyboardButton(
+                    text=f"{username_icon} Username",
+                    callback_data=f"pm_log_username:{'off' if log_username else 'on'}:{chat_id}"
+                ),
+            ],
+            # Кнопка: логирование фото
+            [
+                InlineKeyboardButton(
+                    text=f"{photo_icon} Фото",
+                    callback_data=f"pm_log_photo:{'off' if log_photo else 'on'}:{chat_id}"
+                ),
+            ],
+            # Кнопка: отправка в журнал (для админов)
+            [
+                InlineKeyboardButton(
+                    text=f"{journal_icon} В журнал (админам)",
+                    callback_data=f"pm_send_journal:{'off' if send_to_journal else 'on'}:{chat_id}"
+                ),
+            ],
+            # Кнопка: отправка в группу (для всех участников)
+            # Простые уведомления: "Пользователь X сменил имя на Y"
+            [
+                InlineKeyboardButton(
+                    text=f"{group_icon} В группу (всем)",
+                    callback_data=f"pm_send_grp:{'off' if send_to_group else 'on'}:{chat_id}"
+                ),
+            ],
+            # Кнопка назад к главному меню настроек
+            [
+                InlineKeyboardButton(
+                    text="◀️ Назад",
+                    callback_data=f"pm_settings_main:{chat_id}"
+                ),
+            ],
+        ]
+    )
+
+
+# ============================================================
+# КЛАВИАТУРА: НАСТРОЙКИ АВТОМУТА
+# ============================================================
+def get_mute_settings_kb(
+    chat_id: int,
+    auto_mute_young: bool,
+    auto_mute_name_change: bool,
+    delete_messages: bool,
+    account_age_days: int,
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура настроек автомута.
+
+    Args:
+        chat_id: ID группы
+        auto_mute_young: Автомут молодых аккаунтов без фото
+        auto_mute_name_change: Автомут при смене имени
+        delete_messages: Удалять сообщения
+        account_age_days: Порог возраста аккаунта
+
+    Returns:
+        InlineKeyboardMarkup
+    """
+    # Иконки состояния
+    young_icon = "✅" if auto_mute_young else "❌"
+    name_icon = "✅" if auto_mute_name_change else "❌"
+    delete_icon = "✅" if delete_messages else "❌"
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{young_icon} Мут: нет фото + молодой аккаунт",
+                    callback_data=f"pm_mute_young:{'off' if auto_mute_young else 'on'}:{chat_id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"📅 Порог: {account_age_days} дней",
+                    callback_data=f"pm_age_threshold:{chat_id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"{name_icon} Мут: смена имени + быстрые сообщения",
+                    callback_data=f"pm_mute_name:{'off' if auto_mute_name_change else 'on'}:{chat_id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"{delete_icon} Удалять сообщения спаммеров",
+                    callback_data=f"pm_delete_msgs:{'off' if delete_messages else 'on'}:{chat_id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="◀️ Назад",
+                    callback_data=f"pm_settings_main:{chat_id}"
+                ),
+            ],
+        ]
+    )
+
+
+# ============================================================
+# КЛАВИАТУРА: ВЫБОР ПОРОГА ВОЗРАСТА
+# ============================================================
+def get_age_threshold_kb(
+    chat_id: int,
+    current_days: int,
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура выбора порога возраста аккаунта.
+
+    Args:
+        chat_id: ID группы
+        current_days: Текущий порог в днях
+
+    Returns:
+        InlineKeyboardMarkup
+    """
+    # Варианты порогов
+    options = [7, 15, 30, 60, 90]
+
+    buttons = []
+    for days in options:
+        # Отмечаем текущий выбор
+        icon = "✅" if days == current_days else ""
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{icon} {days} дней",
+                callback_data=f"pm_set_age:{days}:{chat_id}"
+            )
+        ])
+
+    # Кнопка назад
+    buttons.append([
+        InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"pm_settings_mute:{chat_id}"
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
