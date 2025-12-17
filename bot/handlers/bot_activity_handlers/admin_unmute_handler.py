@@ -9,6 +9,8 @@ import logging
 from aiogram import Router, Bot
 from aiogram.types import ChatMemberUpdated
 from aiogram.enums import ChatMemberStatus
+from aiogram.filters import ChatMemberUpdatedFilter
+from aiogram.filters.chat_member_updated import RESTRICTED, IS_MEMBER, IS_ADMIN
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.services.restriction_service import deactivate_restriction
@@ -17,8 +19,12 @@ logger = logging.getLogger(__name__)
 
 admin_unmute_router = Router()
 
+# Фильтр: только когда пользователь был RESTRICTED и стал MEMBER или ADMIN
+# Это позволяет другим handler'ам (например join_handler) обрабатывать остальные события
+_UNRESTRICTED_FILTER = ChatMemberUpdatedFilter(member_status_changed=RESTRICTED >> (IS_MEMBER | IS_ADMIN))
 
-@admin_unmute_router.chat_member()
+
+@admin_unmute_router.chat_member(_UNRESTRICTED_FILTER)
 async def handle_user_unrestricted_by_admin(
     event: ChatMemberUpdated,
     session: AsyncSession,
@@ -41,17 +47,12 @@ async def handle_user_unrestricted_by_admin(
     if event.chat.type not in ("group", "supergroup"):
         return
 
-    old_member = event.old_chat_member
     new_member = event.new_chat_member
     actor = event.from_user  # Кто выполнил действие
 
-    # Проверяем что старый статус был restricted
-    if old_member.status != ChatMemberStatus.RESTRICTED:
-        return
-
-    # Проверяем что новый статус НЕ restricted (мут снят)
-    if new_member.status == ChatMemberStatus.RESTRICTED:
-        return
+    # Фильтр _UNRESTRICTED_FILTER уже гарантирует:
+    # - old_status был RESTRICTED
+    # - new_status НЕ RESTRICTED
 
     # Проверяем что действие выполнил НЕ бот
     bot_info = await bot.get_me()

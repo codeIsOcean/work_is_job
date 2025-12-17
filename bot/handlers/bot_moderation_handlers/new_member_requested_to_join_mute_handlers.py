@@ -152,7 +152,47 @@ async def manually_mute_on_approval(event: ChatMemberUpdated):
                 )
         except Exception as log_error:
             logger.error(f"Ошибка при логировании вступления пользователя: {log_error}")
-        
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # PROFILE MONITOR: Создаём snapshot профиля при JOIN (left/kicked -> member)
+        # ═══════════════════════════════════════════════════════════════════════
+        if old_status in ("left", "kicked") and new_status == "member":
+            try:
+                from bot.services.profile_monitor import (
+                    get_profile_monitor_settings,
+                    create_snapshot_on_join,
+                )
+                user = event.new_chat_member.user
+                if not user.is_bot:
+                    async with get_session() as pm_session:
+                        settings = await get_profile_monitor_settings(pm_session, event.chat.id)
+                        if settings and settings.enabled:
+                            logger.info(
+                                f"[PROFILE_MONITOR] Creating snapshot on JOIN: "
+                                f"chat={event.chat.id} user={user.id} name='{user.first_name}'"
+                            )
+                            snapshot = await create_snapshot_on_join(
+                                session=pm_session,
+                                chat_id=event.chat.id,
+                                user_id=user.id,
+                                first_name=user.first_name,
+                                last_name=user.last_name,
+                                username=user.username,
+                                is_premium=user.is_premium or False,
+                            )
+                            if snapshot:
+                                logger.info(
+                                    f"[PROFILE_MONITOR] Snapshot created: "
+                                    f"chat={event.chat.id} user={user.id} has_photo={snapshot.has_photo}"
+                                )
+                        else:
+                            logger.debug(
+                                f"[PROFILE_MONITOR] Skip snapshot: chat={event.chat.id} "
+                                f"user={user.id} (module disabled)"
+                            )
+            except Exception as pm_error:
+                logger.error(f"[PROFILE_MONITOR] Error creating snapshot: {pm_error}")
+
         try:
             # Проверяем глобальный мут (мастер-переключатель)
             from bot.services.groups_settings_in_private_logic import get_global_mute_status

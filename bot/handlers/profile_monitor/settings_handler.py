@@ -415,8 +415,11 @@ async def callback_mute_settings(
     text = (
         f"⚡ <b>Настройки автомута</b>\n\n"
         f"Автоматический мут пользователей по критериям:\n\n"
-        f"<b>Критерий 1:</b> Нет фото + аккаунт младше {settings.auto_mute_account_age_days} дней\n"
-        f"<b>Критерий 2:</b> Нет фото + смена имени + сообщение в течение "
+        f"<b>Критерий 1:</b> Смена имени + смена фото + сообщение в течение "
+        f"{settings.first_message_window_minutes} мин\n"
+        f"<b>Критерий 2:</b> Смена имени + сообщение в течение "
+        f"{settings.first_message_window_minutes} мин\n"
+        f"<b>Критерий 3:</b> Добавление фото + сообщение в течение "
         f"{settings.first_message_window_minutes} мин"
     )
 

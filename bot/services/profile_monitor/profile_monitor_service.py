@@ -227,6 +227,9 @@ async def create_profile_snapshot(
         existing.photo_id = photo_id
         existing.account_age_days = account_age_days
         existing.is_premium = is_premium
+        # ВАЖНО: Обновляем joined_at при повторном входе (rejoin)
+        # Это нужно для правильного расчёта minutes_since_join
+        existing.joined_at = _utcnow_naive()
         existing.updated_at = _utcnow_naive()
         await session.commit()
         logger.info(
@@ -586,6 +589,7 @@ async def check_auto_mute_criteria(
 
     КРИТЕРИЙ 1: Смена имени + смена фото + сообщение в течение 20 мин → МУТ
     КРИТЕРИЙ 2: Смена имени + сообщение в течение 20 мин → МУТ
+    КРИТЕРИЙ 3: Добавление фото + сообщение в течение 20 мин → МУТ
 
     Args:
         session: AsyncSession
@@ -650,6 +654,30 @@ async def check_auto_mute_criteria(
                 # Логируем срабатывание критерия
                 logger.warning(
                     f"[PROFILE_MONITOR] Auto-mute criteria #2 TRIGGERED: "
+                    f"user={snapshot.user_id} chat={snapshot.chat_id} "
+                    f"minutes={int(minutes_since_change)} threshold={window_minutes}"
+                )
+                # Возвращаем True и причину
+                return True, reason
+
+    # ─────────────────────────────────────────────────────────
+    # КРИТЕРИЙ 3: Добавление фото + сообщение в течение N минут
+    # ─────────────────────────────────────────────────────────
+    # Проверяем включён ли критерий в настройках (используем тот же флаг)
+    if settings.auto_mute_no_photo_young:
+        # Проверяем: было добавление фото (без смены имени)
+        if has_recent_photo_change and not has_recent_name_change:
+            # Проверяем: сообщение в течение заданного окна времени
+            if minutes_since_change <= window_minutes:
+                # Формируем причину для лога и уведомления
+                reason = (
+                    f"Автомут: добавление фото + "
+                    f"сообщение через {int(minutes_since_change)} мин "
+                    f"(порог: {window_minutes} мин)"
+                )
+                # Логируем срабатывание критерия
+                logger.warning(
+                    f"[PROFILE_MONITOR] Auto-mute criteria #3 TRIGGERED: "
                     f"user={snapshot.user_id} chat={snapshot.chat_id} "
                     f"minutes={int(minutes_since_change)} threshold={window_minutes}"
                 )
