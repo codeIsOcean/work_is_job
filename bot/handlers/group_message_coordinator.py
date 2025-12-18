@@ -66,6 +66,9 @@ from bot.handlers.profile_monitor.monitor_handler import (
 # ProfileMonitor - импортируем функцию трекинга сообщений для удаления
 from bot.services.profile_monitor import track_user_message
 
+# UserStats - импортируем функцию инкремента счётчика сообщений
+from bot.services.user_stats_service import increment_message_count
+
 # Импорт для ограничения прав (мут)
 from aiogram.types import ChatPermissions
 # Импорт для работы со временем
@@ -158,6 +161,13 @@ async def group_message_handler(
         f"[COORDINATOR] 📥 Сообщение: chat={chat_id}, user={user_id}, "
         f"text={message.text[:50] if message.text else 'N/A'}..."
     )
+
+    # ─────────────────────────────────────────────────────────
+    # USER STATISTICS: Инкремент счётчика сообщений
+    # ─────────────────────────────────────────────────────────
+    # Считаем ВСЕ сообщения включая админов (для полной статистики)
+    # Ошибки инкремента не блокируют основной поток (ловятся внутри)
+    await increment_message_count(session, chat_id, user_id)
 
     # ─────────────────────────────────────────────────────────
     # ШАГ 0: MESSAGE MANAGEMENT - системные сообщения и репин

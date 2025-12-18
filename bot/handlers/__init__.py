@@ -31,6 +31,8 @@ from .profile_monitor import router as profile_monitor_router
 # Импортируем координатор сообщений в группах
 # Это единая точка входа для ContentFilter, Antispam, ProfileMonitor
 from .group_message_coordinator import group_message_coordinator_router
+# Импортируем роутер команды /stat (статистика пользователя)
+from .user_stats_handler import router as user_stats_router
 
 # Объединяем все роутеры в один
 from aiogram import Router, F
@@ -60,6 +62,9 @@ handlers_router.include_router(antispam_router)               # Антиспам
 handlers_router.include_router(content_filter_router)         # Content filter настройки UI
 handlers_router.include_router(message_management_router)     # Message management UI + команды
 handlers_router.include_router(profile_monitor_router)        # Profile monitor callbacks + settings
+# Команда /stat - статистика пользователя в группе
+# ВАЖНО: должен быть ДО group_message_coordinator, иначе команда будет удалена
+handlers_router.include_router(user_stats_router)
 # ============================================================
 # GROUP MESSAGE COORDINATOR - единый хендлер для сообщений в группах
 # ============================================================
@@ -93,6 +98,8 @@ def create_fresh_handlers_router():
     fresh_router.include_router(content_filter_router)
     fresh_router.include_router(message_management_router)
     fresh_router.include_router(profile_monitor_router)
+    # Команда /stat - статистика пользователя (ДО coordinator!)
+    fresh_router.include_router(user_stats_router)
     # Group Message Coordinator - единый хендлер для групповых сообщений
     fresh_router.include_router(group_message_coordinator_router)
     return fresh_router
