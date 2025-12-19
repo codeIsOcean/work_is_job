@@ -11,7 +11,7 @@ from .broadcast_handlers.broadcast_handlers import broadcast_router
 from .bot_moderation_handlers.new_member_requested_to_join_mute_handlers import new_member_requested_handler
 from .auto_mute_scammers_handlers import auto_mute_scammers_router
 from .mute_by_reaction import reaction_mute_router
-from .admin_log_handlers import admin_log_router
+# Удалено: admin_log_handlers (мёртвый код - обрабатывал несуществующие callbacks)
 from .enhanced_analysis_test_handler import enhanced_analysis_router
 from .settings_captcha_handler import captcha_settings_router
 from .journal_link_handler import journal_link_router
@@ -52,7 +52,7 @@ handlers_router.include_router(captcha_router)
 handlers_router.include_router(broadcast_router)
 handlers_router.include_router(new_member_requested_handler)  # Ручной мут ПЕРВЫМ
 handlers_router.include_router(auto_mute_scammers_router)     # Автомут ВТОРЫМ
-handlers_router.include_router(admin_log_router)
+# Удалено: admin_log_router (мёртвый код)
 handlers_router.include_router(enhanced_analysis_router)
 handlers_router.include_router(journal_link_router)           # Привязка журнала через пересылку
 handlers_router.include_router(reaction_mute_router)
@@ -88,7 +88,7 @@ def create_fresh_handlers_router():
     fresh_router.include_router(broadcast_router)
     fresh_router.include_router(new_member_requested_handler)
     fresh_router.include_router(auto_mute_scammers_router)
-    fresh_router.include_router(admin_log_router)
+    # Удалено: admin_log_router (мёртвый код)
     fresh_router.include_router(enhanced_analysis_router)
     fresh_router.include_router(journal_link_router)
     fresh_router.include_router(reaction_mute_router)
