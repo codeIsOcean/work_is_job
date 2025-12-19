@@ -13,7 +13,8 @@ from sqlalchemy import select, update, insert
 from bot.services.redis_conn import redis
 from bot.database.models import ChatSettings, ScammerTracker, Group
 from bot.database.session import get_session
-from bot.utils.logger import send_formatted_log
+# TODO: Интегрировать с новым модулем логирования когда будет создан
+# from bot.utils.logger import send_formatted_log  # Пока не используется
 from bot.services.restriction_service import save_restriction
 
 logger = logging.getLogger(__name__)
@@ -371,37 +372,69 @@ async def auto_mute_scammer_on_join(bot: Bot, event: ChatMemberUpdated) -> bool:
                 scam_level = result.scalar_one_or_none()
             logger.info(f"🔍 [AUTO_MUTE_DEBUG] Уровень скама из БД для пользователя @{user.username or user.first_name or user.id} [{user.id}]: {scam_level}")
             
-            # ПРИОРИТЕТ 3: Проверяем возраст аккаунта - свежие аккаунты (≤30 дней) мутим автоматически
-            # ИСПРАВЛЕНО: Используем динамический расчёт вместо устаревшего статического маппинга
-            from bot.services.account_age_estimator import account_age_estimator
-            from bot.services.redis_conn import redis as redis_client
-            age_days = await account_age_estimator.get_dynamic_age_days(redis_client, user.id)
-            age_risk_score = 100 if age_days <= 30 else 0
-            
-            logger.info(f"🔍 [AUTO_MUTE_DEBUG] Возраст аккаунта @{user.username or user.first_name or user.id} [{user.id}]: {age_days} дней, риск: {age_risk_score}/100")
+            # ═══════════════════════════════════════════════════════════════════════
+            # ПРИОРИТЕТ 3: Проверяем профиль через enhanced_profile_analyzer
+            # ═══════════════════════════════════════════════════════════════════════
+            # ЛОГИКА ПРИОРИТЕТА (ВАЖНО!):
+            # 1. Если ЕСТЬ фото → проверяем ТОЛЬКО возраст фото (если ВСЕ < 15 дней → мут)
+            # 2. Если НЕТ фото → проверяем возраст аккаунта (если < 30 дней → мут)
+            # Это исправляет баг когда скаммер с аккаунтом 35 дней и фото 0 дней проходил
+            from bot.services.enhanced_profile_analyzer import enhanced_profile_analyzer
+
+            # Формируем данные пользователя для анализа
+            user_data = {
+                "id": user.id,
+                "username": user.username,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+            }
+
+            # Вызываем расширенный анализ профиля (проверяет фото + возраст аккаунта)
+            profile_analysis = await enhanced_profile_analyzer.analyze_user_profile_enhanced(user_data, bot)
+
+            # Извлекаем результаты анализа для логирования
+            photos_analysis = profile_analysis.get('photos_analysis', {})
+            age_analysis = profile_analysis.get('age_analysis', {})
+            profile_is_suspicious = profile_analysis.get('is_suspicious', False)
+            profile_risk_score = profile_analysis.get('risk_score', 0)
+            profile_reasons = profile_analysis.get('reasons', [])
+
+            # Логируем результаты анализа профиля
+            logger.info(f"🔍 [AUTO_MUTE_DEBUG] Анализ профиля @{user.username or user.first_name or user.id} [{user.id}]:")
+            logger.info(f"   📸 Фото: кол-во={photos_analysis.get('photos_count', 0)}, "
+                       f"самое старое={photos_analysis.get('oldest_photo_days', 'N/A')} дней")
+            logger.info(f"   📅 Возраст аккаунта: {age_analysis.get('age_days', 'N/A')} дней")
+            logger.info(f"   🎯 Результат: is_suspicious={profile_is_suspicious}, risk_score={profile_risk_score}/100")
             
             # РЕШЕНИЕ: Мутим если выполнено ЛЮБОЕ из условий:
             # 1. Есть флаг автомута из Redis (самый приоритетный)
             # 2. Уровень скама >= 50 (второй приоритет)
-            # 3. Возраст аккаунта <= 30 дней (включая отрицательные значения - новые аккаунты)
+            # 3. Профиль подозрительный (все фото < 15 дней ИЛИ аккаунт < 30 дней если нет фото)
             mute_reason = ""
             should_mute = False
-            
+
+            # Проверка условия 1: флаг автомута из Redis
             if auto_mute_flag == "1":
                 mute_reason = f"Флаг автомута из Redis (TTL: {auto_mute_ttl}s)"
                 should_mute = True
                 logger.info(f"🔍 [AUTO_MUTE_DEBUG] ✅ Флаг автомута установлен - мутим пользователя @{user.username or user.first_name or user.id} [{user.id}]")
+            # Проверка условия 2: уровень скама в БД
             elif scam_level is not None and scam_level >= 50:
                 mute_reason = f"Уровень скама {scam_level}/100 из БД"
                 should_mute = True
                 logger.info(f"🔍 [AUTO_MUTE_DEBUG] ✅ Уровень скама {scam_level} >= 50 - мутим пользователя @{user.username or user.first_name or user.id} [{user.id}]")
-            elif age_days <= 30:
-                mute_reason = f"Свежий аккаунт ({age_days} дней)"
+            # Проверка условия 3: подозрительный профиль (свежие фото или молодой аккаунт)
+            elif profile_is_suspicious:
+                # Формируем причину мута из результатов анализа
+                mute_reason = profile_reasons[0] if profile_reasons else "Подозрительный профиль"
                 should_mute = True
-                logger.info(f"🔍 [AUTO_MUTE_DEBUG] ✅ Свежий аккаунт ({age_days} дней) - мутим пользователя @{user.username or user.first_name or user.id} [{user.id}]")
-            
+                logger.info(f"🔍 [AUTO_MUTE_DEBUG] ✅ Подозрительный профиль (risk={profile_risk_score}) - мутим пользователя @{user.username or user.first_name or user.id} [{user.id}]")
+                logger.info(f"   📝 Причина: {mute_reason}")
+
+            # Если ни одно условие не выполнено - не мутим
             if not should_mute:
-                logger.info(f"🔍 [AUTO_MUTE_DEBUG] ❌ Пользователь @{user.username or user.first_name or user.id} [{user.id}] не соответствует критериям автомута (флаг: {auto_mute_flag}, уровень скама: {scam_level}, возраст: {age_days} дней)")
+                logger.info(f"🔍 [AUTO_MUTE_DEBUG] ❌ Пользователь @{user.username or user.first_name or user.id} [{user.id}] не соответствует критериям автомута")
+                logger.info(f"   📝 Детали: флаг={auto_mute_flag}, скам={scam_level}, профиль_риск={profile_risk_score}")
                 return False
             
             logger.info(f"🔇 [AUTO_MUTE_DEBUG] Мутим скаммера @{user.username or user.first_name or user.id} [{user.id}] автоматически (причина: {mute_reason})")
@@ -480,7 +513,8 @@ async def auto_mute_scammer_on_join(bot: Bot, event: ChatMemberUpdated) -> bool:
                         bot=bot,
                         user=user,
                         chat=event.chat,
-                        scammer_level=scam_level or age_risk_score or 0,
+                        # Используем profile_risk_score из enhanced_profile_analyzer
+                        scammer_level=scam_level or profile_risk_score or 0,
                         reason=f"Автоматический мут: {mute_reason}",
                         session=db_session
                     )
