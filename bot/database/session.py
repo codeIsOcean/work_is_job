@@ -1,20 +1,11 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from contextlib import asynccontextmanager
-import os
-from dotenv import load_dotenv
 
-from bot.config import DATABASE_URL as CONFIG_DATABASE_URL
+from bot.config import DATABASE_URL
 from bot.database.models import Base
 
 
-# Пытаемся загрузить переменные окружения из разных источников
-load_dotenv(dotenv_path=os.getenv("ENV_PATH", ".env.dev"))
-
-# Используем URL из переменных окружения или из конфига
-DATABASE_URL = os.getenv("DATABASE_URL", CONFIG_DATABASE_URL)
-
-# Добавляем логирование для отладки
-print(f"DEBUG: DATABASE_URL = {DATABASE_URL}")
+# Используем DATABASE_URL из config.py (уже загружен из правильного .env файла)
 
 
 # создаем движок и фабрику сессий

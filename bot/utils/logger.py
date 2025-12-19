@@ -1,69 +1,9 @@
-import logging
 import os
 import aiohttp
 import asyncio
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 LOG_CHANNEL_ID = os.getenv("LOG_CHANNEL_ID")
-
-
-class TelegramLogHandler(logging.Handler):
-    def __init__(self, level=logging.INFO):
-        super().__init__(level)
-
-    async def send_log(self, message: str):
-        if not BOT_TOKEN or not LOG_CHANNEL_ID:
-            print("❗ BOT_TOKEN или LOG_CHANNEL_ID не установлены")
-            return
-
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": LOG_CHANNEL_ID,
-            "text": message,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True
-        }
-
-        async with aiohttp.ClientSession() as session:
-            try:
-                resp = await session.post(url, data=payload)
-                if resp.status != 200:
-                    text = await resp.text()
-                    print(f"❌ Telegram API Error: {resp.status} — {text}")
-            except Exception as e:
-                print(f"❌ Ошибка при отправке лога в Telegram: {e}")
-
-    def emit(self, record):
-        try:
-            # Безопасное получение времени (проверяем, есть ли formatter)
-            if self.formatter:
-                timestamp = self.formatter.formatTime(record, "%Y-%m-%d %H:%M:%S")
-            else:
-                # Если formatter не установлен, используем стандартный формат
-                timestamp = logging.Formatter().formatTime(record, "%Y-%m-%d %H:%M:%S")
-
-            level = record.levelname
-            emojis = {
-                "DEBUG": "🔍",
-                "INFO": "📢",
-                "WARNING": "⚠️",
-                "ERROR": "❗",
-                "CRITICAL": "🔥"
-            }
-            icon = emojis.get(level, "📝")
-
-            # 💬 Основной текст
-            message = (
-                f"{icon} {level} | {timestamp}\n"
-                f"{record.getMessage()}"
-            )
-
-            # Не отправлять в Telegram логи - только специальные события через send_formatted_log
-            # Этот обработчик теперь НЕ отправляет логи в Telegram
-            pass
-
-        except Exception as e:
-            print("❌ Ошибка логгера:", e)
 
 
 # ==== СПЕЦИАЛЬНЫЕ ФОРМАТИРОВАННЫЕ ЛОГИ ДЛЯ TELEGRAM ====

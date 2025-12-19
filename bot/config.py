@@ -96,7 +96,21 @@ if not DATABASE_URL:
 
 # Выводим информацию о конфигурации (без секретных данных)
 print(f"[Config] BOT_TOKEN: {'*' * (len(BOT_TOKEN) - 4) + BOT_TOKEN[-4:] if BOT_TOKEN else 'NOT SET'}")
-print(f"[Config] DATABASE_URL: {DATABASE_URL[:20]}..." if DATABASE_URL else "NOT SET")
+def _mask_db_url(url: str) -> str:
+    """Маскирует credentials в DATABASE_URL для безопасного логирования"""
+    if not url:
+        return "NOT SET"
+    try:
+        # postgresql+asyncpg://user:pass@host:port/dbname -> postgresql+asyncpg://***@host:port/dbname
+        if "@" in url:
+            protocol_and_creds, rest = url.split("@", 1)
+            protocol = protocol_and_creds.split("://")[0] if "://" in protocol_and_creds else ""
+            return f"{protocol}://***@{rest}"
+        return "***"
+    except Exception:
+        return "***"
+
+print(f"[Config] DATABASE_URL: {_mask_db_url(DATABASE_URL)}")
 print(f"[Config] LOG_CHANNEL_ID: {LOG_CHANNEL_ID}")
 print(f"[Config] ADMIN_IDS: {ADMIN_IDS}")
 print(f"[Config] USE_WEBHOOK: {USE_WEBHOOK}")

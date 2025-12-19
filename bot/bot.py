@@ -44,7 +44,6 @@ from bot.services.group_protection import (
 
 # Логгер
 import logging
-from bot.utils.logger import TelegramLogHandler
 
 # Настройка логгера
 logger = logging.getLogger()
@@ -56,12 +55,6 @@ console_handler.setLevel(logging.INFO)
 console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 console_handler.setFormatter(console_formatter)
 logger.addHandler(console_handler)
-
-# Создаем обработчик для Telegram
-telegram_handler = TelegramLogHandler(level=logging.INFO)
-telegram_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-telegram_handler.setFormatter(telegram_formatter)
-logger.addHandler(telegram_handler)
 
 # КРИТИЧНО: Отключаем встроенное логирование aiogram для апдейтов
 # Это должно предотвратить логирование "📩 Получен апдейт от Telegram"
@@ -163,19 +156,23 @@ async def main():
     print(f"Подключен: {handlers_router}")
     
     # ФИКС №2: Восстановление состояния групп после перезапуска
+    # Rate limiting: пауза между API вызовами для защиты от FloodWait
+    API_DELAY = 0.1  # 100ms между вызовами внутри группы
+    GROUP_DELAY = 0.3  # 300ms между группами
+
     try:
         from bot.database.session import get_session
         from bot.database.models import Group, UserGroup
         from sqlalchemy import select, delete
-        
+
         async with get_session() as session:
             result = await session.execute(select(Group))
             groups = result.scalars().all()
             bot_me = await bot.me()
-            
-            logging.info(f"🔄 Начинаем восстановление {len(groups)} групп...")
-            
-            for group in groups:
+
+            logging.info(f"🔄 Начинаем восстановление {len(groups)} групп (с rate limiting)...")
+
+            for i, group in enumerate(groups):
                 # БАГ #4 ФИКС: пропускаем служебную запись группы с chat_id=0
                 if group.chat_id == 0:
                     logging.info("ℹ️ Пропуск служебной записи группы с chat_id=0 при восстановлении")
@@ -184,20 +181,24 @@ async def main():
                     # Проверяем, что бот всё ещё в группе
                     try:
                         member = await bot.get_chat_member(group.chat_id, bot_me.id)
+                        await asyncio.sleep(API_DELAY)  # Rate limiting
+
                         if member.status in ("member", "administrator", "creator"):
                             logging.info(f"✅ Бот восстановлен в группе {group.title} (ID: {group.chat_id})")
-                            
+
                             # Обновляем информацию о группе (title может измениться)
                             try:
                                 chat = await bot.get_chat(group.chat_id)
+                                await asyncio.sleep(API_DELAY)  # Rate limiting
                                 group.title = chat.title
                                 await session.flush()
                             except Exception as e:
                                 logging.warning(f"⚠️ Не удалось обновить название группы {group.chat_id}: {e}")
-                            
+
                             # Восстанавливаем права админов в группе
                             try:
                                 admins = await bot.get_chat_administrators(group.chat_id)
+                                await asyncio.sleep(API_DELAY)  # Rate limiting
                                 for admin_member in admins:
                                     if admin_member.status in ("administrator", "creator"):
                                         admin_user_id = admin_member.user.id
@@ -226,11 +227,18 @@ async def main():
                                 delete(UserGroup).where(UserGroup.group_id == group.chat_id)
                             )
                             await session.flush()
+                        elif "flood" in error_str or "retry after" in error_str:
+                            # FloodWait - увеличиваем паузу и продолжаем
+                            logging.warning(f"⚠️ FloodWait при проверке группы {group.chat_id}, увеличиваем паузу")
+                            await asyncio.sleep(5)  # 5 сек пауза при FloodWait
                         else:
                             logging.warning(f"⚠️ Не удалось проверить группу {group.chat_id}: {e}")
                 except Exception as e:
                     logging.error(f"❌ Ошибка при обработке группы {group.chat_id}: {e}")
-            
+
+                # Пауза между группами для защиты от FloodWait
+                await asyncio.sleep(GROUP_DELAY)
+
             await session.commit()
             logging.info(f"✅ Восстановление групп завершено")
     except Exception as e:
