@@ -255,7 +255,16 @@ class FilterManager:
         # ─────────────────────────────────────────────────────────
         # ШАГ 2.2: Расширенный антифлуд - медиа (фото, стикеры, видео, войсы)
         # ─────────────────────────────────────────────────────────
-        if settings.flood_detect_media and self._flood_detector and media_type:
+        # ВАЖНО: Проверяем media_group_id для поддержки альбомов
+        # Когда пользователь отправляет альбом (несколько фото сразу):
+        # - Telegram отправляет каждое фото как ОТДЕЛЬНОЕ сообщение
+        # - Но все сообщения альбома имеют ОДИНАКОВЫЙ media_group_id
+        # - Мы пропускаем проверку для альбомов чтобы не было false positive
+        # - Альбом = одно действие пользователя, не флуд
+        is_album = bool(message.media_group_id)
+
+        # Проверяем медиа-флуд ТОЛЬКО если это НЕ альбом
+        if settings.flood_detect_media and self._flood_detector and media_type and not is_album:
             # Проверяем на медиа-флуд
             media_result = await self._flood_detector.check_media(
                 chat_id=chat_id,

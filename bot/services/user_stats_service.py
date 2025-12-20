@@ -15,8 +15,11 @@ import logging
 from datetime import datetime, timezone
 
 # Импортируем SQLAlchemy для работы с БД
-from sqlalchemy import select
+from sqlalchemy import select, case, func
 from sqlalchemy.ext.asyncio import AsyncSession
+# Импортируем PostgreSQL-specific insert для ON CONFLICT DO UPDATE (upsert)
+# Это атомарная операция которая решает race condition при параллельных INSERT
+from sqlalchemy.dialects.postgresql import insert
 
 # Импортируем модель статистики
 from bot.database.models_user_stats import UserStatistics
@@ -77,6 +80,10 @@ async def increment_message_count(
     ВАЖНО: Эта функция безопасна для вызова из coordinator.
     Все ошибки ловятся и логируются, не прерывая основной поток.
 
+    ИСПРАВЛЕНИЕ: Используем INSERT ... ON CONFLICT DO UPDATE (upsert)
+    вместо SELECT + INSERT для избежания race condition при параллельных
+    сообщениях (например, когда пользователь отправляет альбом из 4 фото).
+
     Args:
         session: Сессия БД
         chat_id: ID группы
@@ -90,71 +97,78 @@ async def increment_message_count(
         today = _get_date_only(now)
 
         # ─────────────────────────────────────────────────────────
-        # Шаг 1: Ищем существующую запись
+        # UPSERT: INSERT ... ON CONFLICT DO UPDATE
         # ─────────────────────────────────────────────────────────
-        query = select(UserStatistics).where(
-            UserStatistics.chat_id == chat_id,
-            UserStatistics.user_id == user_id
+        # Это атомарная операция которая:
+        # 1. Пытается INSERT новую запись
+        # 2. При конфликте (запись уже есть) - делает UPDATE
+        # Решает race condition при параллельных сообщениях от одного юзера
+
+        # Формируем INSERT statement с PostgreSQL-specific синтаксисом
+        stmt = insert(UserStatistics).values(
+            # Значения для новой записи (если её нет)
+            chat_id=chat_id,
+            user_id=user_id,
+            message_count=1,           # Первое сообщение
+            last_message_at=now,       # Время сообщения
+            active_days=1,             # Первый день активности
+            last_active_date=today,    # Сегодня
+            created_at=now,
+            updated_at=now
         )
 
-        # Выполняем запрос
-        result = await session.execute(query)
-        stats = result.scalar_one_or_none()
+        # Определяем что делать при конфликте (запись уже существует)
+        # Constraint 'uq_user_statistics_chat_user' = уникальность chat_id + user_id
+        stmt = stmt.on_conflict_do_update(
+            # Имя constraint из модели UserStatistics
+            constraint='uq_user_statistics_chat_user',
+            # Что обновлять при конфликте:
+            set_={
+                # message_count += 1 (атомарный инкремент)
+                'message_count': UserStatistics.message_count + 1,
+
+                # Обновляем время последнего сообщения
+                'last_message_at': now,
+
+                # active_days: увеличиваем только если это новый день
+                # CASE WHEN last_active_date IS NULL OR DATE(last_active_date) != DATE(today)
+                #      THEN active_days + 1
+                #      ELSE active_days
+                # END
+                'active_days': case(
+                    # Условие: last_active_date NULL или другой день
+                    (
+                        # func.coalesce заменяет NULL на '1970-01-01' для сравнения
+                        # func.date() извлекает только дату (без времени)
+                        func.coalesce(
+                            func.date(UserStatistics.last_active_date),
+                            func.date('1970-01-01')
+                        ) != func.date(today),
+                        # Если условие True - увеличиваем счётчик дней
+                        UserStatistics.active_days + 1
+                    ),
+                    # Иначе - оставляем как есть (тот же день)
+                    else_=UserStatistics.active_days
+                ),
+
+                # Обновляем дату последней активности
+                'last_active_date': today,
+
+                # Обновляем время модификации
+                'updated_at': now
+            }
+        )
+
+        # Выполняем upsert запрос
+        await session.execute(stmt)
+
+        # Логируем успешную операцию
+        logger.debug(
+            f"[USER_STATS] Upsert выполнен: chat={chat_id}, user={user_id}"
+        )
 
         # ─────────────────────────────────────────────────────────
-        # Шаг 2: Создаём или обновляем запись
-        # ─────────────────────────────────────────────────────────
-        if stats is None:
-            # Записи нет - создаём новую
-            stats = UserStatistics(
-                chat_id=chat_id,
-                user_id=user_id,
-                message_count=1,               # Первое сообщение
-                last_message_at=now,           # Время сообщения
-                active_days=1,                 # Первый день
-                last_active_date=today,        # Сегодня
-                created_at=now,
-                updated_at=now
-            )
-
-            # Добавляем в сессию
-            session.add(stats)
-
-            # Логируем создание новой записи
-            logger.debug(
-                f"[USER_STATS] Создана запись: chat={chat_id}, user={user_id}"
-            )
-
-        else:
-            # Запись есть - обновляем счётчики
-            # Увеличиваем счётчик сообщений
-            stats.message_count += 1
-
-            # Обновляем время последнего сообщения
-            stats.last_message_at = now
-
-            # Проверяем нужно ли увеличить счётчик дней
-            # Если последний активный день != сегодня → новый день активности
-            if stats.last_active_date is None:
-                # Первый раз фиксируем дату
-                stats.active_days = 1
-                stats.last_active_date = today
-
-            elif _get_date_only(stats.last_active_date) != today:
-                # Новый день активности
-                stats.active_days += 1
-                stats.last_active_date = today
-
-            # updated_at обновится автоматически (onupdate в модели)
-
-            # Логируем обновление
-            logger.debug(
-                f"[USER_STATS] Обновлена запись: chat={chat_id}, user={user_id}, "
-                f"messages={stats.message_count}, days={stats.active_days}"
-            )
-
-        # ─────────────────────────────────────────────────────────
-        # Шаг 3: Сохраняем в БД
+        # Сохраняем в БД
         # ─────────────────────────────────────────────────────────
         # Коммит будет выполнен middleware после завершения хендлера
         # Здесь только flush для синхронизации
