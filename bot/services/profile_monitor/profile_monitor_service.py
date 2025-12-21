@@ -621,7 +621,7 @@ async def check_auto_mute_criteria(
     Returns:
         Tuple[bool, str]: (нужен_мут, причина)
     """
-    # Получаем порог времени из настроек (по умолчанию 20 минут)
+    # Получаем порог времени из настроек (по умолчанию 30 минут)
     window_minutes = settings.first_message_window_minutes
 
     # Получаем порог свежести фото из настроек (по умолчанию 1 день)

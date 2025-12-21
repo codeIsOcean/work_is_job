@@ -27,6 +27,12 @@ from bot.services.captcha import (
     check_and_restore_restriction,
 )
 from bot.services.event_classifier import JoinEventType
+from bot.services.profile_monitor.profile_monitor_service import (
+    get_profile_monitor_settings,
+)
+from bot.services.profile_monitor.content_checker import (
+    check_name_and_bio_content,
+)
 
 
 # Логгер для отслеживания работы координатора
@@ -95,6 +101,38 @@ async def handle_join_request(
             f"user_id={user.id}, reason={existing_restriction.reason}. "
             f"Капча будет отправлена, мут восстановится после входа."
         )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # ШАГ 1.5: КРИТЕРИЙ 6 - Проверка имени/bio на запрещённый контент
+    # Проверяем ДО капчи, чтобы сразу отклонить спаммеров
+    # ═══════════════════════════════════════════════════════════════════════
+    pm_settings = await get_profile_monitor_settings(session, chat.id)
+    if pm_settings and pm_settings.enabled and pm_settings.auto_mute_forbidden_content:
+        # Формируем полное имя
+        full_name = user.full_name or user.first_name or ""
+        # Bio доступен в ChatJoinRequest!
+        bio = getattr(event, "bio", None)
+
+        content_result = await check_name_and_bio_content(
+            session=session,
+            chat_id=chat.id,
+            user_id=user.id,
+            full_name=full_name,
+            bio=bio,
+        )
+
+        if content_result.should_act:
+            # Запрещённый контент найден - отклоняем заявку
+            logger.warning(
+                f"🚫 [COORDINATOR] CRITERION_6 - Отклонение join_request: "
+                f"user_id={user.id} chat_id={chat.id} "
+                f"reason={content_result.reason}"
+            )
+            try:
+                await bot.decline_chat_join_request(chat.id, user.id)
+            except Exception as e:
+                logger.error(f"❌ Ошибка отклонения join_request: {e}")
+            return  # Прерываем обработку
 
     # ═══════════════════════════════════════════════════════════════════════
     # ШАГ 2: Определяем нужна ли капча и какой режим

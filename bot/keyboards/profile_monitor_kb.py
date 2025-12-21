@@ -263,6 +263,7 @@ def get_mute_settings_kb(
     delete_messages: bool,
     account_age_days: int,
     photo_freshness_threshold_days: int = 1,
+    auto_mute_forbidden_content: bool = False,
 ) -> InlineKeyboardMarkup:
     """
     Клавиатура настроек автомута.
@@ -274,6 +275,7 @@ def get_mute_settings_kb(
         delete_messages: Удалять сообщения
         account_age_days: Порог возраста аккаунта
         photo_freshness_threshold_days: Порог свежести фото для критериев 4,5
+        auto_mute_forbidden_content: Автомут за запрещённый контент в имени/bio
 
     Returns:
         InlineKeyboardMarkup
@@ -282,6 +284,7 @@ def get_mute_settings_kb(
     young_icon = "✅" if auto_mute_young else "❌"
     name_icon = "✅" if auto_mute_name_change else "❌"
     delete_icon = "✅" if delete_messages else "❌"
+    content_icon = "✅" if auto_mute_forbidden_content else "❌"
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -318,6 +321,13 @@ def get_mute_settings_kb(
                 InlineKeyboardButton(
                     text=f"{delete_icon} Удалять сообщения спаммеров",
                     callback_data=f"pm_delete_msgs:{'off' if delete_messages else 'on'}:{chat_id}"
+                ),
+            ],
+            # Критерий 6: запрещённый контент в имени/bio
+            [
+                InlineKeyboardButton(
+                    text=f"{content_icon} Мут: запрещённый контент в имени/bio",
+                    callback_data=f"pm_mute_content:{'off' if auto_mute_forbidden_content else 'on'}:{chat_id}"
                 ),
             ],
             # Кнопка назад

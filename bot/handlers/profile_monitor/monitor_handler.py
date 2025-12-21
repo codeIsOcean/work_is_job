@@ -37,6 +37,10 @@ from bot.services.profile_monitor.profile_monitor_service import (
     has_recent_photo_change,
     get_user_change_history,
 )
+from bot.services.profile_monitor.content_checker import (
+    check_name_and_bio_content,
+    apply_content_filter_action,
+)
 from bot.services.group_journal_service import send_journal_event
 from bot.keyboards.profile_monitor_kb import (
     get_journal_action_kb,
@@ -151,6 +155,54 @@ async def process_message_profile_check(
     current_first_name = user.first_name
     current_last_name = user.last_name
     current_username = user.username
+    current_full_name = " ".join(filter(None, [current_first_name, current_last_name]))
+
+    # ─────────────────────────────────────────────────────────
+    # ШАГ 4.1: КРИТЕРИЙ 6 - Запрещённый контент в имени/bio
+    # Проверяем СРАЗУ, не ждём сообщения!
+    # ─────────────────────────────────────────────────────────
+    if settings.auto_mute_forbidden_content:
+        # Получаем bio через Bot API (если возможно)
+        bio = None
+        try:
+            user_chat = await bot.get_chat(user_id)
+            bio = getattr(user_chat, "bio", None)
+        except Exception as e:
+            logger.debug(f"[PROFILE_MONITOR] Cannot get bio: user={user_id} error={e}")
+
+        # Проверяем имя и bio на запрещённый контент
+        content_result = await check_name_and_bio_content(
+            session=session,
+            chat_id=chat_id,
+            user_id=user_id,
+            full_name=current_full_name,
+            bio=bio,
+        )
+
+        if content_result.should_act:
+            logger.warning(
+                f"[PROFILE_MONITOR] CRITERION_6 triggered: user={user_id} chat={chat_id} "
+                f"reason={content_result.reason}"
+            )
+            # Применяем действие из ContentFilter
+            action_applied = await apply_content_filter_action(
+                bot=bot,
+                chat_id=chat_id,
+                user_id=user_id,
+                action=content_result.action,
+                duration=content_result.action_duration,
+                reason=content_result.reason,
+            )
+            if action_applied:
+                # Удаляем сообщения если настроено
+                if settings.auto_mute_delete_messages:
+                    await delete_user_messages(bot, chat_id, user_id)
+
+                return {
+                    "action_taken": f"criterion_6_{content_result.action}",
+                    "reason": content_result.reason,
+                    "changes": None,
+                }
 
     # ─────────────────────────────────────────────────────────
     # ШАГ 5: Проверяем изменения профиля
@@ -253,6 +305,48 @@ async def _handle_first_message(
         snapshot=snapshot,
         first_message_at=now,
     )
+
+    # ─────────────────────────────────────────────────────────
+    # КРИТЕРИЙ 6: Запрещённый контент в имени/bio (ПРОВЕРЯЕМ ПЕРВЫМ!)
+    # ─────────────────────────────────────────────────────────
+    if settings.auto_mute_forbidden_content:
+        full_name = " ".join(filter(None, [user.first_name, user.last_name]))
+        bio = None
+        try:
+            user_chat = await bot.get_chat(user_id)
+            bio = getattr(user_chat, "bio", None)
+        except Exception:
+            pass
+
+        content_result = await check_name_and_bio_content(
+            session=session,
+            chat_id=chat_id,
+            user_id=user_id,
+            full_name=full_name,
+            bio=bio,
+        )
+
+        if content_result.should_act:
+            logger.warning(
+                f"[PROFILE_MONITOR] CRITERION_6 (first message): user={user_id} "
+                f"chat={chat_id} reason={content_result.reason}"
+            )
+            action_applied = await apply_content_filter_action(
+                bot=bot,
+                chat_id=chat_id,
+                user_id=user_id,
+                action=content_result.action,
+                duration=content_result.action_duration,
+                reason=content_result.reason,
+            )
+            if action_applied:
+                if settings.auto_mute_delete_messages:
+                    await delete_user_messages(bot, chat_id, user_id)
+                return {
+                    "action_taken": f"criterion_6_{content_result.action}",
+                    "reason": content_result.reason,
+                    "changes": None,
+                }
 
     # ─────────────────────────────────────────────────────────
     # ПРОВЕРКА КРИТЕРИЯ 1: Нет фото + молодой аккаунт

@@ -428,7 +428,8 @@ async def callback_mute_settings(
         f"<b>Критерий 4:</b> Свежее фото (&lt;{settings.photo_freshness_threshold_days} дн) + "
         f"смена имени + сообщение ≤{settings.first_message_window_minutes} мин\n"
         f"<b>Критерий 5:</b> Свежее фото (&lt;{settings.photo_freshness_threshold_days} дн) + "
-        f"сообщение ≤{settings.first_message_window_minutes} мин"
+        f"сообщение ≤{settings.first_message_window_minutes} мин\n"
+        f"<b>Критерий 6:</b> Запрещённый контент в имени/bio (мут сразу)"
     )
 
     await callback.message.edit_text(
@@ -441,6 +442,8 @@ async def callback_mute_settings(
             account_age_days=settings.auto_mute_account_age_days,
             # Передаём порог свежести фото для критериев 4 и 5
             photo_freshness_threshold_days=settings.photo_freshness_threshold_days,
+            # Критерий 6: запрещённый контент в имени/bio
+            auto_mute_forbidden_content=settings.auto_mute_forbidden_content,
         ),
         parse_mode="HTML",
     )
@@ -481,6 +484,7 @@ async def callback_toggle_mute_young(
             delete_messages=settings.auto_mute_delete_messages,
             account_age_days=settings.auto_mute_account_age_days,
             photo_freshness_threshold_days=settings.photo_freshness_threshold_days,
+            auto_mute_forbidden_content=settings.auto_mute_forbidden_content,
         ),
     )
     await callback.answer(f"Автомут молодых аккаунтов {'включён' if enabled else 'выключен'}")
@@ -520,6 +524,7 @@ async def callback_toggle_mute_name_change(
             delete_messages=settings.auto_mute_delete_messages,
             account_age_days=settings.auto_mute_account_age_days,
             photo_freshness_threshold_days=settings.photo_freshness_threshold_days,
+            auto_mute_forbidden_content=settings.auto_mute_forbidden_content,
         ),
     )
     await callback.answer(f"Автомут при смене имени {'включён' if enabled else 'выключен'}")
@@ -559,6 +564,7 @@ async def callback_toggle_delete_messages(
             delete_messages=settings.auto_mute_delete_messages,
             account_age_days=settings.auto_mute_account_age_days,
             photo_freshness_threshold_days=settings.photo_freshness_threshold_days,
+            auto_mute_forbidden_content=settings.auto_mute_forbidden_content,
         ),
     )
     await callback.answer(f"Удаление сообщений {'включено' if enabled else 'выключено'}")
@@ -747,3 +753,55 @@ async def callback_set_photo_freshness_threshold(
     )
     # Показываем уведомление админу
     await callback.answer(f"Порог свежести фото: {days} дней")
+
+
+# ============================================================
+# CALLBACK: ПЕРЕКЛЮЧЕНИЕ АВТОМУТА ЗА ЗАПРЕЩЁННЫЙ КОНТЕНТ
+# ============================================================
+@router.callback_query(F.data.startswith("pm_mute_content:"))
+async def callback_toggle_mute_forbidden_content(
+    callback: CallbackQuery,
+    session: AsyncSession,
+) -> None:
+    """
+    Переключает автомут за запрещённый контент в имени/bio.
+
+    Критерий 6: Проверяет имя и bio на запрещённые слова через WordFilter.
+    Использует категории: harmful (наркотики), obfuscated (l33tspeak).
+    Мутит СРАЗУ при обнаружении, не ждёт сообщения.
+
+    Формат callback_data: pm_mute_content:on|off:chat_id
+    """
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer("Ошибка")
+        return
+
+    _, action, chat_id_str = parts
+    chat_id = int(chat_id_str)
+    enabled = action == "on"
+
+    settings = await create_or_update_settings(
+        session, chat_id, auto_mute_forbidden_content=enabled
+    )
+
+    logger.info(
+        f"[PROFILE_MONITOR] Criterion 6 (forbidden content) "
+        f"{'enabled' if enabled else 'disabled'}: "
+        f"chat={chat_id} by admin={callback.from_user.id}"
+    )
+
+    await callback.message.edit_reply_markup(
+        reply_markup=get_mute_settings_kb(
+            chat_id=chat_id,
+            auto_mute_young=settings.auto_mute_no_photo_young,
+            auto_mute_name_change=settings.auto_mute_name_change_fast_msg,
+            delete_messages=settings.auto_mute_delete_messages,
+            account_age_days=settings.auto_mute_account_age_days,
+            photo_freshness_threshold_days=settings.photo_freshness_threshold_days,
+            auto_mute_forbidden_content=settings.auto_mute_forbidden_content,
+        ),
+    )
+    await callback.answer(
+        f"Мут за запрещённый контент {'включён' if enabled else 'выключен'}"
+    )
