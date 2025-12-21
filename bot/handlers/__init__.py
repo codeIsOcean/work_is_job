@@ -33,6 +33,8 @@ from .profile_monitor import router as profile_monitor_router
 from .group_message_coordinator import group_message_coordinator_router
 # Импортируем роутер команды /stat (статистика пользователя)
 from .user_stats_handler import router as user_stats_router
+# Импортируем роутер экспорта/импорта настроек
+from .settings_export import settings_export_router
 
 # Объединяем все роутеры в один
 from aiogram import Router, F
@@ -65,6 +67,8 @@ handlers_router.include_router(profile_monitor_router)        # Profile monitor 
 # Команда /stat - статистика пользователя в группе
 # ВАЖНО: должен быть ДО group_message_coordinator, иначе команда будет удалена
 handlers_router.include_router(user_stats_router)
+# Экспорт/импорт настроек групп (работает в ЛС бота)
+handlers_router.include_router(settings_export_router)
 # ============================================================
 # GROUP MESSAGE COORDINATOR - единый хендлер для сообщений в группах
 # ============================================================
@@ -100,6 +104,8 @@ def create_fresh_handlers_router():
     fresh_router.include_router(profile_monitor_router)
     # Команда /stat - статистика пользователя (ДО coordinator!)
     fresh_router.include_router(user_stats_router)
+    # Экспорт/импорт настроек групп (работает в ЛС бота)
+    fresh_router.include_router(settings_export_router)
     # Group Message Coordinator - единый хендлер для групповых сообщений
     fresh_router.include_router(group_message_coordinator_router)
     return fresh_router

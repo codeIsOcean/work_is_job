@@ -714,6 +714,14 @@ async def create_group_management_keyboard(session: AsyncSession, chat_id: int):
             callback_data="broadcast_settings"
         )],
         [InlineKeyboardButton(
+            text="📤 Экспорт настроек",
+            callback_data=f"export_select:{chat_id}"
+        ),
+        InlineKeyboardButton(
+            text="📥 Импорт настроек",
+            callback_data=f"import_select:{chat_id}"
+        )],
+        [InlineKeyboardButton(
             text="🔙 Назад к списку групп",
             callback_data="back_to_groups"
         )]
