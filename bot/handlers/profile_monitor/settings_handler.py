@@ -25,6 +25,8 @@ from bot.keyboards.profile_monitor_kb import (
     get_log_settings_kb,
     get_mute_settings_kb,
     get_age_threshold_kb,
+    # Клавиатура для выбора порога свежести фото (критерии 4,5)
+    get_photo_freshness_threshold_kb,
 )
 
 # Логгер модуля
@@ -412,15 +414,20 @@ async def callback_mute_settings(
     if not settings:
         settings = await create_or_update_settings(session, chat_id)
 
+    # Формируем текст с описанием всех критериев
     text = (
         f"⚡ <b>Настройки автомута</b>\n\n"
         f"Автоматический мут пользователей по критериям:\n\n"
-        f"<b>Критерий 1:</b> Смена имени + смена фото + сообщение в течение "
+        f"<b>Критерий 1:</b> Смена имени + смена фото + сообщение ≤"
         f"{settings.first_message_window_minutes} мин\n"
-        f"<b>Критерий 2:</b> Смена имени + сообщение в течение "
+        f"<b>Критерий 2:</b> Смена имени + сообщение ≤"
         f"{settings.first_message_window_minutes} мин\n"
-        f"<b>Критерий 3:</b> Добавление фото + сообщение в течение "
-        f"{settings.first_message_window_minutes} мин"
+        f"<b>Критерий 3:</b> Добавление фото + сообщение ≤"
+        f"{settings.first_message_window_minutes} мин\n"
+        f"<b>Критерий 4:</b> Свежее фото (<{settings.photo_freshness_threshold_days} дн) + "
+        f"смена имени + сообщение ≤{settings.first_message_window_minutes} мин\n"
+        f"<b>Критерий 5:</b> Свежее фото (<{settings.photo_freshness_threshold_days} дн) + "
+        f"сообщение ≤{settings.first_message_window_minutes} мин"
     )
 
     await callback.message.edit_text(
@@ -431,6 +438,8 @@ async def callback_mute_settings(
             auto_mute_name_change=settings.auto_mute_name_change_fast_msg,
             delete_messages=settings.auto_mute_delete_messages,
             account_age_days=settings.auto_mute_account_age_days,
+            # Передаём порог свежести фото для критериев 4 и 5
+            photo_freshness_threshold_days=settings.photo_freshness_threshold_days,
         ),
         parse_mode="HTML",
     )
@@ -470,6 +479,7 @@ async def callback_toggle_mute_young(
             auto_mute_name_change=settings.auto_mute_name_change_fast_msg,
             delete_messages=settings.auto_mute_delete_messages,
             account_age_days=settings.auto_mute_account_age_days,
+            photo_freshness_threshold_days=settings.photo_freshness_threshold_days,
         ),
     )
     await callback.answer(f"Автомут молодых аккаунтов {'включён' if enabled else 'выключен'}")
@@ -508,6 +518,7 @@ async def callback_toggle_mute_name_change(
             auto_mute_name_change=settings.auto_mute_name_change_fast_msg,
             delete_messages=settings.auto_mute_delete_messages,
             account_age_days=settings.auto_mute_account_age_days,
+            photo_freshness_threshold_days=settings.photo_freshness_threshold_days,
         ),
     )
     await callback.answer(f"Автомут при смене имени {'включён' if enabled else 'выключен'}")
@@ -546,6 +557,7 @@ async def callback_toggle_delete_messages(
             auto_mute_name_change=settings.auto_mute_name_change_fast_msg,
             delete_messages=settings.auto_mute_delete_messages,
             account_age_days=settings.auto_mute_account_age_days,
+            photo_freshness_threshold_days=settings.photo_freshness_threshold_days,
         ),
     )
     await callback.answer(f"Удаление сообщений {'включено' if enabled else 'выключено'}")
@@ -632,3 +644,105 @@ async def callback_set_age_threshold(
         ),
     )
     await callback.answer(f"Порог установлен: {days} дней")
+
+
+# ============================================================
+# CALLBACK: МЕНЮ ВЫБОРА ПОРОГА СВЕЖЕСТИ ФОТО
+# ============================================================
+@router.callback_query(F.data.startswith("pm_photo_fresh_threshold:"))
+async def callback_photo_freshness_threshold_menu(
+    callback: CallbackQuery,
+    session: AsyncSession,
+) -> None:
+    """
+    Показывает меню выбора порога свежести фото.
+
+    Используется для критериев автомута 4 и 5:
+    - Критерий 4: Свежее фото + смена имени + сообщение ≤30 мин
+    - Критерий 5: Свежее фото + сообщение ≤30 мин
+
+    Формат callback_data: pm_photo_fresh_threshold:chat_id
+    """
+    # Разбираем callback_data на части
+    parts = callback.data.split(":")
+    # Проверяем корректность формата (должно быть 2 части)
+    if len(parts) != 2:
+        await callback.answer("Ошибка: неверный формат данных")
+        return
+
+    # Извлекаем chat_id
+    chat_id = int(parts[1])
+
+    # Получаем настройки из БД
+    settings = await get_profile_monitor_settings(session, chat_id)
+    # Если настроек нет - создаём с дефолтными значениями
+    if not settings:
+        settings = await create_or_update_settings(session, chat_id)
+
+    # Формируем текст с описанием настройки
+    text = (
+        f"📸 <b>Порог свежести фото</b>\n\n"
+        f"Текущий порог: <b>{settings.photo_freshness_threshold_days} "
+        f"{'день' if settings.photo_freshness_threshold_days == 1 else 'дней'}</b>\n\n"
+        f"Фото считается «свежим» если его возраст меньше порога.\n\n"
+        f"<b>Критерий 4:</b> Свежее фото + смена имени → мут\n"
+        f"<b>Критерий 5:</b> Свежее фото (стало свежее чем при входе) → мут"
+    )
+
+    # Показываем клавиатуру выбора порога
+    await callback.message.edit_text(
+        text=text,
+        reply_markup=get_photo_freshness_threshold_kb(
+            chat_id=chat_id,
+            current_days=settings.photo_freshness_threshold_days,
+        ),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+# ============================================================
+# CALLBACK: УСТАНОВКА ПОРОГА СВЕЖЕСТИ ФОТО
+# ============================================================
+@router.callback_query(F.data.startswith("pm_set_photo_fresh:"))
+async def callback_set_photo_freshness_threshold(
+    callback: CallbackQuery,
+    session: AsyncSession,
+) -> None:
+    """
+    Устанавливает порог свежести фото.
+
+    Формат callback_data: pm_set_photo_fresh:days:chat_id
+    """
+    # Разбираем callback_data на части
+    parts = callback.data.split(":")
+    # Проверяем корректность формата (должно быть 3 части)
+    if len(parts) != 3:
+        await callback.answer("Ошибка: неверный формат данных")
+        return
+
+    # Извлекаем количество дней и chat_id
+    _, days_str, chat_id_str = parts
+    days = int(days_str)
+    chat_id = int(chat_id_str)
+
+    # Обновляем настройку в БД
+    settings = await create_or_update_settings(
+        session, chat_id, photo_freshness_threshold_days=days
+    )
+
+    # Логируем изменение настройки
+    logger.info(
+        f"[PROFILE_MONITOR] Photo freshness threshold set to {days} days: "
+        f"chat={chat_id} by admin={callback.from_user.id}"
+    )
+
+    # Обновляем клавиатуру с новым состоянием
+    await callback.message.edit_reply_markup(
+        reply_markup=get_photo_freshness_threshold_kb(
+            chat_id=chat_id,
+            current_days=settings.photo_freshness_threshold_days,
+        ),
+    )
+    # Показываем уведомление админу
+    await callback.answer(f"Порог свежести фото: {days} дней")

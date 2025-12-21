@@ -262,6 +262,7 @@ def get_mute_settings_kb(
     auto_mute_name_change: bool,
     delete_messages: bool,
     account_age_days: int,
+    photo_freshness_threshold_days: int = 1,
 ) -> InlineKeyboardMarkup:
     """
     Клавиатура настроек автомута.
@@ -272,6 +273,7 @@ def get_mute_settings_kb(
         auto_mute_name_change: Автомут при смене имени
         delete_messages: Удалять сообщения
         account_age_days: Порог возраста аккаунта
+        photo_freshness_threshold_days: Порог свежести фото для критериев 4,5
 
     Returns:
         InlineKeyboardMarkup
@@ -283,30 +285,42 @@ def get_mute_settings_kb(
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            # Критерий: нет фото + молодой аккаунт
             [
                 InlineKeyboardButton(
                     text=f"{young_icon} Мут: нет фото + молодой аккаунт",
                     callback_data=f"pm_mute_young:{'off' if auto_mute_young else 'on'}:{chat_id}"
                 ),
             ],
+            # Порог возраста аккаунта
             [
                 InlineKeyboardButton(
-                    text=f"📅 Порог: {account_age_days} дней",
+                    text=f"📅 Порог аккаунта: {account_age_days} дней",
                     callback_data=f"pm_age_threshold:{chat_id}"
                 ),
             ],
+            # Порог свежести фото (для критериев 4,5)
+            [
+                InlineKeyboardButton(
+                    text=f"📸 Порог фото: {photo_freshness_threshold_days} дней",
+                    callback_data=f"pm_photo_fresh_threshold:{chat_id}"
+                ),
+            ],
+            # Критерий: смена имени + быстрые сообщения
             [
                 InlineKeyboardButton(
                     text=f"{name_icon} Мут: смена имени + быстрые сообщения",
                     callback_data=f"pm_mute_name:{'off' if auto_mute_name_change else 'on'}:{chat_id}"
                 ),
             ],
+            # Удаление сообщений
             [
                 InlineKeyboardButton(
                     text=f"{delete_icon} Удалять сообщения спаммеров",
                     callback_data=f"pm_delete_msgs:{'off' if delete_messages else 'on'}:{chat_id}"
                 ),
             ],
+            # Кнопка назад
             [
                 InlineKeyboardButton(
                     text="◀️ Назад",
@@ -349,6 +363,59 @@ def get_age_threshold_kb(
         ])
 
     # Кнопка назад
+    buttons.append([
+        InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"pm_settings_mute:{chat_id}"
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+# ============================================================
+# КЛАВИАТУРА: ВЫБОР ПОРОГА СВЕЖЕСТИ ФОТО
+# ============================================================
+def get_photo_freshness_threshold_kb(
+    chat_id: int,
+    current_days: int,
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура выбора порога свежести фото.
+
+    Используется для критериев автомута 4 и 5:
+    - Критерий 4: Свежее фото + смена имени + сообщение ≤30 мин
+    - Критерий 5: Свежее фото + сообщение ≤30 мин
+
+    Фото считается "свежим" если его возраст меньше выбранного порога.
+
+    Args:
+        chat_id: ID группы
+        current_days: Текущий порог в днях
+
+    Returns:
+        InlineKeyboardMarkup с вариантами порогов
+    """
+    # Варианты порогов свежести фото (в днях)
+    options = [1, 3, 7, 14]
+
+    buttons = []
+    for days in options:
+        # Отмечаем текущий выбор галочкой
+        icon = "✅" if days == current_days else ""
+        # Формируем текст кнопки с правильным склонением
+        if days == 1:
+            day_text = "день"
+        else:
+            day_text = "дней"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{icon} {days} {day_text}",
+                callback_data=f"pm_set_photo_fresh:{days}:{chat_id}"
+            )
+        ])
+
+    # Кнопка назад к настройкам автомута
     buttons.append([
         InlineKeyboardButton(
             text="◀️ Назад",

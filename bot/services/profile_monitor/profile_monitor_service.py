@@ -192,6 +192,7 @@ async def create_profile_snapshot(
     photo_id: Optional[str] = None,
     account_age_days: Optional[int] = None,
     is_premium: bool = False,
+    photo_age_days: Optional[int] = None,
 ) -> ProfileSnapshot:
     """
     Создаёт снимок профиля пользователя при входе в группу.
@@ -207,6 +208,7 @@ async def create_profile_snapshot(
         photo_id: ID фото профиля
         account_age_days: Возраст аккаунта в днях
         is_premium: Premium аккаунт
+        photo_age_days: Возраст самого свежего фото в днях (для критериев 4,5)
 
     Returns:
         ProfileSnapshot: Созданный снимок
@@ -227,6 +229,8 @@ async def create_profile_snapshot(
         existing.photo_id = photo_id
         existing.account_age_days = account_age_days
         existing.is_premium = is_premium
+        # Возраст самого свежего фото в днях (для критериев 4,5)
+        existing.photo_age_days = photo_age_days
         # ВАЖНО: Обновляем joined_at при повторном входе (rejoin)
         # Это нужно для правильного расчёта minutes_since_join
         existing.joined_at = _utcnow_naive()
@@ -234,7 +238,7 @@ async def create_profile_snapshot(
         await session.commit()
         logger.info(
             f"[PROFILE_MONITOR] Snapshot updated: chat={chat_id} user={user_id} "
-            f"name='{full_name}' has_photo={has_photo}"
+            f"name='{full_name}' has_photo={has_photo} photo_age_days={photo_age_days}"
         )
         return existing
 
@@ -250,6 +254,8 @@ async def create_profile_snapshot(
         photo_id=photo_id,
         account_age_days=account_age_days,
         is_premium=is_premium,
+        # Возраст самого свежего фото в днях (для критериев 4,5)
+        photo_age_days=photo_age_days,
         joined_at=_utcnow_naive(),
         updated_at=_utcnow_naive(),
     )
@@ -258,7 +264,8 @@ async def create_profile_snapshot(
 
     logger.info(
         f"[PROFILE_MONITOR] Snapshot created: chat={chat_id} user={user_id} "
-        f"name='{full_name}' has_photo={has_photo} age_days={account_age_days}"
+        f"name='{full_name}' has_photo={has_photo} age_days={account_age_days} "
+        f"photo_age_days={photo_age_days}"
     )
     return snapshot
 
@@ -318,6 +325,8 @@ async def create_snapshot_on_join(
         has_photo = profile_data.get("has_photo", False)
         # Извлекаем возраст аккаунта в днях
         account_age_days = profile_data.get("account_age_days")
+        # Извлекаем возраст самого свежего фото в днях (для критериев 4,5)
+        photo_age_days = profile_data.get("photo_age_days")
 
         # Создаём или обновляем снапшот
         # Функция create_profile_snapshot сама проверяет существующий снапшот
@@ -332,13 +341,15 @@ async def create_snapshot_on_join(
             has_photo=has_photo,
             account_age_days=account_age_days,
             is_premium=is_premium,
+            # Передаём возраст фото для критериев 4,5
+            photo_age_days=photo_age_days,
         )
 
         # Логируем успешное создание снапшота при входе
         logger.info(
             f"[PROFILE_MONITOR] Snapshot on join: chat={chat_id} user={user_id} "
             f"name='{first_name} {last_name}' has_photo={has_photo} "
-            f"age_days={account_age_days}"
+            f"age_days={account_age_days} photo_age_days={photo_age_days}"
         )
 
         return snapshot
@@ -583,13 +594,20 @@ async def check_auto_mute_criteria(
     has_recent_name_change: bool = False,
     has_recent_photo_change: bool = False,
     minutes_since_change: float = 0,
+    current_photo_age_days: Optional[int] = None,
 ) -> Tuple[bool, str]:
     """
     Проверяет критерии автоматического мута.
 
-    КРИТЕРИЙ 1: Смена имени + смена фото + сообщение в течение 20 мин → МУТ
-    КРИТЕРИЙ 2: Смена имени + сообщение в течение 20 мин → МУТ
-    КРИТЕРИЙ 3: Добавление фото + сообщение в течение 20 мин → МУТ
+    КРИТЕРИЙ 1: Смена имени + смена фото + сообщение в течение 30 мин → МУТ
+    КРИТЕРИЙ 2: Смена имени + сообщение в течение 30 мин → МУТ
+    КРИТЕРИЙ 3: Добавление фото + сообщение в течение 30 мин → МУТ
+    КРИТЕРИЙ 4: Свежее фото (<N дней) + смена имени + сообщение ≤30 мин → МУТ
+    КРИТЕРИЙ 5: Свежее фото (<N дней) + сообщение ≤30 мин → МУТ
+
+    ПРИОРИТЕТ ПРОВЕРКИ:
+    - Есть фото → проверяем свежесть фото (критерии 4, 5)
+    - Нет фото → проверяем возраст аккаунта (критерии 1, 2, 3)
 
     Args:
         session: AsyncSession
@@ -598,6 +616,7 @@ async def check_auto_mute_criteria(
         has_recent_name_change: Была ли смена имени недавно
         has_recent_photo_change: Была ли смена фото недавно
         minutes_since_change: Минут с момента последнего изменения профиля
+        current_photo_age_days: Возраст текущего самого свежего фото в днях
 
     Returns:
         Tuple[bool, str]: (нужен_мут, причина)
@@ -605,11 +624,15 @@ async def check_auto_mute_criteria(
     # Получаем порог времени из настроек (по умолчанию 20 минут)
     window_minutes = settings.first_message_window_minutes
 
+    # Получаем порог свежести фото из настроек (по умолчанию 1 день)
+    photo_freshness_threshold = settings.photo_freshness_threshold_days
+
     # Логируем входные данные для отладки
     logger.info(
         f"[PROFILE_MONITOR] Auto-mute check: user={snapshot.user_id} "
         f"name_change={has_recent_name_change} photo_change={has_recent_photo_change} "
-        f"minutes_since={minutes_since_change:.1f} window={window_minutes}"
+        f"minutes_since={minutes_since_change:.1f} window={window_minutes} "
+        f"current_photo_age={current_photo_age_days} photo_freshness_threshold={photo_freshness_threshold}"
     )
 
     # ─────────────────────────────────────────────────────────
@@ -683,6 +706,77 @@ async def check_auto_mute_criteria(
                 )
                 # Возвращаем True и причину
                 return True, reason
+
+    # ─────────────────────────────────────────────────────────
+    # КРИТЕРИЙ 4: Свежее фото + смена имени + сообщение в течение N минут
+    # ─────────────────────────────────────────────────────────
+    # Этот критерий срабатывает когда:
+    # - У пользователя есть фото (current_photo_age_days не None)
+    # - Фото "свежее" (моложе photo_freshness_threshold дней)
+    # - Была смена имени недавно
+    # - Сообщение в течение заданного окна времени
+    # Проверяем включён ли критерий в настройках (используем тот же флаг)
+    if settings.auto_mute_no_photo_young:
+        # Проверяем: есть фото И оно "свежее"
+        if current_photo_age_days is not None:
+            # Проверяем: фото моложе порога свежести
+            if current_photo_age_days < photo_freshness_threshold:
+                # Проверяем: была смена имени недавно
+                if has_recent_name_change:
+                    # Проверяем: сообщение в течение заданного окна времени
+                    if minutes_since_change <= window_minutes:
+                        # Формируем причину для лога и уведомления
+                        reason = (
+                            f"Автомут: свежее фото ({current_photo_age_days} дн) + "
+                            f"смена имени + сообщение через {int(minutes_since_change)} мин "
+                            f"(порог фото: {photo_freshness_threshold} дн, окно: {window_minutes} мин)"
+                        )
+                        # Логируем срабатывание критерия
+                        logger.warning(
+                            f"[PROFILE_MONITOR] Auto-mute criteria #4 TRIGGERED: "
+                            f"user={snapshot.user_id} chat={snapshot.chat_id} "
+                            f"photo_age={current_photo_age_days} threshold={photo_freshness_threshold} "
+                            f"minutes={int(minutes_since_change)}"
+                        )
+                        # Возвращаем True и причину
+                        return True, reason
+
+    # ─────────────────────────────────────────────────────────
+    # КРИТЕРИЙ 5: Свежее фото + сообщение в течение N минут
+    # ─────────────────────────────────────────────────────────
+    # Этот критерий срабатывает когда:
+    # - У пользователя есть фото (current_photo_age_days не None)
+    # - Фото "свежее" (моложе photo_freshness_threshold дней)
+    # - Фото было заменено на более свежее (сравниваем с snapshot.photo_age_days)
+    # - Сообщение в течение заданного окна времени
+    # Проверяем включён ли критерий в настройках (используем тот же флаг)
+    if settings.auto_mute_no_photo_young:
+        # Проверяем: есть фото И оно "свежее"
+        if current_photo_age_days is not None:
+            # Проверяем: фото моложе порога свежести
+            if current_photo_age_days < photo_freshness_threshold:
+                # Проверяем: фото стало "свежее" чем было при входе
+                # Это означает что пользователь сменил фото на более новое
+                snapshot_photo_age = snapshot.photo_age_days
+                # Если при входе фото было старше или его не было
+                if snapshot_photo_age is None or current_photo_age_days < snapshot_photo_age:
+                    # Проверяем: сообщение в течение заданного окна времени
+                    if minutes_since_change <= window_minutes:
+                        # Формируем причину для лога и уведомления
+                        reason = (
+                            f"Автомут: свежее фото ({current_photo_age_days} дн) + "
+                            f"сообщение через {int(minutes_since_change)} мин "
+                            f"(было: {snapshot_photo_age} дн, порог: {photo_freshness_threshold} дн)"
+                        )
+                        # Логируем срабатывание критерия
+                        logger.warning(
+                            f"[PROFILE_MONITOR] Auto-mute criteria #5 TRIGGERED: "
+                            f"user={snapshot.user_id} chat={snapshot.chat_id} "
+                            f"photo_age={current_photo_age_days} was={snapshot_photo_age} "
+                            f"threshold={photo_freshness_threshold} minutes={int(minutes_since_change)}"
+                        )
+                        # Возвращаем True и причину
+                        return True, reason
 
     # Ни один критерий не сработал
     logger.debug(
@@ -862,6 +956,8 @@ async def get_user_profile_data(
         "has_photo": False,
         "photo_id": None,
         "account_age_days": None,
+        # Возраст самого свежего фото в днях (для критериев 4,5)
+        "photo_age_days": None,
     }
 
     # Проверяем доступность Pyrogram
@@ -870,12 +966,17 @@ async def get_user_profile_data(
         return result
 
     try:
-        # Получаем информацию о фото
+        # Получаем информацию о фото (включая возраст самого свежего)
         photos_info = await pyrogram_service.check_all_photos_young(
             user_id=user_id,
             max_age_days=15,
         )
+        # Есть ли фото вообще
         result["has_photo"] = photos_info.get("photos_count", 0) > 0
+        # Возраст самого свежего фото в днях (для критериев 4,5)
+        # Используем youngest_photo_days из pyrogram_service
+        # Если фото нет - photo_age_days будет None
+        result["photo_age_days"] = photos_info.get("youngest_photo_days")
 
         # Получаем возраст аккаунта
         age_info = await pyrogram_service.get_account_age(user_id)

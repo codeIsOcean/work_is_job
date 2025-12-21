@@ -144,6 +144,8 @@ async def process_message_profile_check(
     # Проверяем фото через Pyrogram (если доступен)
     profile_data = await get_user_profile_data(user_id)
     current_has_photo = profile_data.get("has_photo", False)
+    # Получаем возраст текущего фото (для критериев 4 и 5)
+    current_photo_age_days = profile_data.get("photo_age_days")
 
     # Используем данные из сообщения для имени/username
     current_first_name = user.first_name
@@ -175,6 +177,8 @@ async def process_message_profile_check(
             snapshot=snapshot,
             changes=changes,
             current_has_photo=current_has_photo,
+            # Передаём возраст фото для критериев 4 и 5
+            current_photo_age_days=current_photo_age_days,
         )
 
     return {"action_taken": None, "reason": None, "changes": None}
@@ -284,6 +288,7 @@ async def _handle_profile_changes(
     snapshot: ProfileSnapshot,
     changes: list,
     current_has_photo: bool,
+    current_photo_age_days: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Обрабатывает обнаруженные изменения профиля.
@@ -296,6 +301,7 @@ async def _handle_profile_changes(
         snapshot: Снимок профиля
         changes: Список изменений
         current_has_photo: Есть ли фото сейчас
+        current_photo_age_days: Возраст текущего фото в днях (для критериев 4,5)
 
     Returns:
         Dict с результатом обработки
@@ -389,6 +395,7 @@ async def _handle_profile_changes(
         )
 
         # Вызываем проверку критериев автомута
+        # Передаём current_photo_age_days для критериев 4 и 5
         should_mute, reason = await check_auto_mute_criteria(
             session=session,
             settings=settings,
@@ -396,6 +403,7 @@ async def _handle_profile_changes(
             has_recent_name_change=recent_name_change,
             has_recent_photo_change=recent_photo_change,
             minutes_since_change=float(minutes_since_join),
+            current_photo_age_days=current_photo_age_days,
         )
 
         # Если критерий сработал - применяем автомут
