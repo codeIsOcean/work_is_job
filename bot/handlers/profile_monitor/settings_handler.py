@@ -415,6 +415,7 @@ async def callback_mute_settings(
         settings = await create_or_update_settings(session, chat_id)
 
     # Формируем текст с описанием всех критериев
+    # ВАЖНО: используем &lt; вместо < для HTML, иначе Telegram ошибка
     text = (
         f"⚡ <b>Настройки автомута</b>\n\n"
         f"Автоматический мут пользователей по критериям:\n\n"
@@ -424,9 +425,9 @@ async def callback_mute_settings(
         f"{settings.first_message_window_minutes} мин\n"
         f"<b>Критерий 3:</b> Добавление фото + сообщение ≤"
         f"{settings.first_message_window_minutes} мин\n"
-        f"<b>Критерий 4:</b> Свежее фото (<{settings.photo_freshness_threshold_days} дн) + "
+        f"<b>Критерий 4:</b> Свежее фото (&lt;{settings.photo_freshness_threshold_days} дн) + "
         f"смена имени + сообщение ≤{settings.first_message_window_minutes} мин\n"
-        f"<b>Критерий 5:</b> Свежее фото (<{settings.photo_freshness_threshold_days} дн) + "
+        f"<b>Критерий 5:</b> Свежее фото (&lt;{settings.photo_freshness_threshold_days} дн) + "
         f"сообщение ≤{settings.first_message_window_minutes} мин"
     )
 
