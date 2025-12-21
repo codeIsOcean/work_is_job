@@ -291,12 +291,23 @@ def pytest_collection_modifyitems(config, items):
     """Skip e2e tests on Windows (real Redis/DB + Windows event loop = нестабильно).
 
     В проде (Linux) эти тесты должны запускаться без skip.
+
+    ИСКЛЮЧЕНИЯ:
+    - test_userbot_flows.py — работает на Windows (использует Pyrogram userbot)
+    - test_telegram_html.py — работает на Windows (простые API вызовы)
     """
     if sys.platform.startswith("win"):
         skip_e2e = pytest.mark.skip(reason="e2e tests are unstable on Windows; run them on Linux CI/prod")
+
+        # Файлы которые НЕ пропускаем на Windows
+        allowed_on_windows = {"test_userbot_flows.py", "test_telegram_html.py"}
+
         for item in items:
             if "e2e" in item.keywords:
-                item.add_marker(skip_e2e)
+                # Проверяем имя файла
+                test_file = Path(item.fspath).name
+                if test_file not in allowed_on_windows:
+                    item.add_marker(skip_e2e)
 
 
 HANDLER_MODULES = [
