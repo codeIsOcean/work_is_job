@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional, Union
 
@@ -12,6 +13,24 @@ from bot.services.mute_by_reaction_service import handle_reaction_mute
 reaction_mute_router = Router(name="reaction_mute_router")
 
 logger = logging.getLogger(__name__)
+
+
+async def _schedule_notification_delete(bot, chat_id: int, message_id: int, delay_seconds: int) -> None:
+    """
+    Планирует удаление уведомления бота через указанное время.
+    """
+    if delay_seconds <= 0:
+        return
+
+    async def delete_later():
+        await asyncio.sleep(delay_seconds)
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+            logger.info(f"✅ Уведомление {message_id} автоудалено через {delay_seconds} сек")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось автоудалить уведомление {message_id}: {e}")
+
+    asyncio.create_task(delete_later())
 
 
 ReactionEvent = Union[MessageReactionUpdated, MessageReactionCountUpdated]
@@ -48,12 +67,22 @@ async def _process_reaction_event(
         
         if result.should_announce and result.system_message:
             try:
-                await event.bot.send_message(
+                sent_msg = await event.bot.send_message(
                     chat_id=event.chat.id,
                     text=result.system_message,
                     parse_mode="HTML",
                 )
                 logger.info(f"✅ [REACTION_MUTE_HANDLER] Системное сообщение отправлено в чат {event.chat.id}")
+
+                # Планируем автоудаление уведомления если настроено
+                if result.notification_delete_delay and result.notification_delete_delay > 0:
+                    await _schedule_notification_delete(
+                        bot=event.bot,
+                        chat_id=event.chat.id,
+                        message_id=sent_msg.message_id,
+                        delay_seconds=result.notification_delete_delay,
+                    )
+                    logger.info(f"📅 Запланировано автоудаление уведомления через {result.notification_delete_delay} сек")
             except Exception as exc:
                 logger.error("❌ Ошибка при отправке системного сообщения: %s", exc)
     except Exception as exc:

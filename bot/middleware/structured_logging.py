@@ -139,6 +139,45 @@ class StructuredLoggingMiddleware(BaseMiddleware):
                 },
                 "date": cjr.date.isoformat() if cjr.date else None,
             }
+        elif event.message_reaction:
+            update_type = "MESSAGE_REACTION"
+            mr = event.message_reaction
+            # Извлекаем emoji из new_reaction
+            new_emojis = []
+            for r in (mr.new_reaction or []):
+                if hasattr(r, 'emoji'):
+                    new_emojis.append(r.emoji)
+            old_emojis = []
+            for r in (mr.old_reaction or []):
+                if hasattr(r, 'emoji'):
+                    old_emojis.append(r.emoji)
+            update_data = {
+                "update_id": event.update_id,
+                "type": "message_reaction",
+                "chat": {
+                    "id": mr.chat.id,
+                    "type": mr.chat.type,
+                    "title": mr.chat.title if hasattr(mr.chat, 'title') else None,
+                },
+                "message_id": mr.message_id,
+                "user": {
+                    "id": mr.user.id if mr.user else None,
+                    "username": mr.user.username if mr.user else None,
+                } if mr.user else None,
+                "actor_chat": mr.actor_chat.id if mr.actor_chat else None,
+                "new_reaction": new_emojis,
+                "old_reaction": old_emojis,
+            }
+        elif event.message_reaction_count:
+            update_type = "MESSAGE_REACTION_COUNT"
+            mrc = event.message_reaction_count
+            update_data = {
+                "update_id": event.update_id,
+                "type": "message_reaction_count",
+                "chat_id": mrc.chat.id if mrc.chat else None,
+                "message_id": mrc.message_id,
+                "reactions_count": len(mrc.reactions) if mrc.reactions else 0,
+            }
         else:
             update_type = "UNKNOWN"
             update_data = {

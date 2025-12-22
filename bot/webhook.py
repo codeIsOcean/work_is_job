@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 async def create_app(bot: Bot = None, dp: Dispatcher = None) -> web.Application:
     """Создание и настройка веб-приложения для webhook"""
-    
+
     # Создаем отказоустойчивое хранилище
     try:
         await test_connection()
@@ -48,10 +48,10 @@ async def create_app(bot: Bot = None, dp: Dispatcher = None) -> web.Application:
         session = AiohttpSession(timeout=60.0)
         bot = Bot(token=BOT_TOKEN, session=session)
         dp = Dispatcher(storage=storage)
-        
+
         # Подключение middleware (только если создаем новый dispatcher)
         dp.update.middleware(DbSessionMiddleware(async_session))
-        
+
         # Подключение структурированного логирования
         from bot.middleware.structured_logging import StructuredLoggingMiddleware
         dp.update.middleware(StructuredLoggingMiddleware())
@@ -91,7 +91,7 @@ async def create_app(bot: Bot = None, dp: Dispatcher = None) -> web.Application:
     for log_name in ["aiogram.dispatcher", "aiogram.event", "aiogram"]:
         lg = logging.getLogger(log_name)
         lg.setLevel(logging.ERROR)  # Только ошибки - отключаем INFO логи
-    
+
     # Настройка webhook
     webhook_requests_handler = SimpleRequestHandler(
         dispatcher=dp,
@@ -150,7 +150,7 @@ async def setup_webhook(bot: Bot):
                 url=WEBHOOK_URL,
                 drop_pending_updates=True,
                 secret_token=None,  # Можно добавить секретный токен для безопасности
-                allowed_updates=["message", "callback_query", "chat_member", "my_chat_member", "chat_join_request"]
+                allowed_updates=["message", "callback_query", "chat_member", "my_chat_member", "chat_join_request", "message_reaction", "message_reaction_count"]
             )
             logger.info(f"📤 Результат set_webhook: {set_result}")
 

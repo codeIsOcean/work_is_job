@@ -12,6 +12,9 @@
 - `bot/database/models_content_filter.py` — модели фильтра контента
 - `bot/database/models_message_management.py` — модели управления сообщениями
 - `bot/database/mute_models.py` — модели мутов
+- `bot/database/models_global_settings.py` — глобальные настройки бота (max_seen_user_id)
+- `bot/database/models_user_stats.py` — статистика пользователей (команда /stat)
+- `bot/database/models_profile_monitor.py` — модуль мониторинга профилей
 
 ---
 
@@ -489,6 +492,117 @@
 
 ---
 
+## Глобальные настройки бота
+
+### bot_global_settings
+Глобальные настройки бота (не привязанные к конкретной группе).
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| key | VARCHAR(100) PK | Уникальный ключ настройки |
+| value | TEXT NOT NULL | Значение настройки |
+| updated_at | DATETIME(TZ) | Время последнего обновления (auto) |
+
+**Константы ключей:**
+- `max_seen_user_id` — максимальный известный ID пользователя для расчёта возраста аккаунтов
+
+**Использование:**
+```python
+from bot.database.models_global_settings import BotGlobalSettings, GlobalSettingKeys
+
+# Чтение
+result = await session.execute(
+    select(BotGlobalSettings.value).where(
+        BotGlobalSettings.key == GlobalSettingKeys.MAX_SEEN_USER_ID
+    )
+)
+max_id = int(result.scalar_one_or_none() or 8_600_000_000)
+```
+
+**Связь с account_age_estimator:**
+Сервис `AccountAgeEstimator` использует эту таблицу как источник истины для `max_seen_user_id`.
+Приоритет: Redis (кэш) → БД → Fallback (8.6B)
+
+---
+
+## Profile Monitor
+
+### profile_monitor_settings
+Настройки модуля мониторинга профилей для групп.
+
+| Колонка | Тип | По умолчанию | Описание |
+|---------|-----|--------------|----------|
+| chat_id | BIGINT PK FK | - | ID группы |
+| enabled | BOOLEAN | false | Модуль включён |
+| log_name_changes | BOOLEAN | true | Логировать смену имени |
+| log_username_changes | BOOLEAN | true | Логировать смену username |
+| log_photo_changes | BOOLEAN | true | Логировать смену фото |
+| auto_mute_no_photo_young | BOOLEAN | true | Автомут: нет фото + молодой аккаунт |
+| auto_mute_account_age_days | INTEGER | 15 | Порог возраста аккаунта (дней) |
+| auto_mute_delete_messages | BOOLEAN | true | Удалять сообщения при автомуте |
+| auto_mute_name_change_fast_msg | BOOLEAN | true | Автомут: смена имени + быстрое сообщение |
+| name_change_window_hours | INTEGER | 24 | Окно для смены имени (часов) |
+| first_message_window_minutes | INTEGER | 30 | Окно для сообщения после смены (минут) |
+| photo_freshness_threshold_days | INTEGER | 1 | Порог свежести фото (дней) для критериев 4,5 |
+| send_to_journal | BOOLEAN | true | Отправлять в журнал |
+| min_changes_for_journal | INTEGER | 1 | Минимум изменений для журнала |
+| send_to_group | BOOLEAN | false | Отправлять уведомления в группу |
+| created_at | DATETIME | now | Дата создания |
+| updated_at | DATETIME | now | Дата обновления |
+
+**Критерии автомута:**
+1. Смена имени + смена фото + сообщение ≤30 мин
+2. Смена имени + сообщение ≤30 мин
+3. Добавление фото + сообщение ≤30 мин
+4. Свежее фото (<N дней) + смена имени + сообщение ≤30 мин
+5. Свежее фото (<N дней) + сообщение ≤30 мин
+
+### profile_snapshots
+Снимки профиля при входе в группу.
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| id | INTEGER PK | Автоинкремент |
+| chat_id | BIGINT FK | ID группы |
+| user_id | BIGINT | ID пользователя |
+| first_name | VARCHAR(256) | Имя |
+| last_name | VARCHAR(256) | Фамилия |
+| full_name | VARCHAR(512) | Полное имя |
+| username | VARCHAR(256) | @username |
+| has_photo | BOOLEAN | Есть фото |
+| photo_id | VARCHAR(256) | ID фото |
+| photo_age_days | INTEGER | Возраст самого свежего фото (дней) |
+| account_age_days | INTEGER | Возраст аккаунта (дней) |
+| account_created_at | DATETIME | Дата регистрации |
+| is_premium | BOOLEAN | Premium аккаунт |
+| joined_at | DATETIME | Время входа в группу |
+| updated_at | DATETIME | Время обновления |
+| first_message_at | DATETIME | Время первого сообщения |
+
+**Индексы:** `ix_profile_snapshot_chat_user(chat_id, user_id)` (unique)
+
+### profile_change_logs
+Журнал изменений профиля.
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| id | INTEGER PK | Автоинкремент |
+| chat_id | BIGINT FK | ID группы |
+| user_id | BIGINT | ID пользователя |
+| change_type | VARCHAR(50) | Тип изменения (name, username, photo_*) |
+| old_value | TEXT | Старое значение |
+| new_value | TEXT | Новое значение |
+| minutes_since_join | INTEGER | Минут с момента входа |
+| detected_at_message_id | BIGINT | ID сообщения при обнаружении |
+| action_taken | VARCHAR(50) | Применённое действие |
+| journal_message_id | BIGINT | ID сообщения в журнале |
+| sent_to_group | BOOLEAN | Отправлено в группу |
+| created_at | DATETIME | Время изменения |
+
+**Индексы:** `ix_profile_changes_chat_user`, `ix_profile_changes_chat_date`
+
+---
+
 ## Миграции Alembic
 
 ### Важные миграции
@@ -509,6 +623,9 @@
 | l2m3n4o5p6q7 | add_scam_signal_categories — категории сигналов + flood_warn_text |
 | m3n4o5p6q7r8 | add_message_management_settings — модуль управления сообщениями |
 | n4o5p6q7r8s9 | add_user_restrictions_table — расширение таблицы user_restrictions |
+| 9356cadad695 | add_bot_global_settings_table — глобальные настройки бота (max_seen_user_id) |
+| u1v2w3x4y5z6 | add_user_statistics_table — статистика пользователей (сообщения, дни активности) |
+| v2w3x4y5z6a7 | add_photo_freshness_columns — колонки для критериев автомута 4,5 |
 
 ### Паттерн для ENUM в миграциях
 
@@ -529,4 +646,4 @@ my_enum = postgresql.ENUM('A', 'B', name='my_enum', create_type=False)
 
 ---
 
-*Последнее обновление: 2025-12-13 (расширена таблица user_restrictions для восстановления мутов)*
+*Последнее обновление: 2025-12-21 (добавлены колонки photo_age_days и photo_freshness_threshold_days для критериев автомута 4,5)*
