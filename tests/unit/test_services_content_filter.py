@@ -1472,7 +1472,7 @@ class TestParseDuration:
 
     # Тест: секунды
     def test_parse_seconds(self):
-        from bot.handlers.content_filter.settings_handler import parse_duration
+        from bot.handlers.content_filter.common import parse_duration
         # 30 секунд = 0.5 минут (округляется до 1)
         assert parse_duration("30s") == 1
         # 60 секунд = 1 минута
@@ -1482,40 +1482,40 @@ class TestParseDuration:
 
     # Тест: минуты
     def test_parse_minutes(self):
-        from bot.handlers.content_filter.settings_handler import parse_duration
+        from bot.handlers.content_filter.common import parse_duration
         assert parse_duration("5min") == 5
         assert parse_duration("30min") == 30
         assert parse_duration("60min") == 60
 
     # Тест: часы
     def test_parse_hours(self):
-        from bot.handlers.content_filter.settings_handler import parse_duration
+        from bot.handlers.content_filter.common import parse_duration
         assert parse_duration("1h") == 60
         assert parse_duration("2h") == 120
         assert parse_duration("24h") == 1440
 
     # Тест: дни
     def test_parse_days(self):
-        from bot.handlers.content_filter.settings_handler import parse_duration
+        from bot.handlers.content_filter.common import parse_duration
         assert parse_duration("1d") == 1440  # 24 * 60
         assert parse_duration("7d") == 10080  # 7 * 24 * 60
         assert parse_duration("30d") == 43200  # 30 * 24 * 60
 
     # Тест: месяцы
     def test_parse_months(self):
-        from bot.handlers.content_filter.settings_handler import parse_duration
+        from bot.handlers.content_filter.common import parse_duration
         assert parse_duration("1m") == 43200  # 30 * 24 * 60
         assert parse_duration("2m") == 86400  # 2 * 30 * 24 * 60
 
     # Тест: только число (минуты по умолчанию)
     def test_parse_plain_number(self):
-        from bot.handlers.content_filter.settings_handler import parse_duration
+        from bot.handlers.content_filter.common import parse_duration
         assert parse_duration("60") == 60
         assert parse_duration("1440") == 1440
 
     # Тест: некорректный ввод
     def test_parse_invalid_input(self):
-        from bot.handlers.content_filter.settings_handler import parse_duration
+        from bot.handlers.content_filter.common import parse_duration
         assert parse_duration("abc") is None
         assert parse_duration("") is None
         assert parse_duration("   ") is None
@@ -1523,7 +1523,7 @@ class TestParseDuration:
 
     # Тест: пробелы вокруг
     def test_parse_with_whitespace(self):
-        from bot.handlers.content_filter.settings_handler import parse_duration
+        from bot.handlers.content_filter.common import parse_duration
         assert parse_duration("  5min  ") == 5
         assert parse_duration(" 1h ") == 60
 
@@ -2062,56 +2062,68 @@ class TestFloodCallbackDataLimit:
 # 3. Кнопка "Удалить слово" работает через FSM
 # ============================================================
 
-class TestBugFixNameErrorImports:
+class TestContentFilterModuleImportsRefactored:
     """
-    Тест исправления бага: NameError - InlineKeyboardMarkup не был импортирован.
+    Тесты импортов рефакторинга content_filter.
 
-    Баг: В settings_handler.py использовались InlineKeyboardMarkup и
-    InlineKeyboardButton, но они не были импортированы.
-
-    Исправление: Добавлен импорт в строке 16:
-    from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
+    После рефакторинга settings_handler.py был разбит на модули:
+    - common.py (FSM states, helpers)
+    - main_menu.py
+    - word_filter/
+    - scam/
+    - flood/
+    - sections/
+    - cleanup.py
     """
 
-    # Тест: проверяем что InlineKeyboardMarkup импортируется из settings_handler
-    def test_inline_keyboard_markup_importable(self):
-        """Проверяем что InlineKeyboardMarkup доступен в settings_handler."""
-        # Импортируем модуль settings_handler
-        from bot.handlers.content_filter import settings_handler
-        # Проверяем наличие InlineKeyboardMarkup в области видимости модуля
-        # (либо через импорт, либо через aiogram.types)
-        from aiogram.types import InlineKeyboardMarkup as IKM
-        # Если модуль импортировался без ошибок - импорт есть
-        assert settings_handler is not None
+    def test_content_filter_router_importable(self):
+        """Проверяем что content_filter_router импортируется."""
+        from bot.handlers.content_filter import content_filter_router
+        assert content_filter_router is not None
 
-    # Тест: проверяем что InlineKeyboardButton импортируется из settings_handler
-    def test_inline_keyboard_button_importable(self):
-        """Проверяем что InlineKeyboardButton доступен в settings_handler."""
-        # Импортируем модуль settings_handler
-        from bot.handlers.content_filter import settings_handler
-        # Если модуль импортировался без ошибок - импорт есть
-        from aiogram.types import InlineKeyboardButton as IKB
-        assert settings_handler is not None
+    def test_common_module_importable(self):
+        """Проверяем что common.py импортируется без ошибок."""
+        from bot.handlers.content_filter.common import (
+            parse_duration,
+            parse_delay_seconds,
+            AddWordStates,
+            DeleteCategoryWordStates,
+            CategoryTextStates,
+            CategoryDelayStates
+        )
+        assert parse_duration is not None
+        assert AddWordStates is not None
+        assert DeleteCategoryWordStates is not None
 
-    # Тест: проверяем что модуль settings_handler не выбрасывает NameError при импорте
-    def test_settings_handler_imports_without_name_error(self):
-        """
-        Проверяем что settings_handler импортируется без NameError.
+    def test_main_menu_router_importable(self):
+        """Проверяем что main_menu_router импортируется."""
+        from bot.handlers.content_filter.main_menu import main_menu_router
+        assert main_menu_router is not None
 
-        Этот тест воспроизводит баг: ранее при импорте выбрасывался
-        NameError: name 'InlineKeyboardMarkup' is not defined
-        """
-        try:
-            # Пытаемся импортировать модуль
-            from bot.handlers.content_filter import settings_handler
-            # Если импорт успешен - баг исправлен
-            import_success = True
-        except NameError as e:
-            # Если NameError - баг не исправлен
-            import_success = False
-            pytest.fail(f"NameError при импорте settings_handler: {e}")
+    def test_word_filter_router_importable(self):
+        """Проверяем что word_filter_router импортируется."""
+        from bot.handlers.content_filter.word_filter import word_filter_router
+        assert word_filter_router is not None
 
-        assert import_success is True
+    def test_scam_router_importable(self):
+        """Проверяем что scam_router импортируется."""
+        from bot.handlers.content_filter.scam import scam_router
+        assert scam_router is not None
+
+    def test_flood_router_importable(self):
+        """Проверяем что flood_router импортируется."""
+        from bot.handlers.content_filter.flood import flood_router
+        assert flood_router is not None
+
+    def test_sections_router_importable(self):
+        """Проверяем что sections_router импортируется."""
+        from bot.handlers.content_filter.sections import sections_router
+        assert sections_router is not None
+
+    def test_cleanup_router_importable(self):
+        """Проверяем что cleanup_router импортируется."""
+        from bot.handlers.content_filter.cleanup import cleanup_router
+        assert cleanup_router is not None
 
 
 class TestBugFixWordsListDisplay:
@@ -2220,31 +2232,17 @@ class TestBugFixDeleteWordFSM:
     # Тест: проверяем что FSM состояние для удаления слов существует
     def test_delete_word_fsm_state_exists(self):
         """
-        Проверяем что в settings_handler есть FSM состояние для удаления слов.
+        Проверяем что в common.py есть FSM состояние для удаления слов.
         """
-        from bot.handlers.content_filter import settings_handler
+        from bot.handlers.content_filter.common import DeleteCategoryWordStates
+        from aiogram.fsm.state import StatesGroup
 
-        # Ищем класс состояний для удаления
-        # Может называться DeleteWordStates или подобно
-        has_delete_states = False
+        # Проверяем что DeleteCategoryWordStates существует и является StatesGroup
+        assert DeleteCategoryWordStates is not None
+        assert issubclass(DeleteCategoryWordStates, StatesGroup)
 
-        # Проверяем наличие атрибутов модуля
-        for attr_name in dir(settings_handler):
-            attr = getattr(settings_handler, attr_name, None)
-            # Проверяем что это класс StatesGroup
-            if attr and hasattr(attr, '__mro__'):
-                # Проверяем наследование от StatesGroup
-                from aiogram.fsm.state import StatesGroup
-                if StatesGroup in getattr(attr, '__mro__', []):
-                    # Проверяем что есть состояние для удаления
-                    if 'delete' in attr_name.lower() or 'word' in attr_name.lower():
-                        has_delete_states = True
-                        break
-
-        # Альтернативная проверка - ищем хендлер с FSM для удаления
-        # Проверяем что router существует
-        assert hasattr(settings_handler, 'settings_handler_router'), \
-            "Router settings_handler_router должен существовать"
+        # Проверяем что есть состояние waiting_for_word
+        assert hasattr(DeleteCategoryWordStates, 'waiting_for_word')
 
     # Тест: проверяем что кнопка "Удалить слово" есть в клавиатуре
     def test_delete_word_button_exists_in_menu(self):
@@ -2282,19 +2280,21 @@ class TestBugFixAddWordNotification:
     Исправление: Уведомление уже существовало в коде (✅ Добавлено слов: N).
     """
 
-    # Тест: проверяем что в settings_handler есть функция обработки добавления слов
+    # Тест: проверяем что в common.py есть FSM состояние для добавления слов
     def test_add_word_handler_exists(self):
         """
-        Проверяем что в settings_handler есть хендлер для добавления слов.
+        Проверяем что в common.py есть FSM состояние для добавления слов.
         """
-        from bot.handlers.content_filter import settings_handler
+        from bot.handlers.content_filter.common import AddWordStates
+        from aiogram.fsm.state import StatesGroup
 
-        # Проверяем что модуль импортируется успешно
-        assert settings_handler is not None
+        # Проверяем что AddWordStates существует и является StatesGroup
+        assert AddWordStates is not None
+        assert issubclass(AddWordStates, StatesGroup)
 
-        # Проверяем наличие FSM состояния для добавления
-        assert hasattr(settings_handler, 'AddWordStates'), \
-            "Класс AddWordStates должен существовать для FSM добавления слов"
+        # Проверяем наличие состояния waiting_for_word
+        assert hasattr(AddWordStates, 'waiting_for_word'), \
+            "Класс AddWordStates должен иметь состояние waiting_for_word"
 
 
 # ============================================================
@@ -2381,7 +2381,7 @@ class TestParseDelaySeconds:
 
     def test_parse_seconds_with_s_suffix(self):
         """Тест парсинга секунд с суффиксом 's'."""
-        from bot.handlers.content_filter.settings_handler import parse_delay_seconds
+        from bot.handlers.content_filter.common import parse_delay_seconds
         # 30 секунд
         assert parse_delay_seconds("30s") == 30
         # 60 секунд
@@ -2389,7 +2389,7 @@ class TestParseDelaySeconds:
 
     def test_parse_minutes_with_min_suffix(self):
         """Тест парсинга минут с суффиксом 'min'."""
-        from bot.handlers.content_filter.settings_handler import parse_delay_seconds
+        from bot.handlers.content_filter.common import parse_delay_seconds
         # 5 минут = 300 секунд
         assert parse_delay_seconds("5min") == 300
         # 1 минута = 60 секунд
@@ -2397,7 +2397,7 @@ class TestParseDelaySeconds:
 
     def test_parse_hours_with_h_suffix(self):
         """Тест парсинга часов с суффиксом 'h'."""
-        from bot.handlers.content_filter.settings_handler import parse_delay_seconds
+        from bot.handlers.content_filter.common import parse_delay_seconds
         # 1 час = 3600 секунд
         assert parse_delay_seconds("1h") == 3600
         # 2 часа = 7200 секунд
@@ -2405,14 +2405,14 @@ class TestParseDelaySeconds:
 
     def test_parse_plain_number_as_seconds(self):
         """Тест парсинга числа без суффикса как секунды."""
-        from bot.handlers.content_filter.settings_handler import parse_delay_seconds
+        from bot.handlers.content_filter.common import parse_delay_seconds
         # Просто число = секунды
         assert parse_delay_seconds("45") == 45
         assert parse_delay_seconds("120") == 120
 
     def test_parse_invalid_format_returns_none(self):
         """Тест что неверный формат возвращает None."""
-        from bot.handlers.content_filter.settings_handler import parse_delay_seconds
+        from bot.handlers.content_filter.common import parse_delay_seconds
         # Неверный формат
         assert parse_delay_seconds("abc") is None
         assert parse_delay_seconds("") is None
@@ -2420,7 +2420,7 @@ class TestParseDelaySeconds:
 
     def test_parse_case_insensitive(self):
         """Тест регистронезависимости."""
-        from bot.handlers.content_filter.settings_handler import parse_delay_seconds
+        from bot.handlers.content_filter.common import parse_delay_seconds
         # Верхний регистр
         assert parse_delay_seconds("30S") == 30
         assert parse_delay_seconds("5MIN") == 300
@@ -2568,17 +2568,17 @@ class TestCategoryTextStatesExist:
 
     def test_category_text_states_class_exists(self):
         """Тест что класс CategoryTextStates существует."""
-        from bot.handlers.content_filter.settings_handler import CategoryTextStates
+        from bot.handlers.content_filter.common import CategoryTextStates
         assert CategoryTextStates is not None
 
     def test_category_text_states_has_mute_text(self):
         """Тест что CategoryTextStates имеет состояние waiting_for_mute_text."""
-        from bot.handlers.content_filter.settings_handler import CategoryTextStates
+        from bot.handlers.content_filter.common import CategoryTextStates
         assert hasattr(CategoryTextStates, 'waiting_for_mute_text')
 
     def test_category_text_states_has_ban_text(self):
         """Тест что CategoryTextStates имеет состояние waiting_for_ban_text."""
-        from bot.handlers.content_filter.settings_handler import CategoryTextStates
+        from bot.handlers.content_filter.common import CategoryTextStates
         assert hasattr(CategoryTextStates, 'waiting_for_ban_text')
 
 
@@ -2587,15 +2587,15 @@ class TestCategoryDelayStatesExist:
 
     def test_category_delay_states_class_exists(self):
         """Тест что класс CategoryDelayStates существует."""
-        from bot.handlers.content_filter.settings_handler import CategoryDelayStates
+        from bot.handlers.content_filter.common import CategoryDelayStates
         assert CategoryDelayStates is not None
 
     def test_category_delay_states_has_delete_delay(self):
         """Тест что CategoryDelayStates имеет состояние waiting_for_delete_delay."""
-        from bot.handlers.content_filter.settings_handler import CategoryDelayStates
+        from bot.handlers.content_filter.common import CategoryDelayStates
         assert hasattr(CategoryDelayStates, 'waiting_for_delete_delay')
 
     def test_category_delay_states_has_notification_delay(self):
         """Тест что CategoryDelayStates имеет состояние waiting_for_notification_delay."""
-        from bot.handlers.content_filter.settings_handler import CategoryDelayStates
+        from bot.handlers.content_filter.common import CategoryDelayStates
         assert hasattr(CategoryDelayStates, 'waiting_for_notification_delay')
