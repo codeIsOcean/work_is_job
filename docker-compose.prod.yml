@@ -52,6 +52,7 @@ services:
       - "8081:8080"
     volumes:
       - ./ssl:/app/ssl:ro
+      - ./backup:/app/backup  # Бэкап групп - защита от потери данных
     restart: unless-stopped
     networks:
       - prod_network

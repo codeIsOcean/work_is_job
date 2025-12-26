@@ -165,7 +165,9 @@ class ChatSettings(Base):
     auto_mute_scammers = Column(Boolean, default=True)  # Автомут скаммеров
     global_mute_enabled = Column(Boolean, default=False)  # Глобальный мут для всех групп
     reaction_mute_enabled = Column(Boolean, default=False)
-    reaction_mute_announce_enabled = Column(Boolean, default=True)
+    # По умолчанию НЕ отправлять сообщения в группу о муте по реакции
+    # (информация идёт только в журнал активности)
+    reaction_mute_announce_enabled = Column(Boolean, default=False)
     captcha_join_enabled = Column(Boolean, default=False)
     captcha_invite_enabled = Column(Boolean, default=False)
     captcha_timeout_seconds = Column(Integer, default=300)

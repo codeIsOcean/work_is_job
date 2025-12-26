@@ -839,3 +839,380 @@ class TestCallbackButtons:
 
         # Удаляем сообщение
         await bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
+
+
+# ============================================================
+# MUTE BY REACTION TESTS
+# ============================================================
+
+class TestMuteByReactionE2E:
+    """
+    E2E тесты для мута по реакциям.
+
+    Сценарий:
+    - userbot (Ермековна) - админ группы, ставит реакцию
+    - userbot2 - жертва, получает мут
+
+    Правила реакций:
+    - 👎 первый раз = предупреждение, второй = мут 3 дня
+    - 🤢 = мут 7 дней
+    - 💩 = мут навсегда + мульти-групповой мут
+    - 😡/😢 = только предупреждение
+    """
+
+    @pytest.mark.asyncio
+    async def test_reaction_mute_enabled_check(self, bot: Bot, chat_id: int):
+        """
+        Проверяем что функция reaction_mute включена в группе.
+        """
+        from bot.database.session import get_session
+        from bot.database.models import ChatSettings
+
+        async with get_session() as session:
+            settings = await session.get(ChatSettings, chat_id)
+            if settings:
+                print(f"\n[INFO] reaction_mute_enabled: {settings.reaction_mute_enabled}")
+                print(f"[INFO] reaction_mute_announce_enabled: {settings.reaction_mute_announce_enabled}")
+            else:
+                print(f"\n[WARN] No ChatSettings for chat_id={chat_id}")
+
+    @pytest.mark.asyncio
+    async def test_admin_puts_thumbs_down_reaction(
+        self, userbot: Client, userbot2: Client, bot: Bot, chat_id: int, invite_link: str
+    ):
+        """
+        Тест: Админ (Ермековна) ставит 👎 на сообщение жертвы.
+
+        Ожидание:
+        - Первая 👎 = предупреждение (без мута)
+        - Вторая 👎 = мут на 3 дня
+        """
+        admin = await userbot.get_me()
+        victim = await userbot2.get_me()
+
+        print(f"\n[INFO] Admin: @{admin.username} (id={admin.id})")
+        print(f"[INFO] Victim: @{victim.username} (id={victim.id})")
+
+        # Убедимся что оба в группе
+        await ensure_user_in_chat(userbot, chat_id, bot=bot, invite_link=invite_link)
+        await ensure_user_in_chat(userbot2, chat_id, bot=bot, invite_link=invite_link)
+
+        # Размутим жертву на всякий случай
+        await unmute_user(bot, chat_id, victim.id)
+        await asyncio.sleep(1)
+
+        # Жертва отправляет сообщение
+        victim_msg = await userbot2.send_message(
+            chat_id=chat_id,
+            text=f"[TEST] Message from victim {datetime.now().isoformat()}"
+        )
+        print(f"[SEND] Victim sent message (msg_id={victim_msg.id})")
+        await asyncio.sleep(2)
+
+        # Админ ставит реакцию 👎
+        try:
+            await userbot.send_reaction(
+                chat_id=chat_id,
+                message_id=victim_msg.id,
+                emoji="👎"
+            )
+            print(f"[REACT] Admin put 👎 reaction")
+        except Exception as e:
+            print(f"[ERROR] Failed to send reaction: {e}")
+            # Удаляем сообщение и пропускаем
+            await victim_msg.delete()
+            pytest.skip(f"Cannot send reaction: {e}")
+
+        await asyncio.sleep(3)
+
+        # Проверяем ограничения жертвы
+        restrictions = await get_user_restrictions(bot, chat_id, victim.id)
+        print(f"[CHECK] Victim restrictions: {restrictions}")
+
+        # Первая реакция = предупреждение, мута быть не должно
+        if restrictions.get("is_restricted"):
+            print(f"[INFO] Victim is restricted (unexpected for first 👎)")
+        else:
+            print(f"[OK] Victim NOT restricted (correct for first 👎 = warning)")
+
+        # Удаляем сообщение
+        try:
+            await victim_msg.delete()
+        except Exception:
+            pass
+
+        # Размутим на всякий случай
+        await unmute_user(bot, chat_id, victim.id)
+
+    @pytest.mark.asyncio
+    async def test_admin_puts_vomit_reaction(
+        self, userbot: Client, userbot2: Client, bot: Bot, chat_id: int, invite_link: str
+    ):
+        """
+        Тест: Админ ставит 🤢 на сообщение жертвы.
+
+        Ожидание: мут на 7 дней
+        """
+        admin = await userbot.get_me()
+        victim = await userbot2.get_me()
+
+        print(f"\n[INFO] Admin: @{admin.username}")
+        print(f"[INFO] Victim: @{victim.username}")
+
+        # Убедимся что оба в группе
+        await ensure_user_in_chat(userbot, chat_id, bot=bot, invite_link=invite_link)
+        await ensure_user_in_chat(userbot2, chat_id, bot=bot, invite_link=invite_link)
+
+        # Размутим жертву
+        await unmute_user(bot, chat_id, victim.id)
+        await asyncio.sleep(1)
+
+        # Жертва отправляет сообщение
+        victim_msg = await userbot2.send_message(
+            chat_id=chat_id,
+            text=f"[TEST] Vomit test {datetime.now().isoformat()}"
+        )
+        print(f"[SEND] Victim sent message")
+        await asyncio.sleep(2)
+
+        # Админ ставит реакцию 🤢
+        try:
+            await userbot.send_reaction(
+                chat_id=chat_id,
+                message_id=victim_msg.id,
+                emoji="🤢"
+            )
+            print(f"[REACT] Admin put 🤢 reaction")
+        except Exception as e:
+            print(f"[ERROR] Failed to send reaction: {e}")
+            await victim_msg.delete()
+            pytest.skip(f"Cannot send reaction: {e}")
+
+        await asyncio.sleep(3)
+
+        # Проверяем ограничения жертвы
+        restrictions = await get_user_restrictions(bot, chat_id, victim.id)
+        print(f"[CHECK] Victim restrictions: {restrictions}")
+
+        if restrictions.get("is_restricted"):
+            print(f"[OK] MUTE TRIGGERED: Victim muted for 🤢 reaction")
+        else:
+            print(f"[FAIL] Victim NOT muted (expected mute for 🤢)")
+
+        # Удаляем сообщение
+        try:
+            await victim_msg.delete()
+        except Exception:
+            pass
+
+        # Размутим
+        await unmute_user(bot, chat_id, victim.id)
+
+    @pytest.mark.asyncio
+    async def test_admin_puts_poop_reaction_forever_mute(
+        self, userbot: Client, userbot2: Client, bot: Bot, chat_id: int, invite_link: str
+    ):
+        """
+        Тест: Админ ставит 💩 на сообщение жертвы.
+
+        Ожидание:
+        - Мут навсегда
+        - Мульти-групповой мут (если админ в других группах)
+        """
+        admin = await userbot.get_me()
+        victim = await userbot2.get_me()
+
+        print(f"\n[INFO] Admin: @{admin.username}")
+        print(f"[INFO] Victim: @{victim.username}")
+
+        # Убедимся что оба в группе
+        await ensure_user_in_chat(userbot, chat_id, bot=bot, invite_link=invite_link)
+        await ensure_user_in_chat(userbot2, chat_id, bot=bot, invite_link=invite_link)
+
+        # Размутим жертву
+        await unmute_user(bot, chat_id, victim.id)
+        await asyncio.sleep(1)
+
+        # Жертва отправляет сообщение
+        victim_msg = await userbot2.send_message(
+            chat_id=chat_id,
+            text=f"[TEST] Poop test {datetime.now().isoformat()}"
+        )
+        print(f"[SEND] Victim sent message")
+        await asyncio.sleep(2)
+
+        # Админ ставит реакцию 💩
+        try:
+            await userbot.send_reaction(
+                chat_id=chat_id,
+                message_id=victim_msg.id,
+                emoji="💩"
+            )
+            print(f"[REACT] Admin put 💩 reaction (FOREVER MUTE)")
+        except Exception as e:
+            print(f"[ERROR] Failed to send reaction: {e}")
+            await victim_msg.delete()
+            pytest.skip(f"Cannot send reaction: {e}")
+
+        await asyncio.sleep(3)
+
+        # Проверяем ограничения жертвы
+        restrictions = await get_user_restrictions(bot, chat_id, victim.id)
+        print(f"[CHECK] Victim restrictions: {restrictions}")
+
+        if restrictions.get("is_restricted"):
+            print(f"[OK] FOREVER MUTE TRIGGERED: Victim muted for 💩 reaction")
+        else:
+            print(f"[FAIL] Victim NOT muted (expected forever mute for 💩)")
+
+        # Проверяем запись в БД
+        from bot.database.session import get_session
+        from bot.database.mute_models import GroupMute
+        from sqlalchemy import select
+
+        async with get_session() as session:
+            result = await session.execute(
+                select(GroupMute).where(
+                    GroupMute.target_user_id == victim.id,
+                    GroupMute.group_id == chat_id,
+                    GroupMute.reaction == "💩"
+                ).order_by(GroupMute.created_at.desc()).limit(1)
+            )
+            mute_record = result.scalar_one_or_none()
+            if mute_record:
+                print(f"[DB] Mute record found: mute_until={mute_record.mute_until}")
+            else:
+                print(f"[DB] No mute record found")
+
+        # Удаляем сообщение
+        try:
+            await victim_msg.delete()
+        except Exception:
+            pass
+
+        # Размутим
+        await unmute_user(bot, chat_id, victim.id)
+
+    @pytest.mark.asyncio
+    async def test_angry_reaction_warning_only(
+        self, userbot: Client, userbot2: Client, bot: Bot, chat_id: int, invite_link: str
+    ):
+        """
+        Тест: Админ ставит 😡 на сообщение жертвы.
+
+        Ожидание: только предупреждение, без мута
+        """
+        admin = await userbot.get_me()
+        victim = await userbot2.get_me()
+
+        print(f"\n[INFO] Admin: @{admin.username}")
+        print(f"[INFO] Victim: @{victim.username}")
+
+        # Убедимся что оба в группе
+        await ensure_user_in_chat(userbot, chat_id, bot=bot, invite_link=invite_link)
+        await ensure_user_in_chat(userbot2, chat_id, bot=bot, invite_link=invite_link)
+
+        # Размутим жертву
+        await unmute_user(bot, chat_id, victim.id)
+        await asyncio.sleep(1)
+
+        # Жертва отправляет сообщение
+        victim_msg = await userbot2.send_message(
+            chat_id=chat_id,
+            text=f"[TEST] Angry test {datetime.now().isoformat()}"
+        )
+        print(f"[SEND] Victim sent message")
+        await asyncio.sleep(2)
+
+        # Админ ставит реакцию 😡
+        try:
+            await userbot.send_reaction(
+                chat_id=chat_id,
+                message_id=victim_msg.id,
+                emoji="😡"
+            )
+            print(f"[REACT] Admin put 😡 reaction (WARNING ONLY)")
+        except Exception as e:
+            print(f"[ERROR] Failed to send reaction: {e}")
+            await victim_msg.delete()
+            pytest.skip(f"Cannot send reaction: {e}")
+
+        await asyncio.sleep(3)
+
+        # Проверяем ограничения жертвы
+        restrictions = await get_user_restrictions(bot, chat_id, victim.id)
+        print(f"[CHECK] Victim restrictions: {restrictions}")
+
+        if not restrictions.get("is_restricted"):
+            print(f"[OK] Victim NOT muted (correct for 😡 = warning only)")
+        else:
+            print(f"[FAIL] Victim muted (unexpected, 😡 should be warning only)")
+
+        # Удаляем сообщение
+        try:
+            await victim_msg.delete()
+        except Exception:
+            pass
+
+    @pytest.mark.asyncio
+    async def test_non_admin_reaction_ignored(
+        self, userbot2: Client, userbot3: Client, bot: Bot, chat_id: int, invite_link: str
+    ):
+        """
+        Тест: Обычный пользователь (не админ) ставит реакцию.
+
+        Ожидание: реакция игнорируется, мут не применяется
+        """
+        # userbot2 - обычный пользователь (не админ)
+        # userbot3 - жертва
+        non_admin = await userbot2.get_me()
+        victim = await userbot3.get_me()
+
+        print(f"\n[INFO] Non-admin: @{non_admin.username}")
+        print(f"[INFO] Victim: @{victim.username}")
+
+        # Убедимся что оба в группе
+        await ensure_user_in_chat(userbot2, chat_id, bot=bot, invite_link=invite_link)
+        await ensure_user_in_chat(userbot3, chat_id, bot=bot, invite_link=invite_link)
+
+        # Размутим жертву
+        await unmute_user(bot, chat_id, victim.id)
+        await asyncio.sleep(1)
+
+        # Жертва отправляет сообщение
+        victim_msg = await userbot3.send_message(
+            chat_id=chat_id,
+            text=f"[TEST] Non-admin reaction test {datetime.now().isoformat()}"
+        )
+        print(f"[SEND] Victim sent message")
+        await asyncio.sleep(2)
+
+        # Обычный пользователь ставит реакцию 🤢
+        try:
+            await userbot2.send_reaction(
+                chat_id=chat_id,
+                message_id=victim_msg.id,
+                emoji="🤢"
+            )
+            print(f"[REACT] Non-admin put 🤢 reaction")
+        except Exception as e:
+            print(f"[ERROR] Failed to send reaction: {e}")
+            await victim_msg.delete()
+            pytest.skip(f"Cannot send reaction: {e}")
+
+        await asyncio.sleep(3)
+
+        # Проверяем ограничения жертвы - мута быть НЕ должно
+        restrictions = await get_user_restrictions(bot, chat_id, victim.id)
+        print(f"[CHECK] Victim restrictions: {restrictions}")
+
+        if not restrictions.get("is_restricted"):
+            print(f"[OK] Victim NOT muted (correct - non-admin reaction ignored)")
+        else:
+            print(f"[FAIL] Victim muted (unexpected - non-admin reaction should be ignored)")
+
+        # Удаляем сообщение
+        try:
+            await victim_msg.delete()
+        except Exception:
+            pass

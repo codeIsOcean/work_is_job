@@ -593,12 +593,21 @@ def create_scam_settings_menu(
                 )
             ],
             # ─────────────────────────────────────────────────────
-            # Действие
+            # Действие (по умолчанию, если нет подходящего порога)
             # ─────────────────────────────────────────────────────
             [
                 InlineKeyboardButton(
                     text=f"Действие: {action_text}",
                     callback_data=f"cf:scact:{chat_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Пороги баллов (градация действий по скору)
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text="📊 Пороги баллов",
+                    callback_data=f"cf:scthr:{chat_id}"
                 )
             ],
             # ─────────────────────────────────────────────────────
@@ -617,6 +626,15 @@ def create_scam_settings_menu(
                 InlineKeyboardButton(
                     text="📂 Категории сигналов",
                     callback_data=f"cf:sccat:{chat_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Базовые сигналы (настройка весов и включение/отключение)
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text="🔧 Базовые сигналы",
+                    callback_data=f"cf:bsig:{chat_id}"
                 )
             ],
             # ─────────────────────────────────────────────────────
@@ -1981,6 +1999,782 @@ def create_cancel_pattern_input_menu(
                 InlineKeyboardButton(
                     text=f"{EMOJI_BACK} Отмена",
                     callback_data=f"cf:sp:{chat_id}"
+                )
+            ]
+        ]
+    )
+
+    return keyboard
+
+
+# ============================================================
+# МЕНЮ КАСТОМНЫХ РАЗДЕЛОВ СПАМА
+# ============================================================
+
+def create_custom_sections_menu(
+    chat_id: int,
+    sections: list
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню списка кастомных разделов.
+
+    Каждый раздел отображается как кнопка с вкл/выкл статусом.
+    Внизу кнопка добавления нового раздела.
+
+    Args:
+        chat_id: ID группы
+        sections: Список объектов CustomSpamSection
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура со списком разделов
+    """
+    buttons = []
+
+    # Кнопки для каждого раздела
+    for section in sections:
+        status = EMOJI_ON if section.enabled else EMOJI_OFF
+        # Показываем название и количество паттернов (если есть атрибут)
+        name = section.name[:20] + "..." if len(section.name) > 20 else section.name
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{status} {name}",
+                callback_data=f"cf:sec:{section.id}"
+            ),
+            InlineKeyboardButton(
+                text=f"{EMOJI_SETTINGS}",
+                callback_data=f"cf:secs:{section.id}"
+            )
+        ])
+
+    # Кнопка добавления нового раздела
+    buttons.append([
+        InlineKeyboardButton(
+            text=f"{EMOJI_ADD} Создать раздел",
+            callback_data=f"cf:secn:{chat_id}"
+        )
+    ])
+
+    # Кнопка назад
+    buttons.append([
+        InlineKeyboardButton(
+            text=f"{EMOJI_BACK} Назад",
+            callback_data=f"cf:scs:{chat_id}"
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def create_section_settings_menu(
+    section_id: int,
+    section,
+    chat_id: int,
+    patterns_count: int = 0
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню настроек раздела.
+
+    Показывает:
+    - Паттерны (добавление/импорт/список)
+    - Порог чувствительности
+    - Действие (с указанием пересылки)
+    - Дополнительно (тексты уведомлений, задержки)
+    - Удалить
+
+    НЕ показывает кнопку Вкл/Выкл - она уже есть в списке разделов.
+
+    Args:
+        section_id: ID раздела
+        section: Объект CustomSpamSection
+        chat_id: ID группы
+        patterns_count: Количество паттернов в разделе
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура настроек раздела
+    """
+    # Формируем текст действия
+    action_map = {
+        'delete': '🗑️ Удалить',
+        'mute': '🔇 Мут',
+        'ban': '🚫 Бан'
+    }
+    action_text = action_map.get(section.action, '🗑️ Удалить')
+
+    # Показываем статус пересылки для текущего действия
+    forward_status = ""
+    if section.action == 'delete' and section.forward_on_delete:
+        forward_status = " 📤"
+    elif section.action == 'mute' and section.forward_on_mute:
+        forward_status = " 📤"
+    elif section.action == 'ban' and section.forward_on_ban:
+        forward_status = " 📤"
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            # ─────────────────────────────────────────────────────
+            # Паттерны (кнопки добавления/импорта ВНУТРИ patterns menu)
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI_PATTERNS} Паттерны ({patterns_count})",
+                    callback_data=f"cf:secp:{section_id}:0"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Порог чувствительности
+            # ─────────────────────────────────────────────────────
+            [
+                # Кнопка порога с понятным текстом (Баг 2 fix)
+                InlineKeyboardButton(
+                    text=f"Чувствительность: 🔢 {section.threshold} баллов",
+                    callback_data=f"cf:secth:{section_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Действие (с иконкой пересылки если включена)
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    # Баг 2 fix: убран лишний emoji, добавлено слово "Действие"
+                    text=f"Действие: {action_text}{forward_status}",
+                    callback_data=f"cf:secac:{section_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Пороги баллов (разные действия для разных диапазонов)
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text="📊 Пороги баллов",
+                    callback_data=f"cf:secthr:{section_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Дополнительно (тексты уведомлений, задержки)
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text="⚙️ Дополнительно",
+                    callback_data=f"cf:secadv:{section_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Удалить раздел
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI_DELETE} Удалить раздел",
+                    callback_data=f"cf:secd:{section_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Назад к списку разделов
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI_BACK} Назад",
+                    callback_data=f"cf:sccat:{chat_id}"
+                )
+            ]
+        ]
+    )
+
+    return keyboard
+
+
+def create_section_action_menu(
+    section_id: int,
+    section
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню выбора действия для раздела.
+
+    Новая структура:
+    - Выбор действия (delete/mute/ban) с галочкой
+    - Toggle пересылки для каждого действия (независимо!)
+    - Настройка канала пересылки (общая для всех действий)
+    - Кнопка времени мута (если выбран mute)
+
+    Args:
+        section_id: ID раздела
+        section: Объект CustomSpamSection с полями:
+            - action: текущее действие ('delete', 'mute', 'ban')
+            - mute_duration: длительность мута в минутах
+            - forward_on_delete: пересылать при удалении
+            - forward_on_mute: пересылать при муте
+            - forward_on_ban: пересылать при бане
+            - forward_channel_id: ID канала для пересылки
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура выбора действия
+    """
+    current_action = section.action or 'delete'
+    current_duration = section.mute_duration
+
+    # Формируем текст длительности для мута
+    duration_text = ""
+    if current_duration and current_action == 'mute':
+        if current_duration < 60:
+            duration_text = f" ({current_duration}мин)"
+        elif current_duration < 1440:
+            duration_text = f" ({current_duration // 60}ч)"
+        else:
+            duration_text = f" ({current_duration // 1440}д)"
+
+    # Галочки выбора действия
+    delete_check = " ✓" if current_action == 'delete' else ""
+    mute_check = " ✓" if current_action == 'mute' else ""
+    ban_check = " ✓" if current_action == 'ban' else ""
+
+    # Статусы пересылки для каждого действия
+    fwd_del = EMOJI_ON if section.forward_on_delete else EMOJI_OFF
+    fwd_mute = EMOJI_ON if section.forward_on_mute else EMOJI_OFF
+    fwd_ban = EMOJI_ON if section.forward_on_ban else EMOJI_OFF
+
+    # Формируем текст канала
+    channel_text = section.forward_channel_id or "не задан"
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            # ─────────────────────────────────────────────────────
+            # Действие: Удалить + toggle пересылки
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text=f"🗑️ Удалить{delete_check}",
+                    callback_data=f"cf:secac:delete:{section_id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"📤 {fwd_del}",
+                    callback_data=f"cf:secfd:delete:{section_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Действие: Мут + toggle пересылки + время
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text=f"🔇 Мут{mute_check}{duration_text}",
+                    callback_data=f"cf:secac:mute:{section_id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"📤 {fwd_mute}",
+                    callback_data=f"cf:secfd:mute:{section_id}"
+                ),
+                InlineKeyboardButton(
+                    text="⏱️",
+                    callback_data=f"cf:secmt:{section_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Действие: Бан + toggle пересылки
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text=f"🚫 Бан{ban_check}",
+                    callback_data=f"cf:secac:ban:{section_id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"📤 {fwd_ban}",
+                    callback_data=f"cf:secfd:ban:{section_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Канал пересылки (общий для всех действий)
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text=f"📢 Канал: {channel_text}",
+                    callback_data=f"cf:secch:{section_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Назад
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI_BACK} Назад",
+                    callback_data=f"cf:secs:{section_id}"
+                )
+            ]
+        ]
+    )
+
+    return keyboard
+
+
+def create_section_threshold_menu(
+    section_id: int,
+    current_threshold: int = 60
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню выбора порога чувствительности раздела.
+
+    Args:
+        section_id: ID раздела
+        current_threshold: Текущий порог
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура выбора порога
+    """
+    # Определяем галочку для текущего выбора
+    high_check = " ✓" if current_threshold <= 40 else ""
+    medium_check = " ✓" if 40 < current_threshold <= 70 else ""
+    low_check = " ✓" if current_threshold > 70 else ""
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            # Высокая чувствительность (порог 40)
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI_SENS_HIGH} Высокая (порог 40){high_check}",
+                    callback_data=f"cf:secth:40:{section_id}"
+                )
+            ],
+            # Средняя чувствительность (порог 60)
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI_SENS_MEDIUM} Средняя (порог 60){medium_check}",
+                    callback_data=f"cf:secth:60:{section_id}"
+                )
+            ],
+            # Низкая чувствительность (порог 90)
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI_SENS_LOW} Низкая (порог 90){low_check}",
+                    callback_data=f"cf:secth:90:{section_id}"
+                )
+            ],
+            # Назад
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI_BACK} Назад",
+                    callback_data=f"cf:secs:{section_id}"
+                )
+            ]
+        ]
+    )
+
+    return keyboard
+
+
+def create_section_advanced_menu(
+    section_id: int,
+    section
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню дополнительных настроек раздела.
+
+    Показывает:
+    - Текст уведомления при муте (%user% заменится на @username)
+    - Текст уведомления при бане (%user% заменится на @username)
+    - Задержка удаления уведомления бота
+
+    Args:
+        section_id: ID раздела
+        section: Объект CustomSpamSection с полями:
+            - mute_text: текст уведомления при муте
+            - ban_text: текст уведомления при бане
+            - notification_delete_delay: задержка удаления в секундах
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура дополнительных настроек
+    """
+    # Текст задержки удаления
+    delay = getattr(section, 'notification_delete_delay', None) or 0
+    if delay == 0:
+        delay_text = "не удалять"
+    elif delay < 60:
+        delay_text = f"{delay}сек"
+    else:
+        delay_text = f"{delay // 60}мин"
+
+    # Укороченные тексты уведомлений для отображения
+    mute_text_display = getattr(section, 'mute_text', None) or "не задан"
+    ban_text_display = getattr(section, 'ban_text', None) or "не задан"
+
+    # Обрезаем если слишком длинные
+    if len(mute_text_display) > 15:
+        mute_text_display = mute_text_display[:15] + "..."
+    if len(ban_text_display) > 15:
+        ban_text_display = ban_text_display[:15] + "..."
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            # ─────────────────────────────────────────────────────
+            # Текст уведомления при муте
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text=f"🔇 Текст мута: {mute_text_display}",
+                    callback_data=f"cf:secmtxt:{section_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Текст уведомления при бане
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text=f"🚫 Текст бана: {ban_text_display}",
+                    callback_data=f"cf:secbtxt:{section_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Задержка удаления уведомления бота
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text=f"⏱️ Удалить уведомление: {delay_text}",
+                    callback_data=f"cf:secdel:{section_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Назад к настройкам раздела
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI_BACK} Назад",
+                    callback_data=f"cf:secs:{section_id}"
+                )
+            ]
+        ]
+    )
+
+    return keyboard
+
+
+def create_section_notification_delay_menu(
+    section_id: int,
+    current_delay: int = 0
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню выбора задержки удаления уведомления бота.
+
+    Использует inline кнопки вместо FSM для выбора времени.
+
+    Args:
+        section_id: ID раздела
+        current_delay: Текущая задержка в секундах
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура выбора задержки
+    """
+    # Галочки для текущего выбора
+    check_0 = " ✓" if current_delay == 0 else ""
+    check_10 = " ✓" if current_delay == 10 else ""
+    check_30 = " ✓" if current_delay == 30 else ""
+    check_60 = " ✓" if current_delay == 60 else ""
+    check_300 = " ✓" if current_delay == 300 else ""
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            # Не удалять
+            [
+                InlineKeyboardButton(
+                    text=f"🚫 Не удалять{check_0}",
+                    callback_data=f"cf:secdel:0:{section_id}"
+                )
+            ],
+            # 10 секунд
+            [
+                InlineKeyboardButton(
+                    text=f"⏱️ 10 секунд{check_10}",
+                    callback_data=f"cf:secdel:10:{section_id}"
+                )
+            ],
+            # 30 секунд
+            [
+                InlineKeyboardButton(
+                    text=f"⏱️ 30 секунд{check_30}",
+                    callback_data=f"cf:secdel:30:{section_id}"
+                )
+            ],
+            # 1 минута
+            [
+                InlineKeyboardButton(
+                    text=f"⏱️ 1 минута{check_60}",
+                    callback_data=f"cf:secdel:60:{section_id}"
+                )
+            ],
+            # 5 минут
+            [
+                InlineKeyboardButton(
+                    text=f"⏱️ 5 минут{check_300}",
+                    callback_data=f"cf:secdel:300:{section_id}"
+                )
+            ],
+            # Назад
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI_BACK} Назад",
+                    callback_data=f"cf:secadv:{section_id}"
+                )
+            ]
+        ]
+    )
+
+    return keyboard
+
+
+def create_section_mute_duration_menu(
+    section_id: int,
+    current_duration: int = 60
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню выбора длительности мута.
+
+    Использует inline кнопки вместо FSM для выбора времени.
+
+    Args:
+        section_id: ID раздела
+        current_duration: Текущая длительность в минутах
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура выбора длительности
+    """
+    # Галочки для текущего выбора
+    check_30 = " ✓" if current_duration == 30 else ""
+    check_60 = " ✓" if current_duration == 60 else ""
+    check_180 = " ✓" if current_duration == 180 else ""
+    check_720 = " ✓" if current_duration == 720 else ""
+    check_1440 = " ✓" if current_duration == 1440 else ""
+    check_10080 = " ✓" if current_duration == 10080 else ""
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            # 30 минут
+            [
+                InlineKeyboardButton(
+                    text=f"⏱️ 30 минут{check_30}",
+                    callback_data=f"cf:secmt:30:{section_id}"
+                )
+            ],
+            # 1 час
+            [
+                InlineKeyboardButton(
+                    text=f"⏱️ 1 час{check_60}",
+                    callback_data=f"cf:secmt:60:{section_id}"
+                )
+            ],
+            # 3 часа
+            [
+                InlineKeyboardButton(
+                    text=f"⏱️ 3 часа{check_180}",
+                    callback_data=f"cf:secmt:180:{section_id}"
+                )
+            ],
+            # 12 часов
+            [
+                InlineKeyboardButton(
+                    text=f"⏱️ 12 часов{check_720}",
+                    callback_data=f"cf:secmt:720:{section_id}"
+                )
+            ],
+            # 1 день
+            [
+                InlineKeyboardButton(
+                    text=f"⏱️ 1 день{check_1440}",
+                    callback_data=f"cf:secmt:1440:{section_id}"
+                )
+            ],
+            # 7 дней
+            [
+                InlineKeyboardButton(
+                    text=f"⏱️ 7 дней{check_10080}",
+                    callback_data=f"cf:secmt:10080:{section_id}"
+                )
+            ],
+            # Ручной ввод времени (Правило 22: запрет хардкода - даём возможность вводить своё)
+            [
+                InlineKeyboardButton(
+                    text="⌨️ Ввести своё",
+                    callback_data=f"cf:secmtc:{section_id}"
+                )
+            ],
+            # Назад
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI_BACK} Назад",
+                    callback_data=f"cf:secac:{section_id}"
+                )
+            ]
+        ]
+    )
+
+    return keyboard
+
+
+def create_section_patterns_menu(
+    section_id: int,
+    page: int,
+    total_pages: int,
+    pattern_ids: List[int]
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню пагинации для паттернов раздела.
+
+    Args:
+        section_id: ID раздела
+        page: Текущая страница (0-based)
+        total_pages: Общее количество страниц
+        pattern_ids: Список ID паттернов на текущей странице
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура пагинации
+    """
+    buttons = []
+
+    # Кнопки удаления для каждого паттерна
+    for pattern_id in pattern_ids:
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"❌ #{pattern_id}",
+                callback_data=f"cf:secpd:{pattern_id}:{section_id}"
+            )
+        ])
+
+    # Ряд навигации
+    if total_pages > 1:
+        nav_row = []
+
+        if page > 0:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="⬅️",
+                    callback_data=f"cf:secp:{section_id}:{page - 1}"
+                )
+            )
+
+        nav_row.append(
+            InlineKeyboardButton(
+                text=f"{page + 1}/{total_pages}",
+                callback_data="cf:noop"
+            )
+        )
+
+        if page < total_pages - 1:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="➡️",
+                    callback_data=f"cf:secp:{section_id}:{page + 1}"
+                )
+            )
+
+        buttons.append(nav_row)
+
+    # ─────────────────────────────────────────────────────
+    # Кнопки действий с паттернами
+    # ─────────────────────────────────────────────────────
+    # Добавить + Импорт из текста
+    buttons.append([
+        InlineKeyboardButton(
+            text=f"{EMOJI_ADD} Добавить",
+            callback_data=f"cf:secpa:{section_id}"
+        ),
+        InlineKeyboardButton(
+            text="📥 Импорт",
+            callback_data=f"cf:secimp:{section_id}"
+        )
+    ])
+
+    # Удалить все паттерны (только если есть паттерны)
+    if pattern_ids:
+        buttons.append([
+            InlineKeyboardButton(
+                text="🗑️ Удалить все паттерны",
+                callback_data=f"cf:secpda:{section_id}"
+            )
+        ])
+
+    # Назад к настройкам раздела
+    buttons.append([
+        InlineKeyboardButton(
+            text=f"{EMOJI_BACK} Назад",
+            callback_data=f"cf:secs:{section_id}"
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def create_section_delete_confirm_menu(
+    section_id: int,
+    chat_id: int
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню подтверждения удаления раздела.
+
+    Args:
+        section_id: ID раздела
+        chat_id: ID группы
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура подтверждения
+    """
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⚠️ Да, удалить раздел",
+                    callback_data=f"cf:secdc:{section_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI_BACK} Отмена",
+                    callback_data=f"cf:secs:{section_id}"
+                )
+            ]
+        ]
+    )
+
+    return keyboard
+
+
+def create_cancel_section_input_menu(
+    chat_id: int
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню отмены ввода для раздела (FSM).
+
+    Args:
+        chat_id: ID группы
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура отмены
+    """
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI_BACK} Отмена",
+                    callback_data=f"cf:sccat:{chat_id}"
+                )
+            ]
+        ]
+    )
+
+    return keyboard
+
+
+def create_cancel_section_pattern_input_menu(
+    section_id: int
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню отмены ввода паттерна раздела (FSM).
+
+    Args:
+        section_id: ID раздела
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура отмены
+    """
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI_BACK} Отмена",
+                    callback_data=f"cf:secs:{section_id}"
                 )
             ]
         ]

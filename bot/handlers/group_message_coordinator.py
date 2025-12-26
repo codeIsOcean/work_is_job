@@ -76,6 +76,14 @@ from datetime import timedelta
 # Импорт исключений
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
+# ============================================================
+# ИМПОРТ REDIS ДЛЯ КЭШИРОВАНИЯ АВТОРОВ СООБЩЕНИЙ
+# ============================================================
+# Нужно для мута по реакциям: Telegram API не передаёт автора
+# сообщения в событии реакции, поэтому кэшируем message_id → user_id
+from bot.services.redis_conn import redis
+import inspect
+
 # Создаём логгер для этого модуля
 logger = logging.getLogger(__name__)
 
@@ -115,6 +123,56 @@ async def _is_admin(bot, chat_id: int, user_id: int) -> bool:
             f"chat={chat_id}, user={user_id}"
         )
         return False
+
+
+# ============================================================
+# КЭШИРОВАНИЕ АВТОРОВ СООБЩЕНИЙ ДЛЯ МУТА ПО РЕАКЦИЯМ
+# ============================================================
+# Telegram Bot API не передаёт объект message в событии реакции,
+# только message_id. Поэтому нужно кэшировать авторов сообщений
+# чтобы потом знать кого мутить при получении реакции.
+
+# Ключ Redis для кэширования автора сообщения
+# Формат: msg_author:{chat_id}:{message_id} → user_id
+MSG_AUTHOR_CACHE_KEY = "msg_author:{chat_id}:{message_id}"
+
+# TTL кэша: 24 часа (реакции обычно ставят в течение дня)
+MSG_AUTHOR_CACHE_TTL = 24 * 60 * 60  # 86400 секунд
+
+
+async def cache_message_author(chat_id: int, message_id: int, user_id: int) -> None:
+    """
+    Кэширует автора сообщения в Redis для мута по реакциям.
+
+    Когда админ ставит реакцию на сообщение, Telegram не передаёт
+    информацию об авторе сообщения. Эта функция сохраняет связь
+    message_id → user_id чтобы потом знать кого мутить.
+
+    Args:
+        chat_id: ID чата (группы)
+        message_id: ID сообщения
+        user_id: ID автора сообщения
+    """
+    try:
+        # Формируем ключ Redis
+        cache_key = MSG_AUTHOR_CACHE_KEY.format(chat_id=chat_id, message_id=message_id)
+
+        # Сохраняем user_id в Redis с TTL 24 часа
+        set_result = redis.setex(cache_key, MSG_AUTHOR_CACHE_TTL, str(user_id))
+
+        # Redis может быть async или sync - обрабатываем оба случая
+        if inspect.isawaitable(set_result):
+            await set_result
+
+        # Логируем успешное кэширование (debug уровень чтобы не засорять логи)
+        logger.debug(
+            f"[COORDINATOR] 📝 Закэшировали автора: chat={chat_id}, "
+            f"msg={message_id}, user={user_id}"
+        )
+    except Exception as e:
+        # Ошибка кэширования не должна блокировать обработку сообщения
+        # Просто логируем warning - мут по реакциям не сработает для этого сообщения
+        logger.warning(f"[COORDINATOR] Ошибка кэширования автора сообщения: {e}")
 
 
 # ============================================================
@@ -168,6 +226,13 @@ async def group_message_handler(
     # Считаем ВСЕ сообщения включая админов (для полной статистики)
     # Ошибки инкремента не блокируют основной поток (ловятся внутри)
     await increment_message_count(session, chat_id, user_id)
+
+    # ─────────────────────────────────────────────────────────
+    # КЭШИРОВАНИЕ АВТОРА СООБЩЕНИЯ ДЛЯ МУТА ПО РЕАКЦИЯМ
+    # ─────────────────────────────────────────────────────────
+    # Telegram Bot API не передаёт автора сообщения в событии реакции,
+    # поэтому кэшируем message_id → user_id для последующего мута
+    await cache_message_author(chat_id, message.message_id, user_id)
 
     # ─────────────────────────────────────────────────────────
     # ШАГ 0: MESSAGE MANAGEMENT - системные сообщения и репин

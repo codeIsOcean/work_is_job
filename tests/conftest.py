@@ -41,6 +41,12 @@ from bot.database.models import Base
 from bot.database import session as db_session_module
 from bot.services import redis_conn as redis_module
 
+# Импортируем все модели чтобы они зарегистрировались в Base.metadata
+# Это необходимо для корректного создания таблиц в тестах
+import bot.database.models_content_filter  # noqa: F401
+import bot.database.models_antispam  # noqa: F401
+import bot.database.mute_models  # noqa: F401
+
 
 def _build_database_url() -> str:
     explicit = os.getenv("TEST_DATABASE_URL")
@@ -102,10 +108,24 @@ async def _reset_redis_client():
 @pytest.fixture(scope="session")
 async def _setup_test_database():
     """Create database schema and patch global session factory to use test database."""
+    from sqlalchemy import text
+
     async def init_engine(url: str):
         engine = create_async_engine(url, echo=False, poolclass=NullPool)
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
+            # Удаляем все таблицы с CASCADE для PostgreSQL
+            if "postgresql" in url:
+                await conn.execute(text("""
+                    DO $$ DECLARE
+                        r RECORD;
+                    BEGIN
+                        FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
+                            EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident(r.tablename) || ' CASCADE';
+                        END LOOP;
+                    END $$;
+                """))
+            else:
+                await conn.run_sync(Base.metadata.drop_all)
             await conn.run_sync(Base.metadata.create_all)
         return engine
 
@@ -140,9 +160,21 @@ async def _setup_test_database():
 @pytest.fixture
 async def db_session(_setup_test_database):
     """Provide an isolated database session for a test."""
+    from sqlalchemy import text
+
     engine = db_session_module.engine
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
+        # Удаляем все таблицы с CASCADE для PostgreSQL
+        # Это решает проблему зависимых foreign keys
+        await conn.execute(text("""
+            DO $$ DECLARE
+                r RECORD;
+            BEGIN
+                FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
+                    EXECUTE 'DROP TABLE IF EXISTS ' || quote_ident(r.tablename) || ' CASCADE';
+                END LOOP;
+            END $$;
+        """))
         await conn.run_sync(Base.metadata.create_all)
 
     session_factory = _setup_test_database
@@ -300,7 +332,7 @@ def pytest_collection_modifyitems(config, items):
         skip_e2e = pytest.mark.skip(reason="e2e tests are unstable on Windows; run them on Linux CI/prod")
 
         # Файлы которые НЕ пропускаем на Windows
-        allowed_on_windows = {"test_userbot_flows.py", "test_telegram_html.py"}
+        allowed_on_windows = {"test_userbot_flows.py", "test_telegram_html.py", "test_mute_by_reaction_e2e.py", "test_custom_sections_e2e.py", "test_escort_spam_e2e.py"}
 
         for item in items:
             if "e2e" in item.keywords:

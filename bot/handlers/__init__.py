@@ -10,7 +10,7 @@ from .captcha import captcha_router
 from .broadcast_handlers.broadcast_handlers import broadcast_router
 from .bot_moderation_handlers.new_member_requested_to_join_mute_handlers import new_member_requested_handler
 from .auto_mute_scammers_handlers import auto_mute_scammers_router
-from .mute_by_reaction import reaction_mute_router
+from .mute_by_reaction import reaction_mute_router, reaction_mute_settings_router
 # Удалено: admin_log_handlers (мёртвый код - обрабатывал несуществующие callbacks)
 from .enhanced_analysis_test_handler import enhanced_analysis_router
 from .settings_captcha_handler import captcha_settings_router
@@ -58,6 +58,7 @@ handlers_router.include_router(auto_mute_scammers_router)     # Автомут �
 handlers_router.include_router(enhanced_analysis_router)
 handlers_router.include_router(journal_link_router)           # Привязка журнала через пересылку
 handlers_router.include_router(reaction_mute_router)
+handlers_router.include_router(reaction_mute_settings_router)  # UI настроек мута по реакциям
 handlers_router.include_router(captcha_settings_router)
 handlers_router.include_router(unscam_router)                 # Команда /unscam в ЛС
 handlers_router.include_router(antispam_router)               # Антиспам настройки UI
@@ -96,6 +97,7 @@ def create_fresh_handlers_router():
     fresh_router.include_router(enhanced_analysis_router)
     fresh_router.include_router(journal_link_router)
     fresh_router.include_router(reaction_mute_router)
+    fresh_router.include_router(reaction_mute_settings_router)  # UI настроек мута по реакциям
     fresh_router.include_router(captcha_settings_router)
     fresh_router.include_router(unscam_router)
     fresh_router.include_router(antispam_router)

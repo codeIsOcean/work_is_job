@@ -502,26 +502,66 @@ class ScamDetector:
         lower_text = text.lower()
 
         # ─────────────────────────────────────────────────────────
-        # ШАГ 2: Проверяем hardcoded сигналы
+        # ШАГ 2: Загружаем переопределения базовых сигналов
+        # ─────────────────────────────────────────────────────────
+        # Теперь базовые сигналы НАСТРАИВАЕМЫЕ вместо хардкода!
+        from bot.database.models_content_filter import BaseSignalOverride
+        from sqlalchemy import select
+
+        overrides_map: Dict[str, Dict] = {}  # signal_name -> {enabled, weight}
+        try:
+            override_query = select(BaseSignalOverride).where(
+                BaseSignalOverride.chat_id == chat_id
+            )
+            override_result = await session.execute(override_query)
+            overrides = override_result.scalars().all()
+
+            for override in overrides:
+                overrides_map[override.signal_name] = {
+                    'enabled': override.enabled,
+                    'weight': override.weight_override
+                }
+        except Exception as e:
+            logger.warning(f"[ScamDetector] Ошибка загрузки переопределений: {e}")
+
+        # ─────────────────────────────────────────────────────────
+        # ШАГ 3: Проверяем базовые сигналы (с учётом переопределений)
         # ─────────────────────────────────────────────────────────
         total_score = 0
         triggered: List[str] = []
 
         for signal_name, signal_data in SCAM_SIGNALS.items():
+            # Проверяем переопределение для этого сигнала
+            override = overrides_map.get(signal_name)
+
+            # Если сигнал отключён для этой группы - пропускаем
+            if override and not override['enabled']:
+                logger.debug(
+                    f"[ScamDetector] Базовый сигнал '{signal_name}' отключён для группы"
+                )
+                continue
+
             pattern = self._compiled_patterns[signal_name]
             match_normalized = pattern.search(normalized_text)
             match_original = pattern.search(lower_text)
 
             if match_normalized or match_original:
-                total_score += signal_data['score']
-                triggered.append(f"{signal_name} (+{signal_data['score']})")
+                # Используем переопределённый вес или стандартный
+                if override and override['weight'] is not None:
+                    score = override['weight']
+                    triggered.append(f"{signal_name} (+{score} [custom])")
+                else:
+                    score = signal_data['score']
+                    triggered.append(f"{signal_name} (+{score})")
+
+                total_score += score
                 logger.debug(
                     f"[ScamDetector] Базовый сигнал '{signal_name}' сработал: "
-                    f"+{signal_data['score']} баллов"
+                    f"+{score} баллов"
                 )
 
         # ─────────────────────────────────────────────────────────
-        # ШАГ 3: Загружаем и проверяем кастомные паттерны
+        # ШАГ 4: Загружаем и проверяем кастомные паттерны
         # ─────────────────────────────────────────────────────────
         # Импортируем сервис паттернов (lazy import для избежания circular)
         from bot.services.content_filter.scam_pattern_service import get_pattern_service
@@ -628,7 +668,7 @@ class ScamDetector:
                 )
 
         # ─────────────────────────────────────────────────────────
-        # ШАГ 4: Обновляем счётчики срабатываний
+        # ШАГ 5: Обновляем счётчики срабатываний
         # ─────────────────────────────────────────────────────────
         if triggered_pattern_ids:
             for pattern_id in triggered_pattern_ids:
@@ -638,7 +678,7 @@ class ScamDetector:
                 )
 
         # ─────────────────────────────────────────────────────────
-        # ШАГ 4.5: Загружаем и проверяем категории сигналов
+        # ШАГ 5.5: Загружаем и проверяем категории сигналов
         # ─────────────────────────────────────────────────────────
         # Категории позволяют админам создавать свои наборы ключевых слов
         # (например: "Наркотики", "Контакты для связи" и т.д.)
@@ -695,7 +735,7 @@ class ScamDetector:
             logger.warning(f"[ScamDetector] Ошибка проверки категорий: {e}")
 
         # ─────────────────────────────────────────────────────────
-        # ШАГ 5: Сравниваем с порогом
+        # ШАГ 6: Сравниваем с порогом
         # ─────────────────────────────────────────────────────────
         is_scam = total_score >= sensitivity
 

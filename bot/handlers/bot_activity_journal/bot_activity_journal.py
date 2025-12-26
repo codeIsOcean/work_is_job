@@ -326,6 +326,77 @@ async def format_activity_message(
         message += f"⏰ <b>Когда:</b> {current_time}\n"
         message += f"#settings #automute"
     
+    elif event_type == "REACTION_MUTE":
+        # Мут по реакции администратора
+        admin_data = additional_info.get('admin', {}) if additional_info else {}
+        admin_first = admin_data.get('first_name', '') or ''
+        admin_last = admin_data.get('last_name', '') or ''
+        admin_name = f"{admin_first} {admin_last}".strip()
+        admin_username = admin_data.get('username', '') or ''
+        admin_id = admin_data.get('user_id', 'N/A')
+
+        admin_display = admin_name or 'Администратор'
+        if admin_username:
+            admin_display += f" [@{admin_username}]"
+        admin_display += f" [{admin_id}]"
+
+        reaction = additional_info.get('reaction', '?') if additional_info else '?'
+        duration_seconds = additional_info.get('duration_seconds') if additional_info else None
+        muted_groups = additional_info.get('muted_groups', []) if additional_info else []
+        global_mute = additional_info.get('global_mute', False) if additional_info else False
+        origin_message_id = additional_info.get('origin_message_id') if additional_info else None
+
+        if duration_seconds is None:
+            duration_text = "навсегда"
+        else:
+            days = duration_seconds // 86400
+            hours = (duration_seconds % 86400) // 3600
+            if days > 0:
+                duration_text = f"{days} дн."
+            elif hours > 0:
+                duration_text = f"{hours} ч."
+            else:
+                duration_text = f"{duration_seconds // 60} мин."
+
+        message = f"🔇 <b>#REACTION_MUTE</b> {status_emoji}\n\n"
+        message += f"👤 <b>Пользователь:</b> {user_display}\n"
+        message += f"👮 <b>Админ:</b> {admin_display}\n"
+        message += f"🏢 <b>Группа:</b> {group_display}\n"
+        message += f"😠 <b>Реакция:</b> {reaction}\n"
+        message += f"⏱️ <b>Длительность:</b> {duration_text}\n"
+        if origin_message_id:
+            message += f"💬 <b>Сообщение:</b> #{origin_message_id}\n"
+        if muted_groups:
+            message += f"🌐 <b>Мульти-мут:</b> {len(muted_groups)} групп\n"
+        if global_mute:
+            message += f"🌍 <b>Глобальный мут:</b> да\n"
+        message += f"⏰ <b>Когда:</b> {current_time}\n"
+        message += f"#reaction #mute #user{user_id}"
+
+    elif event_type == "REACTION_WARNING":
+        # Предупреждение по реакции
+        admin_data = additional_info.get('admin', {}) if additional_info else {}
+        admin_first = admin_data.get('first_name', '') or ''
+        admin_last = admin_data.get('last_name', '') or ''
+        admin_name = f"{admin_first} {admin_last}".strip()
+        admin_username = admin_data.get('username', '') or ''
+        admin_id = admin_data.get('user_id', 'N/A')
+
+        admin_display = admin_name or 'Администратор'
+        if admin_username:
+            admin_display += f" [@{admin_username}]"
+        admin_display += f" [{admin_id}]"
+
+        reaction = additional_info.get('reaction', '?') if additional_info else '?'
+
+        message = f"⚠️ <b>#REACTION_WARNING</b> {status_emoji}\n\n"
+        message += f"👤 <b>Пользователь:</b> {user_display}\n"
+        message += f"👮 <b>Админ:</b> {admin_display}\n"
+        message += f"🏢 <b>Группа:</b> {group_display}\n"
+        message += f"😠 <b>Реакция:</b> {reaction}\n"
+        message += f"⏰ <b>Когда:</b> {current_time}\n"
+        message += f"#reaction #warning #user{user_id}"
+
     elif event_type == "USER_BANNED":
         initiator_data = additional_info.get('initiator', {}) if additional_info else {}
         reason = additional_info.get('reason', 'Не указано') if additional_info else 'Не указано'
@@ -431,7 +502,24 @@ async def create_activity_keyboard(
                 callback_data=f"captcha_cancel_{user_id}_{chat_id}"
             )
         ])
-    
+
+    # Кнопки для мута по реакции - размут и бан
+    elif event_type == "REACTION_MUTE":
+        user_id = user_data.get('user_id')
+        chat_id = group_data.get('chat_id')
+        buttons.append([
+            # Кнопка размутить - снять ограничения с пользователя
+            InlineKeyboardButton(
+                text="🔓 Размутить",
+                callback_data=f"unmute_user_{user_id}_{chat_id}"
+            ),
+            # Кнопка бана - усилить наказание
+            InlineKeyboardButton(
+                text="🚫 Забанить",
+                callback_data=f"ban_user_{user_id}_{chat_id}"
+            )
+        ])
+
     if buttons:
         return InlineKeyboardMarkup(inline_keyboard=buttons)
     
@@ -488,6 +576,65 @@ async def ban_user_callback(callback):
     except Exception as e:
         logger.error(f"Ошибка при бане пользователя: {e}")
         await callback.answer("❌ Ошибка при бане", show_alert=True)
+
+
+@bot_activity_journal_router.callback_query(lambda c: c.data.startswith("unmute_user_"))
+async def unmute_user_callback(callback):
+    """
+    Обработчик кнопки размутивания пользователя.
+
+    Снимает все ограничения с пользователя в группе.
+    Callback data формат: unmute_user_{user_id}_{group_id}
+    """
+    try:
+        # Извлекаем user_id и group_id из callback_data
+        parts = callback.data.split("_")
+        user_id = int(parts[2])
+        group_id = int(parts[3])
+
+        # Импортируем ChatPermissions для снятия ограничений
+        from aiogram.types import ChatPermissions
+
+        # Создаём разрешения без ограничений (все права)
+        full_permissions = ChatPermissions(
+            can_send_messages=True,
+            can_send_media_messages=True,
+            can_send_polls=True,
+            can_send_other_messages=True,
+            can_add_web_page_previews=True,
+            can_change_info=False,  # Не даём менять инфо группы
+            can_invite_users=True,
+            can_pin_messages=False,  # Не даём закреплять
+        )
+
+        # Снимаем ограничения с пользователя
+        await callback.bot.restrict_chat_member(
+            chat_id=group_id,
+            user_id=user_id,
+            permissions=full_permissions
+        )
+
+        # Уведомляем админа об успехе
+        await callback.answer("🔓 Пользователь размучен", show_alert=True)
+        logger.info(f"✅ Пользователь {user_id} размучен в группе {group_id}")
+
+        # Обновляем текст сообщения, добавляя информацию о размуте
+        try:
+            # Получаем текущий текст и добавляем пометку
+            current_text = callback.message.text or callback.message.caption or ""
+            new_text = current_text + "\n\n✅ <b>РАЗМУЧЕН</b> администратором"
+            await callback.message.edit_text(
+                text=new_text,
+                parse_mode="HTML",
+                reply_markup=None  # Убираем кнопки после действия
+            )
+        except Exception as edit_err:
+            # Если не удалось отредактировать - не критично
+            logger.warning(f"Не удалось обновить сообщение: {edit_err}")
+
+    except Exception as e:
+        logger.error(f"Ошибка при размуте пользователя: {e}")
+        await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
 
 
 def _format_user_link(entity) -> str:

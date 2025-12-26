@@ -460,6 +460,66 @@
 
 **Индексы:** `ix_scam_patterns_chat_id`
 
+### custom_spam_sections
+Кастомные разделы спама (группировка паттернов по тематике).
+
+| Колонка | Тип | По умолчанию | Описание |
+|---------|-----|--------------|----------|
+| id | INTEGER PK | - | Автоинкремент |
+| chat_id | BIGINT FK | - | ID группы |
+| name | VARCHAR(100) | - | Название раздела (например "Такси", "Недвижимость") |
+| description | TEXT | NULL | Описание раздела |
+| threshold | INTEGER | 50 | Порог срабатывания (сумма весов паттернов) |
+| action | VARCHAR(20) | "delete" | Действие: delete / mute / ban / forward_delete |
+| mute_duration | INTEGER | 1440 | Длительность мута в минутах |
+| forward_channel_id | BIGINT | NULL | ID канала для пересылки нарушений |
+| forward_on_delete | BOOLEAN | false | Пересылать при действии delete |
+| forward_on_mute | BOOLEAN | false | Пересылать при действии mute |
+| forward_on_ban | BOOLEAN | false | Пересылать при действии ban |
+| mute_text | VARCHAR(500) | NULL | Кастомный текст уведомления мута |
+| ban_text | VARCHAR(500) | NULL | Кастомный текст уведомления бана |
+| notification_delete_delay | INTEGER | 30 | Автоудаление уведомления через N секунд |
+| delete_delay | INTEGER | 0 | Задержка удаления сообщения |
+| log_violations | BOOLEAN | true | Логировать нарушения в журнал |
+| enabled | BOOLEAN | true | Раздел активен |
+| created_by | BIGINT | NULL | Кто создал |
+| created_at | DATETIME | now | Дата создания |
+| updated_at | DATETIME | now | Дата обновления |
+
+**Индексы:** `ix_custom_spam_sections_chat_id`, `ix_custom_spam_sections_enabled`
+
+**Пример использования:**
+| Раздел | Threshold | Action | Описание |
+|--------|-----------|--------|----------|
+| Такси | 30 | delete | Удаление рекламы такси |
+| Наркотики | 25 | ban | Бан за рекламу наркотиков |
+| Недвижимость | 40 | mute | Мут за спам недвижимости |
+
+### custom_section_patterns
+Паттерны для кастомных разделов спама.
+
+| Колонка | Тип | По умолчанию | Описание |
+|---------|-----|--------------|----------|
+| id | INTEGER PK | - | Автоинкремент |
+| section_id | INTEGER FK | - | ID раздела (CASCADE при удалении) |
+| pattern | VARCHAR(500) | - | Оригинальный паттерн (как ввёл админ) |
+| normalized | VARCHAR(500) | - | Нормализованная версия для поиска |
+| weight | INTEGER | 25 | Вес паттерна при подсчёте скора |
+| is_active | BOOLEAN | true | Паттерн активен |
+| triggers_count | INTEGER | 0 | Количество срабатываний |
+| last_triggered_at | DATETIME | NULL | Последнее срабатывание |
+| created_by | BIGINT | NULL | Кто добавил |
+| created_at | DATETIME | now | Дата добавления |
+
+**Индексы:** `ix_custom_section_patterns_section_id`
+
+**Логика работы:**
+1. При проверке сообщения система ищет совпадения с паттернами раздела
+2. Веса совпавших паттернов суммируются
+3. Если сумма >= threshold раздела, применяется действие
+4. При срабатывании инкрементируется triggers_count паттерна
+5. Если установлен forward_channel_id и включён forward_on_*, информация отправляется в канал
+
 ---
 
 ## Управление сообщениями

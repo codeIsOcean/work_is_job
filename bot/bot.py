@@ -266,7 +266,7 @@ async def main():
             set_result = await bot.set_webhook(
                 WEBHOOK_URL,
                 drop_pending_updates=True,
-                allowed_updates=["message", "callback_query", "chat_member", "my_chat_member", "chat_join_request"]
+                allowed_updates=["message", "callback_query", "chat_member", "my_chat_member", "chat_join_request", "message_reaction", "message_reaction_count"]
             )
             logging.info(f"📤 Результат set_webhook: {set_result}")
             

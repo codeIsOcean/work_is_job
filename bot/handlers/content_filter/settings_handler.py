@@ -60,8 +60,12 @@ from bot.keyboards.content_filter_keyboards import (
     # Клавиатура выбора действия антискама
     create_scam_action_menu
 )
-# Импортируем FilterManager и сервис паттернов
+# Импортируем FilterManager и сервисы паттернов/порогов
 from bot.services.content_filter import FilterManager, get_pattern_service
+# Импортируем сервис порогов баллов
+from bot.services.content_filter.scam_pattern_service import get_threshold_service
+# Импортируем нормализатор текста для preview
+from bot.services.content_filter.text_normalizer import get_normalizer
 
 # Импортируем Redis клиент для FloodDetector
 from bot.services.redis_conn import redis
@@ -87,6 +91,8 @@ class AddWordStates(StatesGroup):
     """Состояния FSM для добавления запрещённого слова."""
     # Ожидание ввода слова от пользователя
     waiting_for_word = State()
+    # Ожидание подтверждения после preview нормализации
+    waiting_for_confirmation = State()
 
 
 class AddPatternStates(StatesGroup):
@@ -1700,6 +1706,7 @@ async def process_add_word(
 ) -> None:
     """
     Обрабатывает ввод слова от пользователя.
+    Показывает preview нормализации и просит подтвердить.
 
     Args:
         message: Сообщение с текстом слова
@@ -1723,6 +1730,83 @@ async def process_add_word(
         await message.answer("❌ Не указано ни одного слова. Попробуйте снова.")
         return
 
+    # Получаем нормализатор для preview
+    normalizer = get_normalizer()
+
+    # Формируем preview для каждого слова
+    preview_lines = []
+    for word in words:
+        normalized = normalizer.normalize(word)
+        if word.lower() != normalized:
+            # Показываем разницу если есть изменения
+            preview_lines.append(f"• <code>{word}</code> → <code>{normalized}</code>")
+        else:
+            preview_lines.append(f"• <code>{word}</code>")
+
+    # Сохраняем слова в состояние для подтверждения
+    await state.update_data(words_to_add=words)
+    await state.set_state(AddWordStates.waiting_for_confirmation)
+
+    # Формируем сообщение preview
+    preview_text = (
+        f"🔍 <b>Предпросмотр нормализации</b>\n\n"
+        f"Так фильтр будет искать эти слова:\n\n"
+        + "\n".join(preview_lines) +
+        f"\n\n"
+        f"💡 <i>Обфускация (зачёркивание, fullwidth, circled и т.д.) "
+        f"будет автоматически нормализована при проверке сообщений.</i>"
+    )
+
+    # Кнопки подтверждения
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✅ Добавить",
+                callback_data=f"cf:wac:{chat_id}"  # word add confirm
+            ),
+            InlineKeyboardButton(
+                text="✏️ Изменить",
+                callback_data=f"cf:wae:{chat_id}"  # word add edit
+            )
+        ],
+        [InlineKeyboardButton(
+            text="◀️ Отмена",
+            callback_data=f"cf:w:{chat_id}"
+        )]
+    ])
+
+    await message.answer(preview_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:wac:-?\d+$"))
+async def confirm_add_word(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Подтверждает добавление слов после preview.
+
+    Callback: cf:wac:{chat_id} (word add confirm)
+
+    Args:
+        callback: CallbackQuery
+        state: FSMContext
+        session: Сессия БД
+    """
+    # Парсим chat_id
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Получаем слова из состояния
+    data = await state.get_data()
+    words = data.get('words_to_add', [])
+
+    if not words:
+        await callback.answer("❌ Нет слов для добавления", show_alert=True)
+        await state.clear()
+        return
+
     # Добавляем каждое слово
     added = 0
     skipped = 0
@@ -1732,7 +1816,7 @@ async def process_add_word(
             await _filter_manager.word_filter.add_word(
                 chat_id=chat_id,
                 word=word,
-                created_by=message.from_user.id,
+                created_by=callback.from_user.id,
                 session=session
             )
             added += 1
@@ -1756,13 +1840,60 @@ async def process_add_word(
     words_count = await _filter_manager.word_filter.get_words_count(chat_id, session)
     keyboard = create_words_menu(chat_id, words_count)
 
-    await message.answer(
-        f"{response}\n\n"
-        f"🔤 <b>Запрещённые слова</b>\n"
-        f"Всего слов: {words_count}",
-        reply_markup=keyboard,
-        parse_mode="HTML"
+    try:
+        await callback.message.edit_text(
+            f"{response}\n\n"
+            f"🔤 <b>Запрещённые слова</b>\n"
+            f"Всего слов: {words_count}",
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:wae:-?\d+$"))
+async def edit_add_word(
+    callback: CallbackQuery,
+    state: FSMContext
+) -> None:
+    """
+    Возвращает к вводу слова для редактирования.
+
+    Callback: cf:wae:{chat_id} (word add edit)
+
+    Args:
+        callback: CallbackQuery
+        state: FSMContext
+    """
+    # Парсим chat_id
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Возвращаем в состояние ввода слова
+    await state.set_state(AddWordStates.waiting_for_word)
+
+    text = (
+        f"📝 <b>Добавление слова</b>\n\n"
+        f"Отправьте слово или фразу которую нужно заблокировать.\n\n"
+        f"Можно отправить несколько слов, каждое с новой строки."
     )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="◀️ Отмена",
+            callback_data=f"cf:w:{chat_id}"
+        )]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
 
 
 # ============================================================
@@ -2726,10 +2857,12 @@ async def confirm_import_patterns(
     pattern_service = get_pattern_service()
     added = 0
     skipped = 0
+    duplicates = 0
 
     for phrase, phrase_weight in phrases:
         try:
-            await pattern_service.add_pattern(
+            # add_pattern возвращает (success: bool, message: str)
+            success, message = await pattern_service.add_pattern(
                 chat_id=chat_id,
                 pattern=phrase,
                 pattern_type='phrase',
@@ -2737,9 +2870,17 @@ async def confirm_import_patterns(
                 created_by=callback.from_user.id,
                 session=session
             )
-            added += 1
+            if success:
+                added += 1
+            else:
+                # Проверяем на дубликат по сообщению
+                if "уже существует" in message:
+                    duplicates += 1
+                else:
+                    skipped += 1
+                    logger.info(f"[IMPORT] Паттерн не добавлен: '{phrase}' - {message}")
         except Exception as e:
-            logger.warning(f"Не удалось добавить паттерн '{phrase}': {e}")
+            logger.warning(f"[IMPORT] Ошибка при добавлении паттерна '{phrase}': {e}")
             skipped += 1
 
     # Очищаем состояние
@@ -2748,13 +2889,17 @@ async def confirm_import_patterns(
     # Показываем результат
     patterns_count = await pattern_service.get_patterns_count(chat_id, session)
 
-    text = (
-        f"✅ <b>Импорт завершён</b>\n\n"
-        f"Добавлено: {added}\n"
-        f"Пропущено (дубликаты): {skipped}\n\n"
-        f"🎯 <b>Паттерны антискама</b>\n"
-        f"Всего паттернов: {patterns_count}"
-    )
+    # Формируем текст результата с учётом дубликатов
+    result_lines = [f"✅ <b>Импорт завершён</b>\n"]
+    result_lines.append(f"Добавлено: {added}")
+    if duplicates > 0:
+        result_lines.append(f"Дубликаты (пропущены): {duplicates}")
+    if skipped > 0:
+        result_lines.append(f"Ошибки: {skipped}")
+    result_lines.append(f"\n🎯 <b>Паттерны антискама</b>")
+    result_lines.append(f"Всего паттернов: {patterns_count}")
+
+    text = "\n".join(result_lines)
 
     keyboard = create_scam_patterns_menu(chat_id, patterns_count)
 
@@ -2763,7 +2908,7 @@ async def confirm_import_patterns(
     except TelegramAPIError:
         pass
 
-    await callback.answer(f"Импортировано: {added}")
+    await callback.answer(f"Импортировано: {added}, дубликатов: {duplicates}")
 
 
 # ============================================================
@@ -3334,6 +3479,10 @@ async def delete_category_word(
 class AddCategoryWordStates(StatesGroup):
     """FSM состояния для добавления слова в категорию."""
     waiting_for_word = State()
+    # Ожидание подтверждения после preview нормализации
+    waiting_for_confirmation = State()
+    # Ожидание ввода кастомной нормализации
+    waiting_for_custom_normalized = State()
 
 
 @settings_handler_router.callback_query(F.data.regexp(r"^cf:(sw|hw|ow)w:-?\d+$"))
@@ -3469,7 +3618,7 @@ async def process_add_category_word(
     session: AsyncSession
 ) -> None:
     """
-    Обрабатывает добавление слова в категорию.
+    Обрабатывает ввод слова - показывает preview нормализации.
 
     Args:
         message: Сообщение с текстом слова
@@ -3481,8 +3630,7 @@ async def process_add_category_word(
     chat_id = data.get('chat_id')
     category_code = data.get('category_code')
     category_db = data.get('category_db')
-    match_type = data.get('match_type', 'word')  # По умолчанию 'word'
-    instruction_message_id = data.get('instruction_message_id')
+    match_type = data.get('match_type', 'word')
 
     if not chat_id or not category_code:
         await state.clear()
@@ -3500,19 +3648,110 @@ async def process_add_category_word(
         await message.answer("❌ Не указаны слова для добавления.")
         return
 
+    # Получаем нормализатор для preview
+    normalizer = get_normalizer()
+
+    # Формируем preview для каждого слова и сохраняем нормализации
+    preview_lines = []
+    normalized_map = {}  # word -> normalized
+    for word in words_list:
+        normalized = normalizer.normalize(word)
+        normalized_map[word] = normalized
+        if word.lower() != normalized:
+            # Показываем разницу если есть изменения
+            preview_lines.append(f"• <code>{word}</code> → <code>{normalized}</code>")
+        else:
+            preview_lines.append(f"• <code>{word}</code>")
+
+    # Сохраняем слова и нормализации в состояние
+    await state.update_data(
+        words_to_add=words_list,
+        normalized_map=normalized_map  # Сохраняем маппинг для редактирования
+    )
+    await state.set_state(AddCategoryWordStates.waiting_for_confirmation)
+
+    # Удаляем сообщение пользователя для чистоты
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    match_type_text = "📝 Точное слово" if match_type == 'word' else "📄 Содержит"
+
+    # Формируем сообщение preview
+    preview_text = (
+        f"🔍 <b>Предпросмотр нормализации</b>\n\n"
+        f"Категория: {category_title}\n"
+        f"Тип: {match_type_text}\n\n"
+        f"Так фильтр будет искать эти слова:\n\n"
+        + "\n".join(preview_lines) +
+        f"\n\n"
+        f"💡 <i>Если нормализация неверная, нажмите «✏️ Норм.» чтобы исправить вручную.</i>"
+    )
+
+    # Кнопки подтверждения
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✅ Добавить",
+                callback_data=f"cf:{category_code}wc:{chat_id}"  # word confirm
+            ),
+            InlineKeyboardButton(
+                text="✏️ Норм.",
+                callback_data=f"cf:{category_code}wn:{chat_id}"  # word normalize edit
+            ),
+            InlineKeyboardButton(
+                text="🔄 Заново",
+                callback_data=f"cf:{category_code}we:{chat_id}"  # word edit (ввести другое слово)
+            )
+        ],
+        [InlineKeyboardButton(
+            text="◀️ Отмена",
+            callback_data=f"cf:{category_code}l:{chat_id}:0"
+        )]
+    ])
+
+    await message.answer(preview_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:(sw|hw|ow)wc:-?\d+$"))
+async def confirm_add_category_word(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Подтверждает добавление слов после preview.
+
+    Callback: cf:{category}wc:{chat_id} (word confirm)
+    """
+    # Парсим данные
+    parts = callback.data.split(":")
+    category_code = parts[1][:2]
+    chat_id = int(parts[2])
+
+    # Получаем данные из состояния
+    data = await state.get_data()
+    words_list = data.get('words_to_add', [])
+    category_db = data.get('category_db')
+    match_type = data.get('match_type', 'word')
+    normalized_map = data.get('normalized_map', {})  # Кастомные нормализации
+
+    if not words_list:
+        await callback.answer("❌ Нет слов для добавления", show_alert=True)
+        await state.clear()
+        return
+
+    # Получаем название категории
+    _, category_title, _ = CATEGORY_NAMES.get(category_code, ('simple', '📝 Простые слова', 'слово'))
+
     # Добавляем слова
     added = 0
     duplicates = 0
-
-    # Список слов-дубликатов с указанием категории
     duplicate_details = []
 
     for word in words_list:
-        # ─────────────────────────────────────────────────────────
-        # Проверяем на дубликат по (chat_id, word)
-        # БД constraint uq_filter_chat_word проверяет именно эту пару,
-        # поэтому проверка category НЕ нужна (и вызывала IntegrityError)
-        # ─────────────────────────────────────────────────────────
+        # Проверяем на дубликат
         existing_result = await session.execute(
             select(FilterWord).where(
                 FilterWord.chat_id == chat_id,
@@ -3521,19 +3760,11 @@ async def process_add_category_word(
         )
         existing_word = existing_result.scalar_one_or_none()
         if existing_word:
-            # ─────────────────────────────────────────────────────────
-            # Если слово имеет category=NULL (застряло в БД без категории),
-            # автоматически удаляем его и позволяем добавить с правильной категорией.
-            # Такие слова не отображаются ни в одной категории, но блокируют добавление.
-            # ─────────────────────────────────────────────────────────
             if existing_word.category is None:
-                # Удаляем "сиротское" слово
                 await session.delete(existing_word)
                 await session.flush()
                 logger.info(f"[ContentFilter] Удалено слово '{word}' с category=NULL из чата {chat_id}")
-                # Продолжаем добавление — не считаем это дубликатом
             else:
-                # Слово уже существует в конкретной категории — запоминаем где
                 cat_names = {
                     'simple': '📝 Простые',
                     'harmful': '💊 Вредные',
@@ -3544,37 +3775,30 @@ async def process_add_category_word(
                 duplicates += 1
                 continue
 
-        # Добавляем слово с выбранным match_type
+        # Добавляем слово (используем кастомную нормализацию если есть)
+        normalized_value = normalized_map.get(word, word.lower())
         new_word = FilterWord(
             chat_id=chat_id,
             word=word,
-            normalized=word.lower(),
+            normalized=normalized_value,
             match_type=match_type,
             category=category_db,
-            created_by=message.from_user.id
+            created_by=callback.from_user.id
         )
         session.add(new_word)
         added += 1
+        logger.debug(f"[ContentFilter] Добавлено слово '{word}' → normalized='{normalized_value}'")
+
 
     await session.commit()
 
-    # НЕ очищаем FSM - позволяем продолжить добавление
-    # FSM очистится при нажатии "Готово" или "Назад"
+    # Возвращаем в состояние ввода для продолжения добавления
+    await state.set_state(AddCategoryWordStates.waiting_for_word)
 
-    # Удаляем сообщение пользователя для чистоты чата
-    try:
-        await message.delete()
-    except TelegramAPIError:
-        pass
-
-    # ─────────────────────────────────────────────────────────
-    # Формируем ответ с детализацией дубликатов
-    # Показываем в какой категории уже существует каждое слово
-    # ─────────────────────────────────────────────────────────
+    # Формируем ответ
     result_text = f"✅ Добавлено слов: {added}"
     if duplicates > 0:
         result_text += f"\n⚠️ Дубликатов: {duplicates}"
-        # Показываем первые 5 дубликатов с их категориями
         if duplicate_details:
             shown_details = duplicate_details[:5]
             result_text += "\n" + "\n".join(shown_details)
@@ -3584,10 +3808,9 @@ async def process_add_category_word(
     match_type_text = "📝 Точное слово" if match_type == 'word' else "📄 Содержит"
     logger.info(f"[ContentFilter] В чат {chat_id} добавлено {added} слов категории {category_db}, match_type={match_type}")
 
-    # Получаем обновлённый список слов для отображения общего количества
+    # Получаем обновлённый список слов
     words = await _filter_manager.word_filter.get_words_by_category(chat_id, session, category_db)
 
-    # Формируем текст с возможностью продолжить добавление
     text = (
         f"{result_text}\n\n"
         f"📝 {category_title}\n"
@@ -3597,7 +3820,6 @@ async def process_add_category_word(
         f"<i>Можно отправить несколько слов, каждое с новой строки.</i>"
     )
 
-    # Кнопки: Готово и Назад
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text="✅ Готово",
@@ -3609,22 +3831,241 @@ async def process_add_category_word(
         )]
     ])
 
-    # Редактируем исходное сообщение вместо отправки нового
-    if instruction_message_id:
-        try:
-            await message.bot.edit_message_text(
-                chat_id=message.chat.id,
-                message_id=instruction_message_id,
-                text=text,
-                reply_markup=keyboard,
-                parse_mode="HTML"
-            )
-            return
-        except TelegramAPIError:
-            pass
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
 
-    # Fallback: отправляем новое сообщение
-    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:(sw|hw|ow)we:-?\d+$"))
+async def edit_add_category_word(
+    callback: CallbackQuery,
+    state: FSMContext
+) -> None:
+    """
+    Возвращает к вводу слова для редактирования.
+
+    Callback: cf:{category}we:{chat_id} (word edit)
+    """
+    # Парсим данные
+    parts = callback.data.split(":")
+    category_code = parts[1][:2]
+    chat_id = int(parts[2])
+
+    # Получаем данные из состояния
+    data = await state.get_data()
+    match_type = data.get('match_type', 'word')
+
+    # Получаем название категории
+    _, category_title, _ = CATEGORY_NAMES.get(category_code, ('simple', '📝 Простые слова', 'слово'))
+
+    # Возвращаем в состояние ввода слова
+    await state.set_state(AddCategoryWordStates.waiting_for_word)
+
+    match_type_text = "📝 Точное слово" if match_type == 'word' else "📄 Содержит"
+
+    text = (
+        f"📝 <b>Добавление слова</b>\n\n"
+        f"Категория: {category_title}\n"
+        f"Тип: {match_type_text}\n\n"
+        f"Отправьте слово или фразу.\n"
+        f"<i>Можно отправить несколько слов, каждое с новой строки.</i>"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="◀️ Отмена",
+            callback_data=f"cf:{category_code}l:{chat_id}:0"
+        )]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:(sw|hw|ow)wn:-?\d+$"))
+async def start_edit_normalization(
+    callback: CallbackQuery,
+    state: FSMContext
+) -> None:
+    """
+    Начинает редактирование нормализации.
+
+    Callback: cf:{category}wn:{chat_id} (word normalize)
+    """
+    # Парсим данные
+    parts = callback.data.split(":")
+    category_code = parts[1][:2]
+    chat_id = int(parts[2])
+
+    # Получаем данные из состояния
+    data = await state.get_data()
+    words_list = data.get('words_to_add', [])
+    normalized_map = data.get('normalized_map', {})
+
+    if not words_list:
+        await callback.answer("❌ Нет слов для редактирования", show_alert=True)
+        return
+
+    # Получаем название категории
+    _, category_title, _ = CATEGORY_NAMES.get(category_code, ('simple', '📝 Простые слова', 'слово'))
+
+    # Переходим в состояние ввода кастомной нормализации
+    await state.set_state(AddCategoryWordStates.waiting_for_custom_normalized)
+
+    # Формируем текст с текущими нормализациями
+    current_lines = []
+    for i, word in enumerate(words_list, 1):
+        normalized = normalized_map.get(word, word.lower())
+        current_lines.append(f"{i}. <code>{word}</code> → <code>{normalized}</code>")
+
+    text = (
+        f"✏️ <b>Редактирование нормализации</b>\n\n"
+        f"Категория: {category_title}\n\n"
+        f"Текущие значения:\n"
+        + "\n".join(current_lines) +
+        f"\n\n"
+        f"📝 Отправьте исправленные нормализации в формате:\n"
+        f"<code>номер: новое_значение</code>\n\n"
+        f"Примеры:\n"
+        f"<code>1: шишечки</code>\n"
+        f"<code>2: марочки</code>\n\n"
+        f"<i>Можно отправить несколько строк сразу.</i>"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="◀️ Назад к preview",
+            callback_data=f"cf:{category_code}wp:{chat_id}"  # Возврат к preview
+        )]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.message(AddCategoryWordStates.waiting_for_custom_normalized)
+async def process_custom_normalization(
+    message: Message,
+    state: FSMContext
+) -> None:
+    """
+    Обрабатывает ввод кастомной нормализации.
+
+    Формат: номер: значение
+    Пример: 1: шишечки
+    """
+    # Получаем данные из состояния
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    category_code = data.get('category_code')
+    words_list = data.get('words_to_add', [])
+    normalized_map = data.get('normalized_map', {})
+    match_type = data.get('match_type', 'word')
+
+    if not chat_id or not words_list:
+        await state.clear()
+        await message.answer("❌ Ошибка: данные сессии потеряны. Попробуйте снова.")
+        return
+
+    # Парсим ввод пользователя
+    lines = message.text.strip().split('\n')
+    updated = 0
+
+    for line in lines:
+        line = line.strip()
+        if ':' not in line:
+            continue
+
+        try:
+            num_str, new_value = line.split(':', 1)
+            num = int(num_str.strip())
+            new_value = new_value.strip()
+
+            if 1 <= num <= len(words_list) and new_value:
+                word = words_list[num - 1]
+                normalized_map[word] = new_value
+                updated += 1
+        except (ValueError, IndexError):
+            continue
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    if updated == 0:
+        await message.answer(
+            "⚠️ Не удалось распознать формат.\n"
+            "Используйте: <code>номер: значение</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    # Сохраняем обновлённый маппинг
+    await state.update_data(normalized_map=normalized_map)
+
+    # Получаем название категории
+    _, category_title, _ = CATEGORY_NAMES.get(category_code, ('simple', '📝 Простые слова', 'слово'))
+
+    # Возвращаемся к preview с обновлёнными данными
+    await state.set_state(AddCategoryWordStates.waiting_for_confirmation)
+
+    # Формируем обновлённый preview
+    preview_lines = []
+    for word in words_list:
+        normalized = normalized_map.get(word, word.lower())
+        if word.lower() != normalized:
+            preview_lines.append(f"• <code>{word}</code> → <code>{normalized}</code>")
+        else:
+            preview_lines.append(f"• <code>{word}</code>")
+
+    match_type_text = "📝 Точное слово" if match_type == 'word' else "📄 Содержит"
+
+    preview_text = (
+        f"🔍 <b>Предпросмотр нормализации</b>\n\n"
+        f"Категория: {category_title}\n"
+        f"Тип: {match_type_text}\n\n"
+        f"✅ Обновлено: {updated}\n\n"
+        f"Так фильтр будет искать эти слова:\n\n"
+        + "\n".join(preview_lines) +
+        f"\n\n"
+        f"💡 <i>Если нормализация неверная, нажмите «✏️ Норм.» чтобы исправить вручную.</i>"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✅ Добавить",
+                callback_data=f"cf:{category_code}wc:{chat_id}"
+            ),
+            InlineKeyboardButton(
+                text="✏️ Норм.",
+                callback_data=f"cf:{category_code}wn:{chat_id}"
+            ),
+            InlineKeyboardButton(
+                text="🔄 Заново",
+                callback_data=f"cf:{category_code}we:{chat_id}"
+            )
+        ],
+        [InlineKeyboardButton(
+            text="◀️ Отмена",
+            callback_data=f"cf:{category_code}l:{chat_id}:0"
+        )]
+    ])
+
+    await message.answer(preview_text, reply_markup=keyboard, parse_mode="HTML")
 
 
 # ============================================================
@@ -4628,393 +5069,10 @@ async def process_notification_delay_input(
 
 
 # ============================================================
-# КАТЕГОРИИ СИГНАЛОВ АНТИСКАМА
+# ПРИМЕЧАНИЕ: Старые "Категории сигналов" (ScamSignalCategory)
+# заменены на "Кастомные разделы спама" (CustomSpamSection).
+# Новые хендлеры находятся ниже в разделе CUSTOM SPAM SECTIONS.
 # ============================================================
-# Категории позволяют админам создавать свои наборы ключевых слов
-# для обнаружения скама (например: "Наркотики", "Контакты").
-# Каждая категория имеет название, ключевые слова и вес.
-# ============================================================
-
-
-class SignalCategoryStates(StatesGroup):
-    """FSM состояния для добавления/редактирования категории."""
-    waiting_for_name = State()
-    waiting_for_keywords = State()
-    waiting_for_weight = State()
-
-
-@settings_handler_router.callback_query(F.data.regexp(r"^cf:sccat:-?\d+$"))
-async def signal_categories_menu(
-    callback: CallbackQuery,
-    session: AsyncSession,
-    state: FSMContext
-) -> None:
-    """
-    Показывает список категорий сигналов антискама.
-
-    Callback: cf:sccat:{chat_id}
-    """
-    await state.clear()
-
-    parts = callback.data.split(":")
-    chat_id = int(parts[2])
-
-    # Загружаем категории из БД
-    from bot.database.models_content_filter import ScamSignalCategory
-    from sqlalchemy import select
-
-    query = select(ScamSignalCategory).where(
-        ScamSignalCategory.chat_id == chat_id
-    ).order_by(ScamSignalCategory.category_name)
-
-    result = await session.execute(query)
-    categories = result.scalars().all()
-
-    # Формируем текст
-    if categories:
-        text = f"📂 <b>Категории сигналов</b>\n\n"
-        for i, cat in enumerate(categories, 1):
-            status = "✅" if cat.enabled else "❌"
-            kw_count = len([k for k in cat.keywords.split(',') if k.strip()]) if cat.keywords else 0
-            text += f"{i}. {status} <b>{cat.category_name}</b>\n"
-            text += f"   Слов: {kw_count}, Вес: +{cat.weight}\n\n"
-    else:
-        text = (
-            f"📂 <b>Категории сигналов</b>\n\n"
-            f"Категорий пока нет.\n"
-            f"Создайте первую категорию для детекции скама.\n\n"
-            f"<i>Например: \"Наркотики\" с ключевыми словами\n"
-            f"drugs, cocaine, weed...</i>"
-        )
-
-    # Создаём клавиатуру
-    keyboard_buttons = []
-
-    # Список существующих категорий
-    for cat in categories:
-        status = "✅" if cat.enabled else "❌"
-        keyboard_buttons.append([
-            InlineKeyboardButton(
-                text=f"{status} {cat.category_name}",
-                callback_data=f"cf:sccatedit:{chat_id}:{cat.id}"
-            )
-        ])
-
-    # Кнопка добавления
-    keyboard_buttons.append([
-        InlineKeyboardButton(
-            text="➕ Добавить категорию",
-            callback_data=f"cf:sccatadd:{chat_id}"
-        )
-    ])
-
-    # Кнопка назад
-    keyboard_buttons.append([
-        InlineKeyboardButton(
-            text="◀️ Назад",
-            callback_data=f"cf:scs:{chat_id}"
-        )
-    ])
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-
-    try:
-        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-    except TelegramAPIError:
-        pass
-
-    await callback.answer()
-
-
-@settings_handler_router.callback_query(F.data.regexp(r"^cf:sccatadd:-?\d+$"))
-async def add_signal_category_start(
-    callback: CallbackQuery,
-    state: FSMContext
-) -> None:
-    """
-    Начинает процесс добавления новой категории.
-
-    Callback: cf:sccatadd:{chat_id}
-    """
-    parts = callback.data.split(":")
-    chat_id = int(parts[2])
-
-    await state.update_data(chat_id=chat_id)
-    await state.set_state(SignalCategoryStates.waiting_for_name)
-
-    text = (
-        f"📂 <b>Новая категория</b>\n\n"
-        f"Введите название категории.\n"
-        f"Например: <code>Наркотики</code> или <code>Контакты</code>"
-    )
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text="◀️ Отмена",
-            callback_data=f"cf:sccat:{chat_id}"
-        )]
-    ])
-
-    try:
-        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-    except TelegramAPIError:
-        pass
-
-    await state.update_data(
-        bot_message_id=callback.message.message_id,
-        bot_chat_id=callback.message.chat.id
-    )
-
-    await callback.answer()
-
-
-@settings_handler_router.message(SignalCategoryStates.waiting_for_name)
-async def add_signal_category_name(
-    message: Message,
-    state: FSMContext
-) -> None:
-    """Обрабатывает ввод названия категории."""
-    data = await state.get_data()
-    chat_id = data.get('chat_id')
-    bot_message_id = data.get('bot_message_id')
-    bot_chat_id = data.get('bot_chat_id')
-
-    # Удаляем сообщение пользователя
-    try:
-        await message.delete()
-    except TelegramAPIError:
-        pass
-
-    # Сохраняем название
-    category_name = message.text.strip()[:100]
-    await state.update_data(category_name=category_name)
-    await state.set_state(SignalCategoryStates.waiting_for_keywords)
-
-    text = (
-        f"📂 <b>Новая категория: {category_name}</b>\n\n"
-        f"Введите ключевые слова через запятую.\n"
-        f"Например: <code>drugs, cocaine, weed, meth</code>"
-    )
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text="◀️ Отмена",
-            callback_data=f"cf:sccat:{chat_id}"
-        )]
-    ])
-
-    try:
-        await message.bot.edit_message_text(
-            text=text,
-            chat_id=bot_chat_id,
-            message_id=bot_message_id,
-            reply_markup=keyboard,
-            parse_mode="HTML"
-        )
-    except TelegramAPIError:
-        await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
-
-
-@settings_handler_router.message(SignalCategoryStates.waiting_for_keywords)
-async def add_signal_category_keywords(
-    message: Message,
-    state: FSMContext,
-    session: AsyncSession
-) -> None:
-    """Обрабатывает ввод ключевых слов и создаёт категорию."""
-    data = await state.get_data()
-    chat_id = data.get('chat_id')
-    category_name = data.get('category_name')
-    bot_message_id = data.get('bot_message_id')
-    bot_chat_id = data.get('bot_chat_id')
-
-    # Удаляем сообщение пользователя
-    try:
-        await message.delete()
-    except TelegramAPIError:
-        pass
-
-    # Очищаем FSM
-    await state.clear()
-
-    # Нормализуем ключевые слова
-    keywords = message.text.strip()
-
-    # Создаём категорию в БД
-    from bot.database.models_content_filter import ScamSignalCategory
-
-    new_category = ScamSignalCategory(
-        chat_id=chat_id,
-        category_name=category_name,
-        keywords=keywords,
-        weight=25,  # Вес по умолчанию
-        enabled=True,
-        created_by=message.from_user.id
-    )
-
-    session.add(new_category)
-    await session.commit()
-
-    # Показываем успех и возвращаемся к списку
-    text = (
-        f"✅ Категория <b>{category_name}</b> создана!\n\n"
-        f"Ключевые слова: {keywords[:50]}{'...' if len(keywords) > 50 else ''}\n"
-        f"Вес: +25 баллов\n\n"
-        f"<i>Вы можете изменить настройки категории в меню.</i>"
-    )
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text="📂 К списку категорий",
-            callback_data=f"cf:sccat:{chat_id}"
-        )]
-    ])
-
-    try:
-        await message.bot.edit_message_text(
-            text=text,
-            chat_id=bot_chat_id,
-            message_id=bot_message_id,
-            reply_markup=keyboard,
-            parse_mode="HTML"
-        )
-    except TelegramAPIError:
-        await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
-
-
-@settings_handler_router.callback_query(F.data.regexp(r"^cf:sccatedit:-?\d+:\d+$"))
-async def edit_signal_category(
-    callback: CallbackQuery,
-    session: AsyncSession
-) -> None:
-    """
-    Показывает меню редактирования категории.
-
-    Callback: cf:sccatedit:{chat_id}:{category_id}
-    """
-    parts = callback.data.split(":")
-    chat_id = int(parts[2])
-    category_id = int(parts[3])
-
-    # Загружаем категорию
-    from bot.database.models_content_filter import ScamSignalCategory
-    from sqlalchemy import select
-
-    query = select(ScamSignalCategory).where(ScamSignalCategory.id == category_id)
-    result = await session.execute(query)
-    category = result.scalar_one_or_none()
-
-    if not category:
-        await callback.answer("❌ Категория не найдена", show_alert=True)
-        return
-
-    # Формируем текст
-    status = "Включена ✅" if category.enabled else "Выключена ❌"
-    kw_preview = category.keywords[:100] if category.keywords else "—"
-    if len(category.keywords or '') > 100:
-        kw_preview += "..."
-
-    text = (
-        f"📂 <b>Категория: {category.category_name}</b>\n\n"
-        f"<b>Статус:</b> {status}\n"
-        f"<b>Вес:</b> +{category.weight} баллов\n"
-        f"<b>Ключевые слова:</b>\n<code>{kw_preview}</code>"
-    )
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=f"{'❌ Выключить' if category.enabled else '✅ Включить'}",
-            callback_data=f"cf:sccattgl:{chat_id}:{category_id}"
-        )],
-        [InlineKeyboardButton(
-            text="🗑️ Удалить",
-            callback_data=f"cf:sccatdel:{chat_id}:{category_id}"
-        )],
-        [InlineKeyboardButton(
-            text="◀️ Назад",
-            callback_data=f"cf:sccat:{chat_id}"
-        )]
-    ])
-
-    try:
-        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-    except TelegramAPIError:
-        pass
-
-    await callback.answer()
-
-
-@settings_handler_router.callback_query(F.data.regexp(r"^cf:sccattgl:-?\d+:\d+$"))
-async def toggle_signal_category(
-    callback: CallbackQuery,
-    session: AsyncSession
-) -> None:
-    """
-    Переключает активность категории.
-
-    Callback: cf:sccattgl:{chat_id}:{category_id}
-    """
-    parts = callback.data.split(":")
-    chat_id = int(parts[2])
-    category_id = int(parts[3])
-
-    from bot.database.models_content_filter import ScamSignalCategory
-    from sqlalchemy import select, update
-
-    # Получаем текущее состояние
-    query = select(ScamSignalCategory).where(ScamSignalCategory.id == category_id)
-    result = await session.execute(query)
-    category = result.scalar_one_or_none()
-
-    if not category:
-        await callback.answer("❌ Категория не найдена", show_alert=True)
-        return
-
-    # Переключаем
-    new_status = not category.enabled
-    update_query = update(ScamSignalCategory).where(
-        ScamSignalCategory.id == category_id
-    ).values(enabled=new_status)
-
-    await session.execute(update_query)
-    await session.commit()
-
-    status_text = "включена" if new_status else "выключена"
-    await callback.answer(f"Категория {status_text}")
-
-    # Перерисовываем меню
-    # Создаём новый callback data для edit
-    callback.data = f"cf:sccatedit:{chat_id}:{category_id}"
-    await edit_signal_category(callback, session)
-
-
-@settings_handler_router.callback_query(F.data.regexp(r"^cf:sccatdel:-?\d+:\d+$"))
-async def delete_signal_category(
-    callback: CallbackQuery,
-    session: AsyncSession
-) -> None:
-    """
-    Удаляет категорию.
-
-    Callback: cf:sccatdel:{chat_id}:{category_id}
-    """
-    parts = callback.data.split(":")
-    chat_id = int(parts[2])
-    category_id = int(parts[3])
-
-    from bot.database.models_content_filter import ScamSignalCategory
-    from sqlalchemy import delete
-
-    # Удаляем
-    query = delete(ScamSignalCategory).where(ScamSignalCategory.id == category_id)
-    await session.execute(query)
-    await session.commit()
-
-    await callback.answer("✅ Категория удалена")
-
-    # Возвращаемся к списку
-    callback.data = f"cf:sccat:{chat_id}"
-    await signal_categories_menu(callback, session, None)
 
 
 # ============================================================
@@ -6976,3 +7034,3365 @@ async def toggle_delete_system_messages(
 
     status_text = "включено" if new_value else "выключено"
     await callback.answer(f"Удаление системных сообщений {status_text}")
+
+
+# ============================================================
+# ПОРОГИ БАЛЛОВ АНТИСКАМА
+# ============================================================
+# Позволяет задавать разные действия для разных диапазонов скора.
+# Например: 100-299 → delete, 300-399 → mute 1ч, 400+ → ban
+
+
+class AddThresholdStates(StatesGroup):
+    """FSM состояния для добавления порога баллов."""
+    # Ожидание ввода минимального скора
+    waiting_min_score = State()
+    # Ожидание ввода максимального скора
+    waiting_max_score = State()
+    # Ожидание выбора действия
+    waiting_action = State()
+    # Ожидание ввода длительности мута
+    waiting_mute_duration = State()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:scthr:-?\d+$"))
+async def scam_thresholds_menu(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает меню порогов баллов антискама.
+
+    Callback: cf:scthr:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        session: Сессия БД
+    """
+    # Парсим chat_id
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Получаем сервис порогов
+    threshold_service = get_threshold_service()
+
+    # Загружаем все пороги группы (включая отключённые)
+    thresholds = await threshold_service.get_thresholds(
+        chat_id=chat_id,
+        session=session,
+        enabled_only=False
+    )
+
+    # Формируем текст
+    text = "📊 <b>Пороги баллов антискама</b>\n\n"
+
+    if thresholds:
+        text += "Разные действия для разных диапазонов скора:\n\n"
+        for t in thresholds:
+            # Формируем диапазон
+            max_str = str(t.max_score) if t.max_score else "∞"
+            range_str = f"{t.min_score}–{max_str}"
+            # Формируем действие
+            action_map = {
+                'delete': '🗑️ Удалить',
+                'mute': f'🔇 Мут',
+                'kick': '👢 Кик',
+                'ban': '🚫 Бан'
+            }
+            action_str = action_map.get(t.action, t.action)
+            if t.action == 'mute' and t.mute_duration:
+                hours = t.mute_duration // 60
+                mins = t.mute_duration % 60
+                if hours > 0:
+                    action_str += f" {hours}ч"
+                if mins > 0:
+                    action_str += f" {mins}м"
+            # Статус
+            status = "✅" if t.enabled else "⏸️"
+            text += f"{status} {range_str} баллов → {action_str}\n"
+    else:
+        text += (
+            "<i>Нет порогов. Используется действие по умолчанию.</i>\n\n"
+            "Добавьте пороги для градации действий по скору."
+        )
+
+    text += "\n\n💡 Если скор не попадает ни в один порог —\nиспользуется действие по умолчанию."
+
+    # Клавиатура
+    buttons = []
+
+    # Кнопки для существующих порогов (переключение/удаление)
+    for t in thresholds:
+        max_str = str(t.max_score) if t.max_score else "∞"
+        toggle_emoji = "⏸️" if t.enabled else "✅"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{toggle_emoji} {t.min_score}–{max_str}",
+                callback_data=f"cf:sctog:{t.id}:{chat_id}"
+            ),
+            InlineKeyboardButton(
+                text="🗑️",
+                callback_data=f"cf:scdel:{t.id}:{chat_id}"
+            )
+        ])
+
+    # Кнопка добавления нового порога
+    buttons.append([
+        InlineKeyboardButton(
+            text="➕ Добавить порог",
+            callback_data=f"cf:scadd:{chat_id}"
+        )
+    ])
+
+    # Назад
+    buttons.append([
+        InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"cf:scs:{chat_id}"
+        )
+    ])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:sctog:\d+:-?\d+$"))
+async def toggle_threshold(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Переключает активность порога.
+
+    Callback: cf:sctog:{threshold_id}:{chat_id}
+    """
+    parts = callback.data.split(":")
+    threshold_id = int(parts[2])
+    chat_id = int(parts[3])
+
+    # Получаем сервис
+    threshold_service = get_threshold_service()
+
+    # Переключаем
+    success = await threshold_service.toggle_threshold(threshold_id, session)
+
+    if success:
+        await callback.answer("Порог переключён")
+    else:
+        await callback.answer("Ошибка переключения", show_alert=True)
+
+    # Возвращаемся в меню
+    callback.data = f"cf:scthr:{chat_id}"
+    await scam_thresholds_menu(callback, session)
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:scdel:\d+:-?\d+$"))
+async def delete_threshold(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Удаляет порог.
+
+    Callback: cf:scdel:{threshold_id}:{chat_id}
+    """
+    parts = callback.data.split(":")
+    threshold_id = int(parts[2])
+    chat_id = int(parts[3])
+
+    # Получаем сервис
+    threshold_service = get_threshold_service()
+
+    # Удаляем
+    success = await threshold_service.delete_threshold(threshold_id, session)
+
+    if success:
+        await callback.answer("Порог удалён")
+    else:
+        await callback.answer("Ошибка удаления", show_alert=True)
+
+    # Возвращаемся в меню
+    callback.data = f"cf:scthr:{chat_id}"
+    await scam_thresholds_menu(callback, session)
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:scadd:-?\d+$"))
+async def start_add_threshold(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Начинает FSM для добавления порога.
+
+    Callback: cf:scadd:{chat_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Сохраняем chat_id в состояние
+    await state.update_data(chat_id=chat_id)
+
+    # Переходим к ожиданию минимального скора
+    await state.set_state(AddThresholdStates.waiting_min_score)
+
+    text = (
+        "📊 <b>Добавление порога баллов</b>\n\n"
+        "Введите <b>минимальный скор</b> для этого порога.\n\n"
+        "Например: <code>100</code>\n\n"
+        "Это нижняя граница диапазона (включительно)."
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cf:scthr:{chat_id}")]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.message(AddThresholdStates.waiting_min_score)
+async def process_min_score(
+    message: Message,
+    state: FSMContext
+) -> None:
+    """
+    Обрабатывает ввод минимального скора.
+    """
+    # Проверяем что это число
+    try:
+        min_score = int(message.text.strip())
+        if min_score < 0:
+            raise ValueError("Скор не может быть отрицательным")
+    except ValueError:
+        await message.answer(
+            "❌ Некорректное значение. Введите положительное число.",
+            parse_mode="HTML"
+        )
+        return
+
+    # Сохраняем и переходим к max_score
+    await state.update_data(min_score=min_score)
+    await state.set_state(AddThresholdStates.waiting_max_score)
+
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+
+    text = (
+        f"📊 <b>Добавление порога баллов</b>\n\n"
+        f"Минимальный скор: <code>{min_score}</code>\n\n"
+        f"Теперь введите <b>максимальный скор</b>.\n"
+        f"Или отправьте <code>0</code> для безлимита (∞).\n\n"
+        f"Например: <code>299</code>"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cf:scthr:{chat_id}")]
+    ])
+
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@settings_handler_router.message(AddThresholdStates.waiting_max_score)
+async def process_max_score(
+    message: Message,
+    state: FSMContext
+) -> None:
+    """
+    Обрабатывает ввод максимального скора.
+    """
+    # Проверяем что это число
+    try:
+        max_score = int(message.text.strip())
+        if max_score < 0:
+            raise ValueError("Скор не может быть отрицательным")
+        # 0 означает безлимит (∞)
+        if max_score == 0:
+            max_score = None
+    except ValueError:
+        await message.answer(
+            "❌ Некорректное значение. Введите положительное число или 0 для безлимита.",
+            parse_mode="HTML"
+        )
+        return
+
+    # Сохраняем и переходим к выбору действия
+    await state.update_data(max_score=max_score)
+    await state.set_state(AddThresholdStates.waiting_action)
+
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    min_score = data.get('min_score')
+    max_str = str(max_score) if max_score else "∞"
+
+    text = (
+        f"📊 <b>Добавление порога баллов</b>\n\n"
+        f"Диапазон: <code>{min_score}–{max_str}</code>\n\n"
+        f"Выберите <b>действие</b> для этого диапазона:"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🗑️ Удалить", callback_data=f"cf:scact2:delete:{chat_id}"),
+            InlineKeyboardButton(text="🔇 Мут", callback_data=f"cf:scact2:mute:{chat_id}")
+        ],
+        [
+            InlineKeyboardButton(text="👢 Кик", callback_data=f"cf:scact2:kick:{chat_id}"),
+            InlineKeyboardButton(text="🚫 Бан", callback_data=f"cf:scact2:ban:{chat_id}")
+        ],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cf:scthr:{chat_id}")]
+    ])
+
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@settings_handler_router.callback_query(
+    F.data.regexp(r"^cf:scact2:(delete|mute|kick|ban):-?\d+$"),
+    AddThresholdStates.waiting_action
+)
+async def process_threshold_action(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает выбор действия для порога.
+    """
+    parts = callback.data.split(":")
+    action = parts[2]
+    chat_id = int(parts[3])
+
+    # Сохраняем действие
+    await state.update_data(action=action)
+
+    # Если мут - запрашиваем длительность
+    if action == 'mute':
+        await state.set_state(AddThresholdStates.waiting_mute_duration)
+
+        text = (
+            "📊 <b>Добавление порога баллов</b>\n\n"
+            "Введите <b>длительность мута</b> в минутах.\n\n"
+            "Примеры:\n"
+            "• <code>60</code> — 1 час\n"
+            "• <code>1440</code> — 24 часа\n"
+            "• <code>10080</code> — 7 дней"
+        )
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cf:scthr:{chat_id}")]
+        ])
+
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        await callback.answer()
+        return
+
+    # Для других действий - сразу создаём порог
+    await _create_threshold(callback, state, session)
+
+
+@settings_handler_router.message(AddThresholdStates.waiting_mute_duration)
+async def process_mute_duration(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ввод длительности мута.
+    """
+    # Проверяем что это число
+    try:
+        mute_duration = int(message.text.strip())
+        if mute_duration <= 0:
+            raise ValueError("Длительность должна быть положительной")
+    except ValueError:
+        await message.answer(
+            "❌ Некорректное значение. Введите положительное число минут.",
+            parse_mode="HTML"
+        )
+        return
+
+    # Сохраняем длительность
+    await state.update_data(mute_duration=mute_duration)
+
+    # Создаём порог
+    await _create_threshold_from_message(message, state, session)
+
+
+async def _create_threshold(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Создаёт порог на основе данных из FSM.
+    Вызывается из callback query.
+    """
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    min_score = data.get('min_score')
+    max_score = data.get('max_score')
+    action = data.get('action')
+    mute_duration = data.get('mute_duration')
+
+    # Получаем сервис
+    threshold_service = get_threshold_service()
+
+    # Создаём порог
+    success, threshold_id = await threshold_service.add_threshold(
+        chat_id=chat_id,
+        min_score=min_score,
+        max_score=max_score,
+        action=action,
+        mute_duration=mute_duration,
+        session=session,
+        created_by=callback.from_user.id
+    )
+
+    # Очищаем состояние
+    await state.clear()
+
+    if success:
+        await callback.answer("Порог добавлен")
+    else:
+        await callback.answer("Ошибка добавления порога", show_alert=True)
+
+    # Возвращаемся в меню
+    callback.data = f"cf:scthr:{chat_id}"
+    await scam_thresholds_menu(callback, session)
+
+
+async def _create_threshold_from_message(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Создаёт порог на основе данных из FSM.
+    Вызывается из message handler.
+    """
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    min_score = data.get('min_score')
+    max_score = data.get('max_score')
+    action = data.get('action')
+    mute_duration = data.get('mute_duration')
+
+    # Получаем сервис
+    threshold_service = get_threshold_service()
+
+    # Создаём порог
+    success, threshold_id = await threshold_service.add_threshold(
+        chat_id=chat_id,
+        min_score=min_score,
+        max_score=max_score,
+        action=action,
+        mute_duration=mute_duration,
+        session=session,
+        created_by=message.from_user.id
+    )
+
+    # Очищаем состояние
+    await state.clear()
+
+    # Формируем текст результата
+    max_str = str(max_score) if max_score else "∞"
+    if success:
+        result_text = f"✅ Порог {min_score}–{max_str} → {action} добавлен"
+    else:
+        result_text = "❌ Ошибка добавления порога"
+
+    # Клавиатура возврата
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 К порогам", callback_data=f"cf:scthr:{chat_id}")]
+    ])
+
+    await message.answer(result_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# Обработчик отмены FSM при нажатии "Отмена"
+@settings_handler_router.callback_query(
+    F.data.regexp(r"^cf:scthr:-?\d+$"),
+    AddThresholdStates.waiting_min_score
+)
+@settings_handler_router.callback_query(
+    F.data.regexp(r"^cf:scthr:-?\d+$"),
+    AddThresholdStates.waiting_max_score
+)
+@settings_handler_router.callback_query(
+    F.data.regexp(r"^cf:scthr:-?\d+$"),
+    AddThresholdStates.waiting_action
+)
+@settings_handler_router.callback_query(
+    F.data.regexp(r"^cf:scthr:-?\d+$"),
+    AddThresholdStates.waiting_mute_duration
+)
+async def cancel_add_threshold(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Отменяет добавление порога и возвращается в меню.
+    """
+    await state.clear()
+    await scam_thresholds_menu(callback, session)
+
+
+# ============================================================
+# КАСТОМНЫЕ РАЗДЕЛЫ СПАМА
+# ============================================================
+# Эти хендлеры управляют кастомными разделами спама, которые
+# позволяют админам создавать отдельные категории (такси, жильё,
+# наркотики) со своими паттернами, порогом и действием.
+
+from bot.services.content_filter.scam_pattern_service import get_section_service
+from bot.keyboards.content_filter_keyboards import (
+    create_custom_sections_menu,
+    create_section_settings_menu,
+    create_section_action_menu,
+    create_section_threshold_menu,
+    create_section_patterns_menu,
+    create_section_delete_confirm_menu,
+    create_cancel_section_input_menu,
+    create_cancel_section_pattern_input_menu,
+    # Новые клавиатуры для разделов
+    create_section_advanced_menu,
+    create_section_notification_delay_menu,
+    create_section_mute_duration_menu
+)
+
+
+class AddSectionStates(StatesGroup):
+    """FSM состояния для создания нового раздела."""
+    waiting_for_name = State()
+
+
+class AddSectionPatternStates(StatesGroup):
+    """FSM состояния для добавления паттерна в раздел."""
+    waiting_for_pattern = State()
+
+
+class SectionMuteDurationStates(StatesGroup):
+    """FSM состояния для ввода длительности мута раздела."""
+    waiting_for_duration = State()
+
+
+class SectionForwardChannelStates(StatesGroup):
+    """FSM состояния для ввода канала пересылки."""
+    waiting_for_channel = State()
+
+
+class SectionMuteTextStates(StatesGroup):
+    """FSM состояния для ввода текста уведомления при муте."""
+    waiting_for_text = State()
+
+
+class SectionBanTextStates(StatesGroup):
+    """FSM состояния для ввода текста уведомления при бане."""
+    waiting_for_text = State()
+
+
+class SectionImportPatternsStates(StatesGroup):
+    """FSM состояния для импорта паттернов."""
+    waiting_for_patterns = State()
+
+
+# Количество паттернов на странице
+SECTION_PATTERNS_PER_PAGE = 5
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:sccat:-?\d+$"))
+async def custom_sections_menu(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """
+    Показывает список кастомных разделов спама.
+
+    Callback: cf:sccat:{chat_id}
+
+    Это обновлённая версия, которая показывает КАСТОМНЫЕ РАЗДЕЛЫ
+    (не встроенные SignalCategory).
+    """
+    # Очищаем FSM состояние
+    await state.clear()
+
+    # Парсим chat_id
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Получаем сервис и разделы
+    section_service = get_section_service()
+    sections = await section_service.get_sections(chat_id, session, enabled_only=False)
+
+    # Формируем текст
+    if sections:
+        text = (
+            f"📂 <b>Кастомные разделы спама</b>\n\n"
+            f"Здесь вы можете создавать отдельные разделы для разных типов спама:\n"
+            f"• Такси — реклама такси\n"
+            f"• Жильё — аренда/продажа\n"
+            f"• Наркотики — запрещённые вещества\n\n"
+            f"Каждый раздел имеет свои паттерны и настройки.\n\n"
+            f"<b>Ваши разделы:</b> {len(sections)}"
+        )
+    else:
+        text = (
+            f"📂 <b>Кастомные разделы спама</b>\n\n"
+            f"У вас пока нет кастомных разделов.\n\n"
+            f"Создайте первый раздел для детекции определённого типа спама.\n\n"
+            f"<i>Например: «Такси» с паттернами типа «срочно водитель», «подработка такси»</i>"
+        )
+
+    keyboard = create_custom_sections_menu(chat_id, sections)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:sec:\d+$"))
+async def toggle_custom_section(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Переключает активность кастомного раздела.
+
+    Callback: cf:sec:{section_id}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+
+    # Получаем раздел чтобы узнать chat_id
+    section = await section_service.get_section_by_id(section_id, session)
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    chat_id = section.chat_id
+
+    # Переключаем
+    success = await section_service.toggle_section(section_id, session)
+
+    if success:
+        new_status = "включён" if not section.enabled else "выключен"
+        await callback.answer(f"Раздел {new_status}")
+    else:
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+    # Перерисовываем меню
+    sections = await section_service.get_sections(chat_id, session, enabled_only=False)
+    keyboard = create_custom_sections_menu(chat_id, sections)
+
+    text = (
+        f"📂 <b>Кастомные разделы спама</b>\n\n"
+        f"<b>Ваши разделы:</b> {len(sections)}"
+    )
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secs:\d+$"))
+async def section_settings_menu(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """
+    Показывает меню настроек раздела.
+
+    Callback: cf:secs:{section_id}
+    """
+    # Очищаем FSM
+    await state.clear()
+
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+
+    # Получаем раздел
+    section = await section_service.get_section_by_id(section_id, session)
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    # Получаем количество паттернов
+    patterns_count = await section_service.get_patterns_count(section_id, session)
+
+    # Формируем текст
+    status = "Включён ✅" if section.enabled else "Выключен ❌"
+    action_map = {
+        'delete': '🗑️ Удалить',
+        'mute': '🔇 Мут',
+        'ban': '🚫 Бан',
+        'forward_delete': '📤 Переслать + удалить'
+    }
+    action_text = action_map.get(section.action, '🗑️ Удалить')
+
+    text = (
+        f"📂 <b>Раздел: {section.name}</b>\n\n"
+        f"<b>Статус:</b> {status}\n"
+        f"<b>Паттернов:</b> {patterns_count}\n"
+        f"<b>Порог:</b> {section.threshold} баллов\n"
+        f"<b>Действие:</b> {action_text}\n"
+    )
+
+    if section.description:
+        text += f"\n<i>{section.description}</i>\n"
+
+    if section.action == 'mute' and section.mute_duration:
+        if section.mute_duration < 60:
+            text += f"\n<b>Длительность мута:</b> {section.mute_duration} мин"
+        elif section.mute_duration < 1440:
+            text += f"\n<b>Длительность мута:</b> {section.mute_duration // 60} ч"
+        else:
+            text += f"\n<b>Длительность мута:</b> {section.mute_duration // 1440} д"
+
+    if section.action == 'forward_delete' and section.forward_channel_id:
+        text += f"\n<b>Канал пересылки:</b> <code>{section.forward_channel_id}</code>"
+
+    keyboard = create_section_settings_menu(section_id, section, section.chat_id, patterns_count)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secn:-?\d+$"))
+async def start_add_section(
+    callback: CallbackQuery,
+    state: FSMContext
+) -> None:
+    """
+    Начинает FSM для создания нового раздела.
+
+    Callback: cf:secn:{chat_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    await state.update_data(
+        chat_id=chat_id,
+        bot_message_id=callback.message.message_id,
+        bot_chat_id=callback.message.chat.id
+    )
+    await state.set_state(AddSectionStates.waiting_for_name)
+
+    text = (
+        f"📂 <b>Новый раздел спама</b>\n\n"
+        f"Введите название раздела.\n\n"
+        f"<i>Например: «Такси», «Жильё», «Наркотики»</i>"
+    )
+
+    keyboard = create_cancel_section_input_menu(chat_id)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.message(AddSectionStates.waiting_for_name)
+async def process_section_name(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ввод названия раздела и создаёт его.
+    """
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    bot_message_id = data.get('bot_message_id')
+    bot_chat_id = data.get('bot_chat_id')
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    if not chat_id:
+        await state.clear()
+        await message.answer("❌ Ошибка: данные сессии потеряны.")
+        return
+
+    # Получаем название
+    name = message.text.strip()
+
+    # Создаём раздел
+    section_service = get_section_service()
+    success, section_id, error = await section_service.create_section(
+        chat_id=chat_id,
+        name=name,
+        session=session,
+        created_by=message.from_user.id
+    )
+
+    # Очищаем FSM
+    await state.clear()
+
+    if success:
+        text = (
+            f"✅ Раздел <b>«{name}»</b> создан!\n\n"
+            f"Теперь добавьте паттерны для детекции спама этого типа."
+        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="⚙️ Настроить раздел",
+                callback_data=f"cf:secs:{section_id}"
+            )],
+            [InlineKeyboardButton(
+                text="📂 К списку разделов",
+                callback_data=f"cf:sccat:{chat_id}"
+            )]
+        ])
+    else:
+        text = f"❌ Ошибка: {error or 'Не удалось создать раздел'}"
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="📂 К списку разделов",
+                callback_data=f"cf:sccat:{chat_id}"
+            )]
+        ])
+
+    # Редактируем сообщение
+    try:
+        await message.bot.edit_message_text(
+            text=text,
+            chat_id=bot_chat_id,
+            message_id=bot_message_id,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    except TelegramAPIError:
+        await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:sect:\d+$"))
+async def toggle_section_status(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Переключает статус раздела (вкл/выкл).
+
+    Callback: cf:sect:{section_id}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+    section = await section_service.get_section_by_id(section_id, session)
+
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    success = await section_service.toggle_section(section_id, session)
+
+    if success:
+        new_status = "включён" if not section.enabled else "выключен"
+        await callback.answer(f"Раздел {new_status}")
+    else:
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+    # Перерисовываем меню настроек
+    callback.data = f"cf:secs:{section_id}"
+    await section_settings_menu(callback, session, None)
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secac:\d+$"))
+async def section_action_menu(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает меню выбора действия для раздела.
+
+    Callback: cf:secac:{section_id}
+
+    Новая структура меню:
+    - Выбор действия (delete/mute/ban)
+    - Toggle пересылки для каждого действия независимо
+    - Настройка канала пересылки
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+    section = await section_service.get_section_by_id(section_id, session)
+
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    text = (
+        f"⚡ <b>Действие при срабатывании</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n\n"
+        f"Выберите действие и настройте пересылку.\n"
+        f"📤 = пересылать в канал при этом действии"
+    )
+
+    # Передаём весь объект section для доступа к forward_on_* полям
+    keyboard = create_section_action_menu(section_id, section)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secac:(delete|mute|ban):\d+$"))
+async def set_section_action(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Устанавливает действие для раздела.
+
+    Callback: cf:secac:{action}:{section_id}
+
+    Действия: delete, mute, ban
+    (forward_delete убран - теперь пересылка настраивается отдельно для каждого действия)
+    """
+    parts = callback.data.split(":")
+    action = parts[2]
+    section_id = int(parts[3])
+
+    section_service = get_section_service()
+    success, error = await section_service.update_section(
+        section_id=section_id,
+        session=session,
+        action=action
+    )
+
+    if success:
+        action_names = {
+            'delete': 'Удалить',
+            'mute': 'Мут',
+            'ban': 'Бан'
+        }
+        await callback.answer(f"Действие: {action_names.get(action, action)}")
+    else:
+        await callback.answer(f"❌ {error or 'Ошибка'}", show_alert=True)
+
+    # Обновляем меню
+    section = await section_service.get_section_by_id(section_id, session)
+    keyboard = create_section_action_menu(section_id, section)
+
+    text = (
+        f"⚡ <b>Действие при срабатывании</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n\n"
+        f"Выберите действие и настройте пересылку.\n"
+        f"📤 = пересылать в канал при этом действии"
+    )
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secfd:(delete|mute|ban):\d+$"))
+async def toggle_section_forward(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Переключает пересылку в канал для конкретного действия.
+
+    Callback: cf:secfd:{action}:{section_id}
+
+    Позволяет включить/выключить пересылку независимо для:
+    - delete: пересылать при удалении
+    - mute: пересылать при муте
+    - ban: пересылать при бане
+    """
+    parts = callback.data.split(":")
+    action = parts[2]
+    section_id = int(parts[3])
+
+    section_service = get_section_service()
+    section = await section_service.get_section_by_id(section_id, session)
+
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    # Определяем какое поле переключать
+    field_map = {
+        'delete': 'forward_on_delete',
+        'mute': 'forward_on_mute',
+        'ban': 'forward_on_ban'
+    }
+    field_name = field_map.get(action)
+
+    if not field_name:
+        await callback.answer("❌ Неизвестное действие", show_alert=True)
+        return
+
+    # Получаем текущее значение и инвертируем
+    current_value = getattr(section, field_name, False)
+    new_value = not current_value
+
+    # Обновляем
+    update_kwargs = {field_name: new_value}
+    success, error = await section_service.update_section(
+        section_id=section_id,
+        session=session,
+        **update_kwargs
+    )
+
+    if success:
+        status = "включена" if new_value else "выключена"
+        action_names = {'delete': 'удалении', 'mute': 'муте', 'ban': 'бане'}
+        await callback.answer(f"📤 Пересылка при {action_names.get(action)}: {status}")
+    else:
+        await callback.answer(f"❌ {error or 'Ошибка'}", show_alert=True)
+        return
+
+    # Обновляем меню
+    section = await section_service.get_section_by_id(section_id, session)
+    keyboard = create_section_action_menu(section_id, section)
+
+    text = (
+        f"⚡ <b>Действие при срабатывании</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n\n"
+        f"Выберите действие и настройте пересылку.\n"
+        f"📤 = пересылать в канал при этом действии"
+    )
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secth:\d+$"))
+async def section_threshold_menu(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает меню выбора порога чувствительности.
+
+    Callback: cf:secth:{section_id}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+    section = await section_service.get_section_by_id(section_id, session)
+
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    text = (
+        f"🎚️ <b>Порог чувствительности</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n"
+        f"Текущий порог: <b>{section.threshold}</b>\n\n"
+        f"Чем ниже порог — тем чувствительнее детекция.\n"
+        f"• Высокая (40): ловит больше, но может быть ложные срабатывания\n"
+        f"• Средняя (60): баланс между точностью и покрытием\n"
+        f"• Низкая (90): только явный спам"
+    )
+
+    keyboard = create_section_threshold_menu(section_id, section.threshold)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secth:\d+:\d+$"))
+async def set_section_threshold(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Устанавливает порог чувствительности раздела.
+
+    Callback: cf:secth:{threshold}:{section_id}
+    """
+    parts = callback.data.split(":")
+    threshold = int(parts[2])
+    section_id = int(parts[3])
+
+    section_service = get_section_service()
+    success, error = await section_service.update_section(
+        section_id=section_id,
+        session=session,
+        threshold=threshold
+    )
+
+    if success:
+        await callback.answer(f"Порог: {threshold}")
+    else:
+        await callback.answer(f"❌ {error or 'Ошибка'}", show_alert=True)
+
+    # Возвращаемся к настройкам раздела
+    callback.data = f"cf:secs:{section_id}"
+    await section_settings_menu(callback, session, None)
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secp:\d+:\d+$"))
+async def section_patterns_list(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает список паттернов раздела с пагинацией.
+
+    Callback: cf:secp:{section_id}:{page}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+    page = int(parts[3])
+
+    section_service = get_section_service()
+
+    # Получаем раздел
+    section = await section_service.get_section_by_id(section_id, session)
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    # Получаем все паттерны (включая неактивные)
+    patterns = await section_service.get_section_patterns(section_id, session, active_only=False)
+
+    # Пагинация
+    total_pages = max(1, (len(patterns) + SECTION_PATTERNS_PER_PAGE - 1) // SECTION_PATTERNS_PER_PAGE)
+    page = min(page, total_pages - 1)
+
+    start_idx = page * SECTION_PATTERNS_PER_PAGE
+    end_idx = start_idx + SECTION_PATTERNS_PER_PAGE
+    page_patterns = patterns[start_idx:end_idx]
+
+    # Формируем текст
+    if patterns:
+        text = (
+            f"🎯 <b>Паттерны раздела «{section.name}»</b>\n\n"
+            f"Всего: {len(patterns)}\n\n"
+        )
+        for i, p in enumerate(page_patterns, start=start_idx + 1):
+            status = "✅" if p.is_active else "❌"
+            text += f"{i}. {status} <code>{p.pattern[:40]}{'...' if len(p.pattern) > 40 else ''}</code> (+{p.weight})\n"
+    else:
+        text = (
+            f"🎯 <b>Паттерны раздела «{section.name}»</b>\n\n"
+            f"Паттернов пока нет.\n"
+            f"Добавьте паттерны для детекции спама этого типа."
+        )
+
+    # Собираем ID паттернов для клавиатуры
+    pattern_ids = [p.id for p in page_patterns]
+
+    keyboard = create_section_patterns_menu(section_id, page, total_pages, pattern_ids)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secpa:\d+$"))
+async def start_add_section_pattern(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Начинает FSM для добавления паттерна в раздел.
+
+    Callback: cf:secpa:{section_id}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+    section = await section_service.get_section_by_id(section_id, session)
+
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    await state.update_data(
+        section_id=section_id,
+        section_name=section.name,
+        bot_message_id=callback.message.message_id,
+        bot_chat_id=callback.message.chat.id
+    )
+    await state.set_state(AddSectionPatternStates.waiting_for_pattern)
+
+    text = (
+        f"🎯 <b>Добавление паттерна</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n\n"
+        f"Введите паттерн (слово или фразу).\n\n"
+        f"<i>Например: «срочно водитель», «подработка такси»</i>"
+    )
+
+    keyboard = create_cancel_section_pattern_input_menu(section_id)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.message(AddSectionPatternStates.waiting_for_pattern)
+async def process_section_pattern(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ввод паттерна и добавляет его в раздел.
+    """
+    data = await state.get_data()
+    section_id = data.get('section_id')
+    section_name = data.get('section_name', 'Раздел')
+    bot_message_id = data.get('bot_message_id')
+    bot_chat_id = data.get('bot_chat_id')
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    if not section_id:
+        await state.clear()
+        await message.answer("❌ Ошибка: данные сессии потеряны.")
+        return
+
+    # Получаем паттерн
+    pattern = message.text.strip()
+
+    # Добавляем паттерн
+    section_service = get_section_service()
+    success, pattern_id, error = await section_service.add_section_pattern(
+        section_id=section_id,
+        pattern=pattern,
+        session=session,
+        created_by=message.from_user.id
+    )
+
+    # Очищаем FSM
+    await state.clear()
+
+    if success:
+        patterns_count = await section_service.get_patterns_count(section_id, session)
+        text = (
+            f"✅ Паттерн добавлен в раздел <b>«{section_name}»</b>\n\n"
+            f"<code>{pattern[:50]}{'...' if len(pattern) > 50 else ''}</code>\n\n"
+            f"Всего паттернов: {patterns_count}"
+        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="➕ Добавить ещё",
+                callback_data=f"cf:secpa:{section_id}"
+            )],
+            [InlineKeyboardButton(
+                text="🎯 К списку паттернов",
+                callback_data=f"cf:secp:{section_id}:0"
+            )],
+            [InlineKeyboardButton(
+                text="⚙️ К настройкам раздела",
+                callback_data=f"cf:secs:{section_id}"
+            )]
+        ])
+    else:
+        text = f"❌ Ошибка: {error or 'Не удалось добавить паттерн'}"
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="⚙️ К настройкам раздела",
+                callback_data=f"cf:secs:{section_id}"
+            )]
+        ])
+
+    # Редактируем сообщение
+    try:
+        await message.bot.edit_message_text(
+            text=text,
+            chat_id=bot_chat_id,
+            message_id=bot_message_id,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    except TelegramAPIError:
+        await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secpd:\d+:\d+$"))
+async def delete_section_pattern(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Удаляет паттерн раздела.
+
+    Callback: cf:secpd:{pattern_id}:{section_id}
+    """
+    parts = callback.data.split(":")
+    pattern_id = int(parts[2])
+    section_id = int(parts[3])
+
+    section_service = get_section_service()
+    success = await section_service.delete_section_pattern(pattern_id, session)
+
+    if success:
+        await callback.answer("Паттерн удалён")
+    else:
+        await callback.answer("❌ Ошибка удаления", show_alert=True)
+
+    # Возвращаемся к списку паттернов
+    callback.data = f"cf:secp:{section_id}:0"
+    await section_patterns_list(callback, session)
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secpda:\d+$"))
+async def confirm_delete_all_patterns(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает подтверждение удаления всех паттернов раздела.
+
+    Callback: cf:secpda:{section_id}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+    section = await section_service.get_section_by_id(section_id, session)
+
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    patterns_count = await section_service.get_patterns_count(section_id, session)
+
+    if patterns_count == 0:
+        await callback.answer("В разделе нет паттернов", show_alert=True)
+        return
+
+    text = (
+        f"⚠️ <b>Удаление всех паттернов</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n"
+        f"Паттернов для удаления: <b>{patterns_count}</b>\n\n"
+        f"<b>Вы уверены?</b>\n"
+        f"Это действие необратимо."
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="⚠️ Да, удалить все",
+                callback_data=f"cf:secpdac:{section_id}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="◀️ Отмена",
+                callback_data=f"cf:secp:{section_id}:0"
+            )
+        ]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secpdac:\d+$"))
+async def delete_all_patterns_confirmed(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Удаляет все паттерны раздела после подтверждения.
+
+    Callback: cf:secpdac:{section_id}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+    deleted_count = await section_service.delete_all_section_patterns(section_id, session)
+
+    if deleted_count > 0:
+        await callback.answer(f"✅ Удалено {deleted_count} паттернов")
+    else:
+        await callback.answer("Нет паттернов для удаления", show_alert=True)
+
+    # Возвращаемся к списку паттернов
+    callback.data = f"cf:secp:{section_id}:0"
+    await section_patterns_list(callback, session)
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secd:\d+$"))
+async def confirm_delete_section(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает подтверждение удаления раздела.
+
+    Callback: cf:secd:{section_id}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+    section = await section_service.get_section_by_id(section_id, session)
+
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    patterns_count = await section_service.get_patterns_count(section_id, session)
+
+    text = (
+        f"⚠️ <b>Удаление раздела</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n"
+        f"Паттернов: {patterns_count}\n\n"
+        f"<b>Вы уверены?</b>\n"
+        f"Это действие удалит раздел и все его паттерны."
+    )
+
+    keyboard = create_section_delete_confirm_menu(section_id, section.chat_id)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secdc:\d+$"))
+async def delete_section_confirmed(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Удаляет раздел после подтверждения.
+
+    Callback: cf:secdc:{section_id}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+
+    # Получаем раздел чтобы узнать chat_id
+    section = await section_service.get_section_by_id(section_id, session)
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    chat_id = section.chat_id
+    section_name = section.name
+
+    # Удаляем
+    success = await section_service.delete_section(section_id, session)
+
+    if success:
+        await callback.answer(f"Раздел «{section_name}» удалён")
+    else:
+        await callback.answer("❌ Ошибка удаления", show_alert=True)
+
+    # Возвращаемся к списку разделов
+    callback.data = f"cf:sccat:{chat_id}"
+    await custom_sections_menu(callback, session, None)
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secmt:\d+$"))
+async def section_mute_duration_menu(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает меню выбора длительности мута (inline кнопки).
+
+    Callback: cf:secmt:{section_id}
+
+    Использует inline кнопки вместо FSM для минимизации ввода.
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+    section = await section_service.get_section_by_id(section_id, session)
+
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    # Формируем текст текущей длительности
+    current = section.mute_duration or 60
+    if current < 60:
+        current_text = f"{current} мин"
+    elif current < 1440:
+        current_text = f"{current // 60} ч"
+    else:
+        current_text = f"{current // 1440} д"
+
+    text = (
+        f"⏱️ <b>Длительность мута</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n"
+        f"Текущее значение: {current_text}\n\n"
+        f"Выберите длительность:"
+    )
+
+    keyboard = create_section_mute_duration_menu(section_id, current)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secmt:\d+:\d+$"))
+async def set_section_mute_duration(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Устанавливает длительность мута для раздела.
+
+    Callback: cf:secmt:{duration}:{section_id}
+    """
+    parts = callback.data.split(":")
+    duration = int(parts[2])
+    section_id = int(parts[3])
+
+    section_service = get_section_service()
+    success, error = await section_service.update_section(
+        section_id=section_id,
+        session=session,
+        mute_duration=duration
+    )
+
+    if success:
+        # Формируем текст длительности
+        if duration < 60:
+            duration_text = f"{duration} мин"
+        elif duration < 1440:
+            duration_text = f"{duration // 60} ч"
+        else:
+            duration_text = f"{duration // 1440} д"
+        await callback.answer(f"⏱️ Длительность мута: {duration_text}")
+    else:
+        await callback.answer(f"❌ {error or 'Ошибка'}", show_alert=True)
+        return
+
+    # Обновляем меню
+    section = await section_service.get_section_by_id(section_id, session)
+    keyboard = create_section_mute_duration_menu(section_id, duration)
+
+    # Формируем текст
+    if duration < 60:
+        current_text = f"{duration} мин"
+    elif duration < 1440:
+        current_text = f"{duration // 60} ч"
+    else:
+        current_text = f"{duration // 1440} д"
+
+    text = (
+        f"⏱️ <b>Длительность мута</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n"
+        f"Текущее значение: {current_text}\n\n"
+        f"Выберите длительность:"
+    )
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+
+# ============================================================
+# РУЧНОЙ ВВОД ДЛИТЕЛЬНОСТИ МУТА РАЗДЕЛА (Правило 22: запрет хардкода)
+# ============================================================
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secmtc:\d+$"))
+async def start_section_custom_mute_duration(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Начинает FSM для ручного ввода длительности мута.
+
+    Callback: cf:secmtc:{section_id}
+
+    Даёт возможность ввести любое время вместо фиксированных значений.
+    Поддерживаемые форматы: 30s, 5min, 1h, 1d, 1m или просто число (минуты).
+    """
+    # Получаем section_id из callback
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    # Получаем раздел для отображения названия
+    section_service = get_section_service()
+    section = await section_service.get_section_by_id(section_id, session)
+
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    # Сохраняем section_id и message_id в state
+    await state.update_data(
+        section_id=section_id,
+        instruction_message_id=callback.message.message_id
+    )
+
+    # Переходим в FSM состояние ожидания ввода
+    await state.set_state(SectionMuteDurationStates.waiting_for_duration)
+
+    # Формируем инструкцию для пользователя
+    text = (
+        f"⏱️ <b>Ввод длительности мута</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n\n"
+        f"Введите длительность в одном из форматов:\n"
+        f"• <code>30s</code> — 30 секунд\n"
+        f"• <code>5min</code> — 5 минут\n"
+        f"• <code>1h</code> — 1 час\n"
+        f"• <code>1d</code> — 1 день\n"
+        f"• <code>1m</code> — 1 месяц\n"
+        f"• <code>120</code> — 120 минут (просто число)\n\n"
+        f"<i>Максимум: 365 дней</i>"
+    )
+
+    # Клавиатура отмены
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="◀️ Отмена",
+            callback_data=f"cf:secmt:{section_id}"
+        )]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.message(SectionMuteDurationStates.waiting_for_duration)
+async def process_section_custom_mute_duration(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ввод кастомной длительности мута.
+
+    Парсит ввод пользователя и сохраняет в раздел.
+    """
+    # Получаем данные из state
+    data = await state.get_data()
+    section_id = data.get('section_id')
+    instruction_message_id = data.get('instruction_message_id')
+
+    # Удаляем сообщение пользователя для чистоты чата
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    if not section_id:
+        await state.clear()
+        await message.answer("❌ Ошибка: данные сессии потеряны.")
+        return
+
+    # Парсим введённое время (используем существующую функцию parse_duration)
+    try:
+        duration_minutes = parse_duration(message.text.strip())
+    except ValueError as e:
+        # Ошибка парсинга - показываем сообщение и не выходим из FSM
+        error_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="◀️ Отмена",
+                callback_data=f"cf:secmt:{section_id}"
+            )]
+        ])
+
+        if instruction_message_id:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=instruction_message_id,
+                    text=(
+                        f"❌ <b>Неверный формат</b>\n\n"
+                        f"Ваш ввод: <code>{message.text}</code>\n\n"
+                        f"Попробуйте ещё раз. Примеры:\n"
+                        f"• <code>30min</code> — 30 минут\n"
+                        f"• <code>2h</code> — 2 часа\n"
+                        f"• <code>1d</code> — 1 день"
+                    ),
+                    reply_markup=error_keyboard,
+                    parse_mode="HTML"
+                )
+            except TelegramAPIError:
+                pass
+        return
+
+    # Проверяем лимиты (минимум 1 минута, максимум 365 дней = 525600 минут)
+    if duration_minutes < 1:
+        duration_minutes = 1
+    elif duration_minutes > 525600:
+        duration_minutes = 525600
+
+    # Обновляем раздел
+    section_service = get_section_service()
+    success = await section_service.update_section(
+        section_id=section_id,
+        session=session,
+        mute_duration=duration_minutes
+    )
+
+    # Очищаем FSM
+    await state.clear()
+
+    if not success:
+        await message.answer("❌ Ошибка при сохранении.")
+        return
+
+    # Формируем текст подтверждения
+    if duration_minutes < 60:
+        duration_text = f"{duration_minutes} мин"
+    elif duration_minutes < 1440:
+        duration_text = f"{duration_minutes // 60} ч"
+    else:
+        duration_text = f"{duration_minutes // 1440} д"
+
+    # Получаем обновлённый раздел для клавиатуры
+    section = await section_service.get_section_by_id(section_id, session)
+    keyboard = create_section_mute_duration_menu(section_id, duration_minutes)
+
+    text = (
+        f"✅ <b>Длительность мута обновлена!</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n"
+        f"Новое значение: <b>{duration_text}</b>\n\n"
+        f"Выберите другую длительность или нажмите Назад:"
+    )
+
+    if instruction_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=instruction_message_id,
+                text=text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            return
+        except TelegramAPIError:
+            pass
+
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secch:\d+$"))
+async def start_section_forward_channel_input(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Начинает FSM для ввода канала пересылки.
+
+    Callback: cf:secch:{section_id}
+
+    Канал общий для всех действий (delete/mute/ban).
+    Пересылка включается отдельно для каждого действия.
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+    section = await section_service.get_section_by_id(section_id, session)
+
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    await state.update_data(
+        section_id=section_id,
+        instruction_message_id=callback.message.message_id
+    )
+    await state.set_state(SectionForwardChannelStates.waiting_for_channel)
+
+    current = section.forward_channel_id or "не задан"
+
+    text = (
+        f"📢 <b>Канал для пересылки</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n"
+        f"Текущий канал: <code>{current}</code>\n\n"
+        f"Введите ID канала куда будут пересылаться сообщения.\n\n"
+        f"<i>Убедитесь что бот добавлен в канал как админ!</i>\n"
+        f"<i>Пересылка включается отдельно для каждого действия (📤).</i>"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"cf:secac:{section_id}"
+        )]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.message(SectionForwardChannelStates.waiting_for_channel)
+async def process_section_forward_channel(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ввод канала пересылки.
+    """
+    data = await state.get_data()
+    section_id = data.get('section_id')
+    instruction_message_id = data.get('instruction_message_id')
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    if not section_id:
+        await state.clear()
+        await message.answer("❌ Ошибка: данные сессии потеряны.")
+        return
+
+    # Парсим ID канала
+    try:
+        channel_id = int(message.text.strip())
+    except ValueError:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="◀️ Назад",
+                callback_data=f"cf:secac:{section_id}"
+            )]
+        ])
+        if instruction_message_id:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=instruction_message_id,
+                    text="❌ Введите числовой ID канала.\n\nПример: -1001234567890",
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+                return
+            except TelegramAPIError:
+                pass
+        return
+
+    # Обновляем раздел
+    section_service = get_section_service()
+    await section_service.update_section(section_id, session, forward_channel_id=channel_id)
+
+    # Очищаем FSM
+    await state.clear()
+
+    confirm_text = f"✅ Канал пересылки: <code>{channel_id}</code>"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="⚡ К действиям",
+            callback_data=f"cf:secac:{section_id}"
+        )]
+    ])
+
+    if instruction_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=instruction_message_id,
+                text=confirm_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            return
+        except TelegramAPIError:
+            pass
+
+    await message.answer(confirm_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# МЕНЮ "ДОПОЛНИТЕЛЬНО" ДЛЯ РАЗДЕЛА
+# ============================================================
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secadv:\d+$"))
+async def section_advanced_menu(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает меню дополнительных настроек раздела.
+
+    Callback: cf:secadv:{section_id}
+
+    Содержит:
+    - Текст уведомления при муте
+    - Текст уведомления при бане
+    - Задержка удаления уведомления бота
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+    section = await section_service.get_section_by_id(section_id, session)
+
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    text = (
+        f"⚙️ <b>Дополнительные настройки</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n\n"
+        f"Здесь вы можете настроить:\n"
+        f"• Тексты уведомлений при муте/бане\n"
+        f"• Автоудаление уведомлений бота\n\n"
+        f"<i>В текстах используйте %user% для имени нарушителя.</i>"
+    )
+
+    keyboard = create_section_advanced_menu(section_id, section)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+# ============================================================
+# ЗАДЕРЖКА УДАЛЕНИЯ УВЕДОМЛЕНИЯ
+# ============================================================
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secdel:\d+$"))
+async def section_notification_delay_menu(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает меню выбора задержки удаления уведомления.
+
+    Callback: cf:secdel:{section_id}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+    section = await section_service.get_section_by_id(section_id, session)
+
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    current_delay = section.notification_delete_delay or 0
+
+    text = (
+        f"⏱️ <b>Удаление уведомления бота</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n\n"
+        f"Через сколько секунд удалить уведомление бота\n"
+        f"о наложении мута/бана?\n\n"
+        f"<i>Выберите \"Не удалять\" чтобы оставить навсегда.</i>"
+    )
+
+    keyboard = create_section_notification_delay_menu(section_id, current_delay)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secdel:\d+:\d+$"))
+async def set_section_notification_delay(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Устанавливает задержку удаления уведомления.
+
+    Callback: cf:secdel:{delay}:{section_id}
+    """
+    parts = callback.data.split(":")
+    delay = int(parts[2])
+    section_id = int(parts[3])
+
+    section_service = get_section_service()
+    success, error = await section_service.update_section(
+        section_id=section_id,
+        session=session,
+        notification_delete_delay=delay if delay > 0 else None
+    )
+
+    if success:
+        if delay == 0:
+            await callback.answer("⏱️ Уведомления не удаляются")
+        elif delay < 60:
+            await callback.answer(f"⏱️ Удаление через {delay} сек")
+        else:
+            await callback.answer(f"⏱️ Удаление через {delay // 60} мин")
+    else:
+        await callback.answer(f"❌ {error or 'Ошибка'}", show_alert=True)
+        return
+
+    # Обновляем меню
+    section = await section_service.get_section_by_id(section_id, session)
+    keyboard = create_section_notification_delay_menu(section_id, delay)
+
+    text = (
+        f"⏱️ <b>Удаление уведомления бота</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n\n"
+        f"Через сколько секунд удалить уведомление бота\n"
+        f"о наложении мута/бана?\n\n"
+        f"<i>Выберите \"Не удалять\" чтобы оставить навсегда.</i>"
+    )
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+
+# ============================================================
+# ТЕКСТЫ УВЕДОМЛЕНИЙ (МУТА И БАНА)
+# ============================================================
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secmtxt:\d+$"))
+async def start_section_mute_text_input(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Начинает FSM для ввода текста уведомления при муте.
+
+    Callback: cf:secmtxt:{section_id}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+    section = await section_service.get_section_by_id(section_id, session)
+
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    await state.update_data(
+        section_id=section_id,
+        instruction_message_id=callback.message.message_id
+    )
+    await state.set_state(SectionMuteTextStates.waiting_for_text)
+
+    current = section.mute_text or "не задан"
+
+    text = (
+        f"🔇 <b>Текст уведомления при муте</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n"
+        f"Текущий текст: <i>{current}</i>\n\n"
+        f"Введите новый текст уведомления.\n\n"
+        f"<i>Используйте %user% для вставки имени нарушителя.</i>\n"
+        f"<i>Пример: %user% замучен за спам</i>"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🗑️ Очистить текст",
+            callback_data=f"cf:secmtxtclr:{section_id}"
+        )],
+        [InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"cf:secadv:{section_id}"
+        )]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secmtxtclr:\d+$"))
+async def clear_section_mute_text(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Очищает текст уведомления при муте.
+
+    Callback: cf:secmtxtclr:{section_id}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    await state.clear()
+
+    section_service = get_section_service()
+    await section_service.update_section(section_id, session, mute_text=None)
+
+    await callback.answer("✅ Текст мута очищен")
+
+    # Возвращаемся в меню Дополнительно
+    callback.data = f"cf:secadv:{section_id}"
+    await section_advanced_menu(callback, session)
+
+
+@settings_handler_router.message(SectionMuteTextStates.waiting_for_text)
+async def process_section_mute_text(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ввод текста уведомления при муте.
+    """
+    data = await state.get_data()
+    section_id = data.get('section_id')
+    instruction_message_id = data.get('instruction_message_id')
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    if not section_id:
+        await state.clear()
+        await message.answer("❌ Ошибка: данные сессии потеряны.")
+        return
+
+    mute_text = message.text.strip()[:500]  # Ограничиваем 500 символами
+
+    # Обновляем раздел
+    section_service = get_section_service()
+    await section_service.update_section(section_id, session, mute_text=mute_text)
+
+    # Очищаем FSM
+    await state.clear()
+
+    confirm_text = f"✅ Текст мута обновлён:\n<i>{mute_text}</i>"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="⚙️ К дополнительным",
+            callback_data=f"cf:secadv:{section_id}"
+        )]
+    ])
+
+    if instruction_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=instruction_message_id,
+                text=confirm_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            return
+        except TelegramAPIError:
+            pass
+
+    await message.answer(confirm_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secbtxt:\d+$"))
+async def start_section_ban_text_input(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Начинает FSM для ввода текста уведомления при бане.
+
+    Callback: cf:secbtxt:{section_id}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+    section = await section_service.get_section_by_id(section_id, session)
+
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    await state.update_data(
+        section_id=section_id,
+        instruction_message_id=callback.message.message_id
+    )
+    await state.set_state(SectionBanTextStates.waiting_for_text)
+
+    current = section.ban_text or "не задан"
+
+    text = (
+        f"🚫 <b>Текст уведомления при бане</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n"
+        f"Текущий текст: <i>{current}</i>\n\n"
+        f"Введите новый текст уведомления.\n\n"
+        f"<i>Используйте %user% для вставки имени нарушителя.</i>\n"
+        f"<i>Пример: %user% забанен за спам</i>"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🗑️ Очистить текст",
+            callback_data=f"cf:secbtxtclr:{section_id}"
+        )],
+        [InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"cf:secadv:{section_id}"
+        )]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secbtxtclr:\d+$"))
+async def clear_section_ban_text(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Очищает текст уведомления при бане.
+
+    Callback: cf:secbtxtclr:{section_id}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    await state.clear()
+
+    section_service = get_section_service()
+    await section_service.update_section(section_id, session, ban_text=None)
+
+    await callback.answer("✅ Текст бана очищен")
+
+    # Возвращаемся в меню Дополнительно
+    callback.data = f"cf:secadv:{section_id}"
+    await section_advanced_menu(callback, session)
+
+
+@settings_handler_router.message(SectionBanTextStates.waiting_for_text)
+async def process_section_ban_text(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ввод текста уведомления при бане.
+    """
+    data = await state.get_data()
+    section_id = data.get('section_id')
+    instruction_message_id = data.get('instruction_message_id')
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    if not section_id:
+        await state.clear()
+        await message.answer("❌ Ошибка: данные сессии потеряны.")
+        return
+
+    ban_text = message.text.strip()[:500]  # Ограничиваем 500 символами
+
+    # Обновляем раздел
+    section_service = get_section_service()
+    await section_service.update_section(section_id, session, ban_text=ban_text)
+
+    # Очищаем FSM
+    await state.clear()
+
+    confirm_text = f"✅ Текст бана обновлён:\n<i>{ban_text}</i>"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="⚙️ К дополнительным",
+            callback_data=f"cf:secadv:{section_id}"
+        )]
+    ])
+
+    if instruction_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=instruction_message_id,
+                text=confirm_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            return
+        except TelegramAPIError:
+            pass
+
+    await message.answer(confirm_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# ИМПОРТ ПАТТЕРНОВ
+# ============================================================
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secimp:\d+$"))
+async def start_section_import_patterns(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Начинает FSM для импорта паттернов.
+
+    Callback: cf:secimp:{section_id}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+    section = await section_service.get_section_by_id(section_id, session)
+
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    await state.update_data(
+        section_id=section_id,
+        instruction_message_id=callback.message.message_id
+    )
+    await state.set_state(SectionImportPatternsStates.waiting_for_patterns)
+
+    text = (
+        f"📥 <b>Импорт паттернов</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n\n"
+        f"Вставьте скам-текст целиком.\n"
+        f"Система автоматически извлечёт ключевые фразы.\n\n"
+        f"💡 Работает как главное меню антискама —\n"
+        f"анализирует текст и находит паттерны."
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="◀️ Отмена",
+            callback_data=f"cf:secs:{section_id}"
+        )]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.message(SectionImportPatternsStates.waiting_for_patterns)
+async def process_section_import_patterns(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает импорт паттернов - показывает ПРЕВЬЮ перед добавлением.
+    Аналогично главному антискаму: сначала показываем список, потом подтверждение.
+    """
+    data = await state.get_data()
+    section_id = data.get('section_id')
+    instruction_message_id = data.get('instruction_message_id')
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    if not section_id:
+        await state.clear()
+        await message.answer("❌ Ошибка: данные сессии потеряны.")
+        return
+
+    # Парсим паттерны с нормализацией (как на главном меню антискама)
+    # Используем extract_patterns_from_text для единообразной обработки
+    pattern_service = get_pattern_service()
+    extracted = pattern_service.extract_patterns_from_text(message.text)
+
+    if not extracted:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="◀️ Назад",
+                callback_data=f"cf:secs:{section_id}"
+            )]
+        ])
+        if instruction_message_id:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=instruction_message_id,
+                    text="❌ Не удалось извлечь паттерны из текста.\n\nПопробуйте вставить другой скам-текст.",
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+                return
+            except TelegramAPIError:
+                pass
+        return
+
+    # Сохраняем извлечённые паттерны в FSM state для подтверждения (Баг #SECTION-PREVIEW fix)
+    await state.update_data(extracted_patterns=extracted)
+
+    # Показываем превью паттернов (как в главном антискаме)
+    text = f"🔍 <b>Найденные паттерны</b>\n\n"
+    for i, (phrase, phrase_weight) in enumerate(extracted[:10], 1):
+        text += f"{i}. <code>{phrase}</code> (+{phrase_weight})\n"
+
+    if len(extracted) > 10:
+        text += f"\n<i>...и ещё {len(extracted) - 10} паттернов</i>\n"
+
+    text += f"\n<b>Всего найдено:</b> {len(extracted)} паттернов"
+
+    # Клавиатура с кнопками подтверждения и отмены
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"✅ Импортировать ({len(extracted)} паттернов)",
+            callback_data=f"cf:secimc:{section_id}"
+        )],
+        [InlineKeyboardButton(
+            text="◀️ Отмена",
+            callback_data=f"cf:secs:{section_id}"
+        )]
+    ])
+
+    if instruction_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=instruction_message_id,
+                text=text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            return
+        except TelegramAPIError:
+            pass
+
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# ПОДТВЕРЖДЕНИЕ ИМПОРТА ПАТТЕРНОВ В РАЗДЕЛ (Баг #SECTION-PREVIEW fix)
+# ============================================================
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secimc:\d+$"))
+async def confirm_section_import_patterns(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Подтверждает импорт паттернов в раздел.
+    Вызывается после превью, когда пользователь нажимает "Импортировать".
+
+    Callback: cf:secimc:{section_id}
+    """
+    await callback.answer()
+
+    # Получаем section_id из callback
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    # Получаем сохранённые паттерны из FSM state
+    data = await state.get_data()
+    extracted = data.get('extracted_patterns', [])
+
+    if not extracted:
+        await callback.message.edit_text(
+            "❌ Данные сессии потеряны. Попробуйте снова.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="◀️ Назад",
+                    callback_data=f"cf:secs:{section_id}"
+                )]
+            ])
+        )
+        await state.clear()
+        return
+
+    # Импортируем паттерны с проверкой дубликатов
+    section_service = get_section_service()
+    added_count = 0
+    skipped_count = 0
+    added_patterns = []
+    skipped_patterns = []
+
+    for phrase, weight in extracted:
+        success, _, error = await section_service.add_section_pattern(
+            section_id=section_id,
+            pattern=phrase,
+            session=session,
+            created_by=callback.from_user.id
+        )
+        if success:
+            added_count += 1
+            added_patterns.append(phrase)
+        else:
+            skipped_count += 1
+            if "уже существует" in (error or ""):
+                skipped_patterns.append(phrase[:20])
+
+    # Очищаем FSM
+    await state.clear()
+
+    # Формируем текст результата с показом добавленных паттернов
+    confirm_text = f"✅ <b>Импорт завершён!</b>\n\n"
+
+    # Показываем список добавленных паттернов (до 15 штук)
+    if added_patterns:
+        confirm_text += f"<b>Добавлено ({added_count}):</b>\n"
+        for i, pattern in enumerate(added_patterns[:15], 1):
+            confirm_text += f"  {i}. <code>{pattern[:40]}</code>\n"
+        if len(added_patterns) > 15:
+            confirm_text += f"  <i>...и ещё {len(added_patterns) - 15}</i>\n"
+
+    if skipped_count > 0:
+        confirm_text += f"\n<b>Пропущено (дубликаты):</b> {skipped_count}"
+        if skipped_patterns and len(skipped_patterns) <= 5:
+            confirm_text += f"\n<i>{', '.join(skipped_patterns)}...</i>"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="⚙️ К настройкам раздела",
+            callback_data=f"cf:secs:{section_id}"
+        )]
+    ])
+
+    try:
+        await callback.message.edit_text(
+            text=confirm_text,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    except TelegramAPIError:
+        await callback.message.answer(confirm_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# FSM СОСТОЯНИЯ ДЛЯ ПОРОГОВ БАЛЛОВ КАТЕГОРИЙ
+# ============================================================
+
+class AddSectionThresholdStates(StatesGroup):
+    """FSM состояния для добавления порога баллов категории."""
+    waiting_min_score = State()
+    waiting_max_score = State()
+    waiting_action = State()
+    waiting_mute_duration = State()
+
+
+# ============================================================
+# ОБРАБОТЧИКИ ПОРОГОВ БАЛЛОВ КАТЕГОРИЙ
+# ============================================================
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secthr:\d+$"))
+async def section_thresholds_menu(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает меню порогов баллов категории.
+
+    Callback: cf:secthr:{section_id}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+    section = await section_service.get_section_by_id(section_id, session)
+
+    if not section:
+        await callback.answer("Раздел не найден", show_alert=True)
+        return
+
+    # Получаем все пороги
+    thresholds = await section_service.get_section_thresholds(
+        section_id=section_id,
+        session=session,
+        enabled_only=False
+    )
+
+    # Формируем текст
+    text = f"📊 <b>Пороги баллов</b>\n\n"
+    text += f"Раздел: <b>{section.name}</b>\n\n"
+
+    if thresholds:
+        text += "Разные действия для разных диапазонов скора:\n\n"
+        for t in thresholds:
+            max_str = str(t.max_score) if t.max_score else "∞"
+            action_map = {
+                'delete': '🗑️ Удалить',
+                'mute': '🔇 Мут',
+                'ban': '🚫 Бан'
+            }
+            action_str = action_map.get(t.action, t.action)
+            if t.action == 'mute' and t.mute_duration:
+                hours = t.mute_duration // 60
+                mins = t.mute_duration % 60
+                if hours > 0:
+                    action_str += f" {hours}ч"
+                if mins > 0:
+                    action_str += f" {mins}м"
+            status = "✅" if t.enabled else "⏸️"
+            text += f"{status} {t.min_score}–{max_str} баллов → {action_str}\n"
+    else:
+        text += (
+            "<i>Нет порогов. Используется действие по умолчанию.</i>\n\n"
+            "Добавьте пороги для градации действий по скору.\n"
+            "Пример:\n"
+            "• 50-99 → удалить\n"
+            "• 100-199 → мут\n"
+            "• 200+ → бан"
+        )
+
+    text += "\n\n💡 Если скор не попадает ни в один порог —\nиспользуется действие по умолчанию."
+
+    # Формируем клавиатуру
+    buttons = []
+
+    # Кнопки для существующих порогов
+    for t in thresholds:
+        max_str = str(t.max_score) if t.max_score else "∞"
+        toggle_emoji = "⏸️" if t.enabled else "✅"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{toggle_emoji} {t.min_score}–{max_str}",
+                callback_data=f"cf:secthtog:{t.id}:{section_id}"
+            ),
+            InlineKeyboardButton(
+                text="🗑️",
+                callback_data=f"cf:secthdel:{t.id}:{section_id}"
+            )
+        ])
+
+    # Кнопка добавления
+    buttons.append([
+        InlineKeyboardButton(
+            text="➕ Добавить порог",
+            callback_data=f"cf:secthra:{section_id}"
+        )
+    ])
+
+    # Назад
+    buttons.append([
+        InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"cf:secs:{section_id}"
+        )
+    ])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secthtog:\d+:\d+$"))
+async def toggle_section_threshold(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """Переключает активность порога."""
+    parts = callback.data.split(":")
+    threshold_id = int(parts[2])
+    section_id = int(parts[3])
+
+    section_service = get_section_service()
+    success = await section_service.toggle_section_threshold(threshold_id, session)
+
+    if success:
+        await callback.answer("Порог переключён")
+    else:
+        await callback.answer("Ошибка", show_alert=True)
+
+    callback.data = f"cf:secthr:{section_id}"
+    await section_thresholds_menu(callback, session)
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secthdel:\d+:\d+$"))
+async def delete_section_threshold(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """Удаляет порог."""
+    parts = callback.data.split(":")
+    threshold_id = int(parts[2])
+    section_id = int(parts[3])
+
+    section_service = get_section_service()
+    success = await section_service.delete_section_threshold(threshold_id, session)
+
+    if success:
+        await callback.answer("Порог удалён")
+    else:
+        await callback.answer("Ошибка", show_alert=True)
+
+    callback.data = f"cf:secthr:{section_id}"
+    await section_thresholds_menu(callback, session)
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:secthra:\d+$"))
+async def start_add_section_threshold(
+    callback: CallbackQuery,
+    state: FSMContext
+) -> None:
+    """Начинает FSM для добавления порога."""
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    await state.update_data(section_id=section_id)
+    await state.set_state(AddSectionThresholdStates.waiting_min_score)
+
+    text = (
+        "📊 <b>Добавление порога баллов</b>\n\n"
+        "Введите <b>минимальный балл</b> для этого порога.\n\n"
+        "Например: <code>100</code>\n\n"
+        "Это нижняя граница диапазона (включительно)."
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cf:secthr:{section_id}")]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.message(AddSectionThresholdStates.waiting_min_score)
+async def process_section_min_score(
+    message: Message,
+    state: FSMContext
+) -> None:
+    """Обрабатывает ввод минимального балла."""
+    try:
+        min_score = int(message.text.strip())
+        if min_score < 0:
+            raise ValueError()
+    except ValueError:
+        await message.answer("❌ Введите положительное число.")
+        return
+
+    await state.update_data(min_score=min_score)
+    await state.set_state(AddSectionThresholdStates.waiting_max_score)
+
+    data = await state.get_data()
+    section_id = data.get('section_id')
+
+    text = (
+        f"📊 <b>Добавление порога</b>\n\n"
+        f"Минимальный балл: <code>{min_score}</code>\n\n"
+        f"Введите <b>максимальный балл</b>.\n"
+        f"Или отправьте <code>0</code> для безлимита (∞).\n\n"
+        f"Например: <code>199</code>"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cf:secthr:{section_id}")]
+    ])
+
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@settings_handler_router.message(AddSectionThresholdStates.waiting_max_score)
+async def process_section_max_score(
+    message: Message,
+    state: FSMContext
+) -> None:
+    """Обрабатывает ввод максимального балла."""
+    try:
+        max_score = int(message.text.strip())
+        if max_score < 0:
+            raise ValueError()
+        if max_score == 0:
+            max_score = None
+    except ValueError:
+        await message.answer("❌ Введите положительное число или 0 для безлимита.")
+        return
+
+    await state.update_data(max_score=max_score)
+    await state.set_state(AddSectionThresholdStates.waiting_action)
+
+    data = await state.get_data()
+    section_id = data.get('section_id')
+    min_score = data.get('min_score')
+    max_str = str(max_score) if max_score else "∞"
+
+    text = (
+        f"📊 <b>Добавление порога</b>\n\n"
+        f"Диапазон: <code>{min_score}–{max_str}</code>\n\n"
+        f"Выберите <b>действие</b>:"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🗑️ Удалить", callback_data=f"cf:secthact:delete:{section_id}"),
+            InlineKeyboardButton(text="🔇 Мут", callback_data=f"cf:secthact:mute:{section_id}")
+        ],
+        [
+            InlineKeyboardButton(text="🚫 Бан", callback_data=f"cf:secthact:ban:{section_id}")
+        ],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cf:secthr:{section_id}")]
+    ])
+
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@settings_handler_router.callback_query(
+    F.data.regexp(r"^cf:secthact:(delete|mute|ban):\d+$"),
+    AddSectionThresholdStates.waiting_action
+)
+async def process_section_threshold_action(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """Обрабатывает выбор действия."""
+    parts = callback.data.split(":")
+    action = parts[2]
+    section_id = int(parts[3])
+
+    await state.update_data(action=action)
+
+    if action == 'mute':
+        await state.set_state(AddSectionThresholdStates.waiting_mute_duration)
+
+        text = (
+            "📊 <b>Длительность мута</b>\n\n"
+            "Введите длительность в <b>минутах</b>.\n\n"
+            "Примеры:\n"
+            "• <code>60</code> — 1 час\n"
+            "• <code>1440</code> — 24 часа\n"
+            "• <code>10080</code> — 7 дней"
+        )
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=f"cf:secthr:{section_id}")]
+        ])
+
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        await callback.answer()
+        return
+
+    # Создаём порог
+    await _create_section_threshold(callback, state, session)
+
+
+@settings_handler_router.message(AddSectionThresholdStates.waiting_mute_duration)
+async def process_section_mute_duration(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """Обрабатывает ввод длительности мута."""
+    try:
+        mute_duration = int(message.text.strip())
+        if mute_duration <= 0:
+            raise ValueError()
+    except ValueError:
+        await message.answer("❌ Введите положительное число минут.")
+        return
+
+    await state.update_data(mute_duration=mute_duration)
+    await _create_section_threshold_from_message(message, state, session)
+
+
+async def _create_section_threshold(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """Создаёт порог из callback."""
+    data = await state.get_data()
+    section_id = data.get('section_id')
+    min_score = data.get('min_score')
+    max_score = data.get('max_score')
+    action = data.get('action')
+    mute_duration = data.get('mute_duration')
+
+    section_service = get_section_service()
+    success, _ = await section_service.add_section_threshold(
+        section_id=section_id,
+        min_score=min_score,
+        max_score=max_score,
+        action=action,
+        session=session,
+        mute_duration=mute_duration,
+        created_by=callback.from_user.id
+    )
+
+    await state.clear()
+
+    if success:
+        await callback.answer("Порог добавлен")
+    else:
+        await callback.answer("Ошибка", show_alert=True)
+
+    callback.data = f"cf:secthr:{section_id}"
+    await section_thresholds_menu(callback, session)
+
+
+async def _create_section_threshold_from_message(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """Создаёт порог из message."""
+    data = await state.get_data()
+    section_id = data.get('section_id')
+    min_score = data.get('min_score')
+    max_score = data.get('max_score')
+    action = data.get('action')
+    mute_duration = data.get('mute_duration')
+
+    section_service = get_section_service()
+    success, _ = await section_service.add_section_threshold(
+        section_id=section_id,
+        min_score=min_score,
+        max_score=max_score,
+        action=action,
+        session=session,
+        mute_duration=mute_duration,
+        created_by=message.from_user.id
+    )
+
+    await state.clear()
+
+    max_str = str(max_score) if max_score else "∞"
+    if success:
+        result_text = f"✅ Порог {min_score}–{max_str} → {action} добавлен"
+    else:
+        result_text = "❌ Ошибка добавления порога"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 К порогам", callback_data=f"cf:secthr:{section_id}")]
+    ])
+
+    await message.answer(result_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# Отмена FSM при нажатии "Назад" во время добавления порога
+@settings_handler_router.callback_query(
+    F.data.regexp(r"^cf:secthr:\d+$"),
+    AddSectionThresholdStates.waiting_min_score
+)
+@settings_handler_router.callback_query(
+    F.data.regexp(r"^cf:secthr:\d+$"),
+    AddSectionThresholdStates.waiting_max_score
+)
+@settings_handler_router.callback_query(
+    F.data.regexp(r"^cf:secthr:\d+$"),
+    AddSectionThresholdStates.waiting_action
+)
+@settings_handler_router.callback_query(
+    F.data.regexp(r"^cf:secthr:\d+$"),
+    AddSectionThresholdStates.waiting_mute_duration
+)
+async def cancel_add_section_threshold(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """Отменяет добавление порога."""
+    await state.clear()
+    await section_thresholds_menu(callback, session)
+
+
+# ============================================================
+# НАСТРОЙКА БАЗОВЫХ СИГНАЛОВ (УБИРАЕМ ХАРДКОД)
+# ============================================================
+# UI для управления базовыми сигналами SCAM_SIGNALS:
+# - Включение/отключение отдельных сигналов
+# - Изменение весов (scores)
+#
+# Базовые сигналы определены в scam_detector.py:
+# money_amount, income_period, easy_money, call_to_action, crypto,
+# recruitment, remote_work, exclamations, urgency, scheme,
+# training, investments, gambling, age_restriction, unique_offer
+
+# Названия сигналов на русском
+BASE_SIGNAL_NAMES = {
+    'money_amount': '💰 Суммы денег',
+    'income_period': '📅 Периодичность дохода',
+    'easy_money': '💸 Лёгкие деньги',
+    'call_to_action': '📲 Призыв к действию',
+    'crypto': '₿ Криптовалюта',
+    'recruitment': '👥 Набор в команду',
+    'remote_work': '🏠 Удалённая работа',
+    'exclamations': '❗ Много восклицаний',
+    'urgency': '⏰ Срочность',
+    'scheme': '📊 Схема/проект',
+    'training': '📚 Обучение',
+    'investments': '📈 Инвестиции',
+    'gambling': '🎰 Казино/ставки',
+    'age_restriction': '🔞 Возраст 18+',
+    'unique_offer': '⭐ Уникальное предложение'
+}
+
+
+class EditBaseSignalWeightStates(StatesGroup):
+    """FSM состояния для изменения веса базового сигнала."""
+    waiting_weight = State()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:bsig:-?\d+$"))
+async def base_signals_menu(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает меню настройки базовых сигналов.
+
+    Callback: cf:bsig:{chat_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Получаем эффективные сигналы (с учётом переопределений)
+    from bot.services.content_filter.scam_pattern_service import get_base_signal_service
+    service = get_base_signal_service()
+    signals = await service.get_effective_signals(chat_id, session)
+
+    # Формируем текст
+    text = (
+        "🔧 <b>Базовые сигналы антискама</b>\n\n"
+        "Настройте какие сигналы проверять и их веса.\n"
+        "✅ = включён, ❌ = отключён\n"
+        "[ВЕС] = баллы за срабатывание\n\n"
+        "Нажмите на сигнал для изменения веса.\n"
+        "Используйте 🔄 для переключения."
+    )
+
+    # Клавиатура
+    buttons = []
+
+    for signal_name, data in signals.items():
+        display_name = BASE_SIGNAL_NAMES.get(signal_name, signal_name)
+        status = "✅" if data['enabled'] else "❌"
+        weight = data['score']
+        is_custom = data.get('is_custom', False)
+        custom_mark = " *" if is_custom else ""
+
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{status} {display_name} [{weight}]{custom_mark}",
+                callback_data=f"cf:bsigw:{chat_id}:{signal_name}"
+            ),
+            InlineKeyboardButton(
+                text="🔄",
+                callback_data=f"cf:bsigt:{chat_id}:{signal_name}"
+            )
+        ])
+
+    # Кнопка сброса всех настроек
+    buttons.append([
+        InlineKeyboardButton(
+            text="🔄 Сбросить всё к стандартным",
+            callback_data=f"cf:bsigr:{chat_id}"
+        )
+    ])
+
+    # Назад
+    buttons.append([
+        InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"cf:scs:{chat_id}"
+        )
+    ])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:bsigt:-?\d+:\w+$"))
+async def toggle_base_signal(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Переключает активность базового сигнала.
+
+    Callback: cf:bsigt:{chat_id}:{signal_name}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+    signal_name = parts[3]
+
+    from bot.services.content_filter.scam_pattern_service import get_base_signal_service
+    service = get_base_signal_service()
+
+    success, new_state = await service.toggle_signal(
+        chat_id=chat_id,
+        signal_name=signal_name,
+        session=session,
+        updated_by=callback.from_user.id
+    )
+
+    if success:
+        status = "включён ✅" if new_state else "отключён ❌"
+        await callback.answer(f"Сигнал {status}")
+    else:
+        await callback.answer("Ошибка", show_alert=True)
+
+    # Обновляем меню
+    callback.data = f"cf:bsig:{chat_id}"
+    await base_signals_menu(callback, session)
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:bsigw:-?\d+:\w+$"))
+async def start_edit_signal_weight(
+    callback: CallbackQuery,
+    state: FSMContext
+) -> None:
+    """
+    Начинает изменение веса сигнала.
+
+    Callback: cf:bsigw:{chat_id}:{signal_name}
+    """
+    try:
+        parts = callback.data.split(":")
+        chat_id = int(parts[2])
+        signal_name = parts[3]
+
+        display_name = BASE_SIGNAL_NAMES.get(signal_name, signal_name)
+
+        # Получаем текущий вес
+        from bot.services.content_filter.scam_pattern_service import get_base_signal_service
+        from bot.database.session import get_session
+
+        async with get_session() as session:
+            service = get_base_signal_service()
+            signals = await service.get_effective_signals(chat_id, session)
+            current_weight = signals.get(signal_name, {}).get('score', 25)
+
+        text = (
+            f"⚖️ <b>Изменение веса сигнала</b>\n\n"
+            f"Сигнал: {display_name}\n"
+            f"Текущий вес: {current_weight}\n\n"
+            f"Введите новый вес (1-100):\n\n"
+            f"💡 Совет: чем выше вес, тем больше вклад в общий скор."
+        )
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data=f"cf:bsig:{chat_id}"
+                )
+            ]
+        ])
+
+        # ВАЖНО: сначала устанавливаем FSM состояние
+        await state.set_state(EditBaseSignalWeightStates.waiting_weight)
+        await state.update_data(chat_id=chat_id, signal_name=signal_name)
+
+        logger.info(
+            f"[BASE_SIGNAL_WEIGHT] FSM установлен: user={callback.from_user.id}, "
+            f"chat_id={chat_id}, signal={signal_name}"
+        )
+
+        try:
+            await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        except TelegramAPIError as e:
+            logger.warning(f"[BASE_SIGNAL_WEIGHT] Не удалось отредактировать сообщение: {e}")
+
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"[BASE_SIGNAL_WEIGHT] Ошибка при установке FSM: {e}", exc_info=True)
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@settings_handler_router.message(EditBaseSignalWeightStates.waiting_weight)
+async def process_signal_weight(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """Обрабатывает ввод нового веса сигнала."""
+    # Проверяем что это текстовое сообщение
+    if not message.text:
+        await message.answer("❌ Пожалуйста, введите число (1-100)")
+        return
+
+    logger.info(
+        f"[BASE_SIGNAL_WEIGHT] Получен ввод веса: user={message.from_user.id}, "
+        f"text='{message.text}'"
+    )
+
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    signal_name = data.get('signal_name')
+
+    logger.info(
+        f"[BASE_SIGNAL_WEIGHT] FSM данные: chat_id={chat_id}, signal={signal_name}"
+    )
+
+    # Парсим вес
+    try:
+        weight = int(message.text.strip())
+        if weight < 1 or weight > 100:
+            raise ValueError("Вне диапазона")
+    except (ValueError, TypeError):
+        await message.answer(
+            "❌ Введите число от 1 до 100",
+            parse_mode="HTML"
+        )
+        return
+
+    # Сохраняем
+    from bot.services.content_filter.scam_pattern_service import get_base_signal_service
+    service = get_base_signal_service()
+
+    success = await service.set_weight(
+        chat_id=chat_id,
+        signal_name=signal_name,
+        weight=weight,
+        session=session,
+        updated_by=message.from_user.id
+    )
+
+    await state.clear()
+
+    if success:
+        display_name = BASE_SIGNAL_NAMES.get(signal_name, signal_name)
+        logger.info(
+            f"[BASE_SIGNAL_WEIGHT] Вес сохранён: chat_id={chat_id}, "
+            f"signal={signal_name}, weight={weight}"
+        )
+        await message.answer(
+            f"✅ Вес сигнала «{display_name}» установлен: {weight}",
+            parse_mode="HTML"
+        )
+    else:
+        logger.error(f"[BASE_SIGNAL_WEIGHT] Ошибка сохранения веса: chat_id={chat_id}")
+        await message.answer("❌ Ошибка сохранения", parse_mode="HTML")
+
+    # Показываем меню
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="◀️ К базовым сигналам",
+                callback_data=f"cf:bsig:{chat_id}"
+            )
+        ]
+    ])
+    await message.answer("Выберите действие:", reply_markup=keyboard)
+
+
+@settings_handler_router.callback_query(F.data.regexp(r"^cf:bsigr:-?\d+$"))
+async def reset_all_base_signals(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Сбрасывает все переопределения базовых сигналов.
+
+    Callback: cf:bsigr:{chat_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    from bot.services.content_filter.scam_pattern_service import get_base_signal_service
+    service = get_base_signal_service()
+
+    count = await service.reset_all_signals(chat_id, session)
+
+    if count > 0:
+        await callback.answer(f"Сброшено {count} настроек", show_alert=True)
+    else:
+        await callback.answer("Нет кастомных настроек для сброса")
+
+    # Обновляем меню
+    callback.data = f"cf:bsig:{chat_id}"
+    await base_signals_menu(callback, session)

@@ -4,16 +4,22 @@
 Этот сервис решает проблему, когда группы исчезают из БД после перезапуска бота.
 Механизмы защиты:
 1. Бэкап групп в Redis при каждом старте
-2. Логирование любых попыток удаления Group записей
-3. Автоматическое восстановление групп из бэкапа при обнаружении потери
+2. Бэкап групп в ФАЙЛ на хосте (защита от удаления Redis volume!)
+3. Логирование любых попыток удаления Group записей
+4. Автоматическое восстановление групп из бэкапа при обнаружении потери
 
 Использование:
 - Вызвать backup_groups_to_redis() при старте бота
 - Вызвать restore_groups_from_backup() если обнаружено 0 групп в БД
+
+ВАЖНО: При reset-test-env.sh или docker-compose down -v удаляются volumes!
+Файловый бэкап сохраняется на хосте и НЕ удаляется вместе с volumes.
 """
 import json
 import logging
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 from sqlalchemy import select, event
@@ -32,6 +38,28 @@ GROUPS_BACKUP_COUNT_KEY = "groups_backup:count"
 
 # TTL для бэкапов (7 дней)
 BACKUP_TTL_SECONDS = 7 * 24 * 60 * 60
+
+# Путь к файловому бэкапу (на хосте через volume mount)
+# Используем папку backup в корне проекта
+FILE_BACKUP_DIR = Path("/app/backup") if os.path.exists("/app") else Path("backup")
+FILE_BACKUP_PATH = FILE_BACKUP_DIR / "groups_backup.json"
+
+# Фейковые тестовые chat_id которые НЕ должны бэкапиться/восстанавливаться
+# Это ID используемые в юнит-тестах
+FAKE_TEST_CHAT_IDS = {
+    -1001234567890,  # Стандартный тестовый ID
+    -1001234567891,  # Альтернативный тестовый ID
+    -1000,           # Тестовый ID из conftest.py
+}
+
+
+def is_fake_test_group(chat_id: int) -> bool:
+    """
+    Проверяет, является ли chat_id фейковой тестовой группой.
+
+    Такие группы не должны попадать в бэкап и восстанавливаться.
+    """
+    return chat_id in FAKE_TEST_CHAT_IDS
 
 
 async def backup_groups_to_redis(session: AsyncSession) -> int:
@@ -58,6 +86,14 @@ async def backup_groups_to_redis(session: AsyncSession) -> int:
         backup_data = []
 
         for group in groups:
+            # Пропускаем фейковые тестовые группы
+            if is_fake_test_group(group.chat_id):
+                logger.warning(
+                    f"⚠️ [GROUP_PROTECTION] Пропускаем фейковую тестовую группу: "
+                    f"{group.chat_id} ({group.title})"
+                )
+                continue
+
             # Получаем связанные данные
             ug_result = await session.execute(
                 select(UserGroup).where(UserGroup.group_id == group.chat_id)
@@ -100,6 +136,9 @@ async def backup_groups_to_redis(session: AsyncSession) -> int:
         await redis.setex(GROUPS_BACKUP_COUNT_KEY, BACKUP_TTL_SECONDS, str(len(groups)))
 
         logger.info(f"✅ [GROUP_PROTECTION] Бэкап создан: {len(groups)} групп сохранено в Redis")
+
+        # ТАКЖЕ сохраняем в файл (защита от удаления Redis volume!)
+        save_backup_to_file(backup_data, timestamp)
         return len(groups)
 
     except Exception as e:
@@ -157,6 +196,14 @@ async def restore_groups_from_backup(session: AsyncSession) -> int:
         for group_data in backup_data:
             chat_id = group_data["chat_id"]
 
+            # Пропускаем фейковые тестовые группы
+            if is_fake_test_group(chat_id):
+                logger.warning(
+                    f"⚠️ [GROUP_PROTECTION] Пропускаем восстановление фейковой тестовой группы: "
+                    f"{chat_id} ({group_data.get('title', 'Unknown')})"
+                )
+                continue
+
             # Проверяем, нет ли уже этой группы
             existing = await session.execute(
                 select(Group).where(Group.chat_id == chat_id)
@@ -176,17 +223,10 @@ async def restore_groups_from_backup(session: AsyncSession) -> int:
             session.add(group)
             await session.flush()
 
-            # Восстанавливаем связи UserGroup
-            for admin_user_id in group_data.get("admin_user_ids", []):
-                # Проверяем, нет ли уже связи
-                existing_ug = await session.execute(
-                    select(UserGroup).where(
-                        UserGroup.user_id == admin_user_id,
-                        UserGroup.group_id == chat_id
-                    )
-                )
-                if not existing_ug.scalar_one_or_none():
-                    session.add(UserGroup(user_id=admin_user_id, group_id=chat_id))
+            # ПРОПУСКАЕМ восстановление UserGroup - админы восстановятся через auto_sync
+            admin_count = len(group_data.get("admin_user_ids", []))
+            if admin_count > 0:
+                logger.info(f"ℹ️ [GROUP_PROTECTION] {admin_count} админов восстановятся через auto_sync")
 
             # Восстанавливаем ChatSettings
             if group_data.get("chat_settings"):
@@ -253,20 +293,28 @@ async def check_and_protect_groups(session: AsyncSession) -> bool:
             # Критическая ситуация - нет групп!
             logger.warning("⚠️ [GROUP_PROTECTION] ВНИМАНИЕ: 0 групп в БД!")
 
+            # Сначала пробуем Redis бэкап
             if backup_info and backup_info["count"] > 0:
-                # Есть бэкап - восстанавливаем
-                logger.info("🔄 [GROUP_PROTECTION] Обнаружен бэкап, начинаем восстановление...")
+                logger.info("🔄 [GROUP_PROTECTION] Обнаружен Redis бэкап, начинаем восстановление...")
                 restored = await restore_groups_from_backup(session)
 
                 if restored > 0:
-                    logger.info(f"✅ [GROUP_PROTECTION] Успешно восстановлено {restored} групп!")
+                    logger.info(f"✅ [GROUP_PROTECTION] Успешно восстановлено {restored} групп из Redis!")
                     return True
-                else:
-                    logger.error("❌ [GROUP_PROTECTION] Не удалось восстановить группы из бэкапа")
-                    return False
-            else:
-                logger.warning("⚠️ [GROUP_PROTECTION] Бэкап отсутствует, восстановление невозможно")
-                return False
+
+            # Redis бэкап не помог - пробуем файловый бэкап
+            file_backup = load_backup_from_file()
+            if file_backup and file_backup.get("count", 0) > 0:
+                logger.info("🔄 [GROUP_PROTECTION] Пробуем ФАЙЛОВЫЙ бэкап...")
+                restored = await restore_from_file_backup(session)
+
+                if restored > 0:
+                    logger.info(f"✅ [GROUP_PROTECTION] Восстановлено {restored} групп из ФАЙЛА!")
+                    return True
+
+            # Ни один бэкап не помог
+            logger.error("❌ [GROUP_PROTECTION] Бэкапы отсутствуют или пусты, восстановление невозможно")
+            return False
         else:
             # Есть группы - создаем бэкап
             backup_count = await backup_groups_to_redis(session)
@@ -312,3 +360,159 @@ def setup_group_delete_listeners():
         )
 
     logger.info("✅ [GROUP_PROTECTION] Event listeners для Group настроены")
+
+
+# =============================================================================
+# ФАЙЛОВЫЙ БЭКАП (защита от удаления Redis volume)
+# =============================================================================
+
+def _ensure_backup_dir():
+    """Создаёт папку для бэкапов если её нет."""
+    try:
+        FILE_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        return True
+    except Exception as e:
+        logger.error(f"❌ [GROUP_PROTECTION] Не удалось создать папку бэкапов: {e}")
+        return False
+
+
+def save_backup_to_file(backup_data: List[Dict], timestamp: str) -> bool:
+    """
+    Сохраняет бэкап групп в файл на хосте.
+
+    ВАЖНО: Этот файл НЕ удаляется при docker-compose down -v
+    потому что папка backup монтируется с хоста.
+    """
+    if not _ensure_backup_dir():
+        return False
+
+    try:
+        file_data = {
+            "timestamp": timestamp,
+            "count": len(backup_data),
+            "groups": backup_data
+        }
+
+        with open(FILE_BACKUP_PATH, 'w', encoding='utf-8') as f:
+            json.dump(file_data, f, ensure_ascii=False, indent=2)
+
+        logger.info(f"✅ [GROUP_PROTECTION] Файловый бэкап сохранён: {FILE_BACKUP_PATH}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ [GROUP_PROTECTION] Ошибка сохранения файлового бэкапа: {e}")
+        return False
+
+
+def load_backup_from_file() -> Optional[Dict[str, Any]]:
+    """
+    Загружает бэкап групп из файла.
+
+    Returns:
+        Dict с timestamp, count, groups или None если файл не найден
+    """
+    try:
+        if not FILE_BACKUP_PATH.exists():
+            logger.info(f"ℹ️ [GROUP_PROTECTION] Файловый бэкап не найден: {FILE_BACKUP_PATH}")
+            return None
+
+        with open(FILE_BACKUP_PATH, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        logger.info(
+            f"✅ [GROUP_PROTECTION] Загружен файловый бэкап: "
+            f"{data.get('count', 0)} групп от {data.get('timestamp', 'unknown')}"
+        )
+        return data
+    except Exception as e:
+        logger.error(f"❌ [GROUP_PROTECTION] Ошибка чтения файлового бэкапа: {e}")
+        return None
+
+
+async def restore_from_file_backup(session: AsyncSession) -> int:
+    """
+    Восстанавливает группы из файлового бэкапа.
+
+    Используется когда Redis бэкап недоступен (например после удаления volume).
+
+    Returns:
+        Количество восстановленных групп
+    """
+    file_data = load_backup_from_file()
+    if not file_data or not file_data.get("groups"):
+        logger.warning("⚠️ [GROUP_PROTECTION] Файловый бэкап пуст или не найден")
+        return 0
+
+    try:
+        backup_data = file_data["groups"]
+        restored_count = 0
+
+        for group_data in backup_data:
+            chat_id = group_data["chat_id"]
+
+            # Пропускаем фейковые тестовые группы
+            if is_fake_test_group(chat_id):
+                logger.warning(
+                    f"⚠️ [GROUP_PROTECTION] Пропускаем восстановление фейковой тестовой группы из файла: "
+                    f"{chat_id} ({group_data.get('title', 'Unknown')})"
+                )
+                continue
+
+            # Проверяем, нет ли уже этой группы
+            existing = await session.execute(
+                select(Group).where(Group.chat_id == chat_id)
+            )
+            if existing.scalar_one_or_none():
+                logger.info(f"ℹ️ [GROUP_PROTECTION] Группа {chat_id} уже существует, пропускаем")
+                continue
+
+            # Создаем группу
+            group = Group(
+                chat_id=chat_id,
+                title=group_data["title"],
+                creator_user_id=group_data.get("creator_user_id"),
+                added_by_user_id=group_data.get("added_by_user_id"),
+                bot_id=group_data.get("bot_id"),
+            )
+            session.add(group)
+            await session.flush()
+
+            # ПРОПУСКАЕМ восстановление UserGroup - админы восстановятся через auto_sync
+            # при первом сообщении в группу. Это надёжнее чем создавать User записи.
+            admin_count = len(group_data.get("admin_user_ids", []))
+            if admin_count > 0:
+                logger.info(f"ℹ️ [GROUP_PROTECTION] {admin_count} админов восстановятся через auto_sync")
+
+            # Восстанавливаем ChatSettings
+            if group_data.get("chat_settings"):
+                cs_existing = await session.execute(
+                    select(ChatSettings).where(ChatSettings.chat_id == chat_id)
+                )
+                if not cs_existing.scalar_one_or_none():
+                    session.add(ChatSettings(
+                        chat_id=chat_id,
+                        username=group_data["chat_settings"].get("username"),
+                    ))
+
+            # Восстанавливаем CaptchaSettings
+            if group_data.get("captcha_settings"):
+                cap_existing = await session.execute(
+                    select(CaptchaSettings).where(CaptchaSettings.group_id == chat_id)
+                )
+                if not cap_existing.scalar_one_or_none():
+                    session.add(CaptchaSettings(
+                        group_id=chat_id,
+                        is_enabled=group_data["captcha_settings"].get("is_enabled", False),
+                        is_visual_enabled=group_data["captcha_settings"].get("is_visual_enabled", False),
+                    ))
+
+            restored_count += 1
+            logger.info(f"✅ [GROUP_PROTECTION] Восстановлена группа {chat_id}: {group_data['title']}")
+
+        await session.commit()
+        logger.info(f"✅ [GROUP_PROTECTION] Восстановлено {restored_count} групп из ФАЙЛОВОГО бэкапа!")
+        return restored_count
+
+    except Exception as e:
+        logger.error(f"❌ [GROUP_PROTECTION] Ошибка восстановления из файла: {e}")
+        await session.rollback()
+        return 0

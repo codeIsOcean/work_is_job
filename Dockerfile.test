@@ -33,20 +33,22 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV ENVIRONMENT=testing
 
+# Install postgresql-client for entrypoint script
+USER root
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends postgresql-client && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy and prepare entrypoint script
+COPY entrypoint-test.sh /app/entrypoint-test.sh
+RUN chmod +x /app/entrypoint-test.sh
+
 # Create non-root user
 RUN useradd --create-home --shell /bin/bash app && \
     chown -R app:app /app
 USER app
 
-# Default command for the test environment
-CMD ["sh", "-c", "\
-    echo 'Starting in testing mode...' && \
-    echo 'Waiting for PostgreSQL...' && \
-    until nc -z postgres_test 5432; do sleep 1; done && \
-    echo 'Waiting for Redis...' && \
-    until nc -z redis_test 6379; do sleep 1; done && \
-    echo 'Services are ready! Running migrations...' && \
-    alembic upgrade head && \
-    echo 'Launching bot in testing mode...' && \
-    python main.py"]
+# Use entrypoint script with migration error handling
+ENTRYPOINT ["/app/entrypoint-test.sh"]
 
