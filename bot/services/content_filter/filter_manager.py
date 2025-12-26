@@ -35,7 +35,11 @@ from bot.database.models_content_filter import (
 from bot.services.content_filter.word_filter import WordFilter, WordMatchResult
 from bot.services.content_filter.text_normalizer import TextNormalizer, get_normalizer
 # Импортируем детекторы Phase 2
-from bot.services.content_filter.scam_detector import ScamDetector, get_scam_detector
+from bot.services.content_filter.scam_detector import (
+    ScamDetector, get_scam_detector,
+    # Функции для fuzzy и n-gram matching (используются в CustomSpamSection)
+    fuzzy_match, extract_ngrams, ngram_match
+)
 from bot.services.content_filter.flood_detector import FloodDetector, create_flood_detector
 
 # Создаём логгер
@@ -475,14 +479,61 @@ class FilterManager:
                 total_score = 0
                 triggered_patterns = []
 
+                # Предварительно извлекаем n-граммы из текста для n-gram matching
+                text_bigrams = extract_ngrams(normalized_text, n=2)
+                text_trigrams = extract_ngrams(normalized_text, n=3)
+
                 for pattern in patterns:
-                    # Проверяем нормализованную версию паттерна в тексте
+                    matched = False
+                    match_method = None
+
+                    # ─────────────────────────────────────────────────────
+                    # МЕТОД 1: Точное совпадение подстроки
+                    # ─────────────────────────────────────────────────────
                     if pattern.normalized.lower() in normalized_text:
+                        matched = True
+                        match_method = 'phrase'
+
+                    # ─────────────────────────────────────────────────────
+                    # МЕТОД 2: Fuzzy matching (порог 0.8)
+                    # Ловит перестановки слов и небольшие изменения
+                    # ─────────────────────────────────────────────────────
+                    if not matched:
+                        if fuzzy_match(normalized_text, pattern.normalized, threshold=0.8):
+                            matched = True
+                            match_method = 'fuzzy'
+
+                    # ─────────────────────────────────────────────────────
+                    # МЕТОД 3: N-gram matching (перекрытие 0.6)
+                    # Ловит перестановки слов в длинных фразах
+                    # ─────────────────────────────────────────────────────
+                    if not matched:
+                        pattern_words = pattern.normalized.split()
+                        # Биграммы для паттернов из 2+ слов
+                        if len(pattern_words) >= 2:
+                            pattern_bigrams = extract_ngrams(pattern.normalized, n=2)
+                            if ngram_match(text_bigrams, pattern_bigrams, min_overlap=0.6):
+                                matched = True
+                                match_method = 'ngram'
+                        # Триграммы для паттернов из 3+ слов
+                        if not matched and len(pattern_words) >= 3:
+                            pattern_trigrams = extract_ngrams(pattern.normalized, n=3)
+                            if ngram_match(text_trigrams, pattern_trigrams, min_overlap=0.5):
+                                matched = True
+                                match_method = 'ngram'
+
+                    # Если паттерн сработал - добавляем скор
+                    if matched:
                         total_score += pattern.weight
-                        triggered_patterns.append(pattern.pattern)
+                        triggered_patterns.append(f"{pattern.pattern} [{match_method}]")
 
                         # Увеличиваем счётчик срабатываний
                         await section_service.increment_pattern_trigger(pattern.id, session)
+
+                        logger.debug(
+                            f"[FilterManager] CustomSection паттерн сработал [{match_method}]: "
+                            f"'{pattern.pattern}' +{pattern.weight}"
+                        )
 
                 # Проверяем достижен ли порог
                 if total_score >= section.threshold:
