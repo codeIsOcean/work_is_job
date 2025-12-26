@@ -13,8 +13,8 @@
 
 # Импортируем Router для создания группы хендлеров
 from aiogram import Router, F
-# Импортируем типы сообщений
-from aiogram.types import Message
+# Импортируем типы сообщений и клавиатуры
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 # Импортируем исключения Telegram API
 from aiogram.exceptions import TelegramAPIError
 # Импортируем логгер
@@ -273,6 +273,17 @@ async def _apply_action(
         # Кастомный текст при предупреждении за флуд
         custom_warn_text = getattr(settings, 'flood_warn_text', None)
 
+    # Если это custom_section - получаем настройки из result (переданы из FilterResult)
+    elif result.detector_type == 'custom_section':
+        # Задержка удаления сообщения нарушителя (в секундах)
+        delete_delay = result.custom_delete_delay
+        # Задержка автоудаления уведомления бота (в секундах)
+        notification_delay = result.custom_notification_delay
+        # Кастомный текст при муте
+        custom_mute_text = result.custom_mute_text
+        # Кастомный текст при бане
+        custom_ban_text = result.custom_ban_text
+
     # ─────────────────────────────────────────────────────────
     # ШАГ 1: Удаляем сообщение(я) (для всех действий)
     # ─────────────────────────────────────────────────────────
@@ -306,8 +317,14 @@ async def _apply_action(
     # ШАГ 2: Применяем дополнительное действие
     # ─────────────────────────────────────────────────────────
 
+    # Флаг нужно ли пересылать в канал (для custom_section)
+    should_forward = False
+    forward_channel_id = getattr(result, 'forward_channel_id', None)
+
     if action == 'delete':
         # Только удаление - уже сделано выше
+        # Проверяем нужно ли пересылать при delete
+        should_forward = getattr(result, 'forward_on_delete', False) and forward_channel_id
         pass
 
     elif action == 'warn':
@@ -318,6 +335,8 @@ async def _apply_action(
         # Мутим пользователя
         duration_minutes = result.action_duration or 1440  # 24 часа по умолчанию
         await _mute_user(message, duration_minutes, result, custom_mute_text, notification_delay, session)
+        # Проверяем нужно ли пересылать при mute
+        should_forward = getattr(result, 'forward_on_mute', False) and forward_channel_id
 
     elif action == 'kick':
         # Кикаем пользователя
@@ -326,10 +345,34 @@ async def _apply_action(
     elif action == 'ban':
         # Баним пользователя
         await _ban_user(message, result, custom_ban_text, notification_delay, session)
+        # Проверяем нужно ли пересылать при ban
+        should_forward = getattr(result, 'forward_on_ban', False) and forward_channel_id
+
+    elif action == 'forward_delete':
+        # Устаревшее действие: пересылаем в канал и удаляем
+        # Оставлено для обратной совместимости
+        if forward_channel_id:
+            await _forward_and_delete(message, forward_channel_id, result, notification_delay)
+        else:
+            logger.warning("[ContentFilter] forward_delete без forward_channel_id, только удаляем")
 
     else:
         # Неизвестное действие - логируем
         logger.warning(f"[ContentFilter] Неизвестное действие: {action}")
+
+    # ─────────────────────────────────────────────────────────
+    # ШАГ 3: Пересылка в канал (если включена для данного действия)
+    # ─────────────────────────────────────────────────────────
+    if should_forward and forward_channel_id:
+        try:
+            # Пересылаем копию сообщения в канал (оригинал уже удалён)
+            await _forward_to_channel(message, forward_channel_id, result)
+            logger.info(
+                f"[ContentFilter] 📤 Переслано в канал {forward_channel_id} "
+                f"(action={action}, section={getattr(result, 'section_name', 'N/A')})"
+            )
+        except Exception as e:
+            logger.warning(f"[ContentFilter] Ошибка пересылки в канал: {e}")
 
 
 async def _delayed_delete(message: Message, delay_seconds: int) -> None:
@@ -609,6 +652,175 @@ async def _ban_user(
         logger.warning(f"[ContentFilter] Не удалось забанить: {e}")
 
 
+async def _forward_and_delete(
+    message: Message,
+    forward_channel_id: int,
+    result,
+    notification_delay: int = None
+) -> None:
+    """
+    Пересылает сообщение в указанный канал и удаляет оригинал.
+
+    Используется для действия forward_delete в кастомных разделах.
+    Позволяет админам просматривать удалённые сообщения в отдельном канале.
+
+    Args:
+        message: Исходное сообщение (уже может быть удалено)
+        forward_channel_id: ID канала для пересылки
+        result: Результат проверки
+        notification_delay: Задержка автоудаления уведомления (сек) или None
+    """
+    try:
+        # Формируем информацию о сообщении и отправителе
+        user = message.from_user
+        user_mention = user.mention_html() if user else "Unknown"
+        user_id = user.id if user else 0
+        chat_title = message.chat.title or "Группа"
+        chat_id = message.chat.id
+
+        # Получаем текст сообщения
+        original_text = message.text or message.caption or ""
+        if len(original_text) > 500:
+            original_text = original_text[:500] + "..."
+        original_safe = html.escape(original_text)
+
+        # Определяем название раздела если есть
+        section_name = getattr(result, 'section_name', None) or result.detector_type
+        trigger = getattr(result, 'trigger', None) or ""
+        trigger_safe = html.escape(trigger[:100]) if trigger else ""
+
+        # Текущее время (МСК = UTC+3)
+        now = datetime.now(timezone.utc) + timedelta(hours=3)
+        time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Формируем сообщение для канала
+        forward_text = (
+            f"🔴 <b>Удалённое сообщение</b>\n\n"
+            f"📂 <b>Раздел:</b> {section_name}\n"
+            f"🔎 <b>Триггер:</b> <code>{trigger_safe}</code>\n\n"
+            f"👤 <b>Пользователь:</b> {user_mention}\n"
+            f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
+            f"💬 <b>Группа:</b> {html.escape(chat_title)}\n"
+            f"🔗 <b>Chat ID:</b> <code>{chat_id}</code>\n\n"
+            f"📝 <b>Текст сообщения:</b>\n"
+            f"<i>{original_safe}</i>\n\n"
+            f"🕐 {time_str}"
+        )
+
+        # Отправляем в канал
+        await message.bot.send_message(
+            chat_id=forward_channel_id,
+            text=forward_text,
+            parse_mode="HTML"
+        )
+
+        logger.info(
+            f"[ContentFilter] Сообщение переслано в канал {forward_channel_id}: "
+            f"user={user_id}, section={section_name}"
+        )
+
+        # Отправляем уведомление в группу (опционально)
+        if notification_delay is not None:
+            notif_text = (
+                f"📤 Сообщение от {user_mention} удалено и сохранено для проверки.\n"
+                f"Причина: {section_name}"
+            )
+            sent_msg = await message.answer(notif_text, parse_mode="HTML")
+
+            # Планируем автоудаление уведомления
+            if notification_delay > 0:
+                asyncio.create_task(_schedule_notification_delete(
+                    message.bot, message.chat.id, sent_msg.message_id, notification_delay
+                ))
+
+    except TelegramAPIError as e:
+        logger.warning(f"[ContentFilter] Не удалось переслать в канал: {e}")
+    except Exception as e:
+        logger.error(f"[ContentFilter] Ошибка forward_and_delete: {e}")
+
+
+async def _forward_to_channel(
+    message: Message,
+    forward_channel_id: int,
+    result
+) -> None:
+    """
+    Пересылает информацию о нарушении в указанный канал.
+
+    Используется для опций forward_on_delete, forward_on_mute, forward_on_ban
+    в кастомных разделах. Позволяет админам видеть все нарушения в одном месте.
+
+    Args:
+        message: Исходное сообщение (может быть уже удалено)
+        forward_channel_id: ID канала для пересылки
+        result: Результат проверки с информацией о нарушении
+    """
+    try:
+        # Формируем информацию о сообщении и отправителе
+        user = message.from_user
+        user_mention = user.mention_html() if user else "Unknown"
+        user_id = user.id if user else 0
+        chat_title = message.chat.title or "Группа"
+        chat_id = message.chat.id
+
+        # Получаем текст сообщения
+        original_text = message.text or message.caption or ""
+        if len(original_text) > 500:
+            original_text = original_text[:500] + "..."
+        original_safe = html.escape(original_text)
+
+        # Определяем название раздела и триггер
+        section_name = getattr(result, 'section_name', None) or result.detector_type
+        trigger = getattr(result, 'trigger', None) or ""
+        trigger_safe = html.escape(trigger[:100]) if trigger else ""
+
+        # Определяем эмодзи и текст действия
+        action = result.action
+        action_info = {
+            'delete': ('🗑️', 'Удалено'),
+            'mute': ('🔇', 'Мут'),
+            'ban': ('🚫', 'Бан'),
+            'warn': ('⚠️', 'Предупреждение'),
+            'kick': ('👢', 'Кик')
+        }
+        action_emoji, action_text = action_info.get(action, ('❓', action))
+
+        # Текущее время (МСК = UTC+3)
+        now = datetime.now(timezone.utc) + timedelta(hours=3)
+        time_str = now.strftime("%Y-%m-%d %H:%M:%S")
+
+        # Формируем сообщение для канала
+        forward_text = (
+            f"{action_emoji} <b>Нарушение: {action_text}</b>\n\n"
+            f"📂 <b>Раздел:</b> {section_name}\n"
+            f"🔎 <b>Триггер:</b> <code>{trigger_safe}</code>\n\n"
+            f"👤 <b>Пользователь:</b> {user_mention}\n"
+            f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
+            f"💬 <b>Группа:</b> {html.escape(chat_title)}\n"
+            f"🔗 <b>Chat ID:</b> <code>{chat_id}</code>\n\n"
+            f"📝 <b>Текст сообщения:</b>\n"
+            f"<i>{original_safe}</i>\n\n"
+            f"🕐 {time_str}"
+        )
+
+        # Отправляем в канал
+        await message.bot.send_message(
+            chat_id=forward_channel_id,
+            text=forward_text,
+            parse_mode="HTML"
+        )
+
+        logger.info(
+            f"[ContentFilter] 📤 Переслано в канал {forward_channel_id}: "
+            f"user={user_id}, action={action}, section={section_name}"
+        )
+
+    except TelegramAPIError as e:
+        logger.warning(f"[ContentFilter] Не удалось переслать в канал: {e}")
+    except Exception as e:
+        logger.error(f"[ContentFilter] Ошибка _forward_to_channel: {e}")
+
+
 # ============================================================
 # ОТПРАВКА В ЖУРНАЛ ГРУППЫ
 # ============================================================
@@ -639,6 +851,10 @@ async def _send_journal_log(
     # Текущее время (МСК = UTC+3)
     now = datetime.now(timezone.utc) + timedelta(hours=3)
     time_str = now.strftime("%H:%M:%S")
+
+    # Клавиатура для действий (по умолчанию None)
+    # Будет заполнена для scam detector
+    keyboard = None
 
     # ─────────────────────────────────────────────────────────
     # WORD FILTER - расширенное логирование
@@ -700,16 +916,44 @@ async def _send_journal_log(
     # SCAM DETECTOR
     # ─────────────────────────────────────────────────────────
     elif result.detector_type == 'scam':
-        trigger_safe = html.escape(result.trigger[:80] if result.trigger else 'N/A')
+        # Экранируем триггер (сигналы которые сработали)
+        trigger_safe = html.escape(result.trigger[:100] if result.trigger else 'N/A')
+        # Формируем текст с баллами
         score_text = f" (score: {result.scam_score})" if result.scam_score else ""
 
+        # Полный текст сообщения (до 500 символов для читаемости)
+        original_text = message.text or message.caption or ''
+        # Обрезаем если слишком длинный
+        if len(original_text) > 500:
+            original_text = original_text[:500] + '...'
+        # Экранируем HTML спецсимволы
+        original_safe = html.escape(original_text)
+
+        # Формируем текст для журнала с полной информацией
         journal_text = (
             f"💰 <b>Антискам</b>{score_text}\n\n"
             f"👤 {user_link} [<code>{user_id}</code>]\n"
             f"🔎 Сигналы: <code>{trigger_safe}</code>\n"
+            f"💬 <b>Текст:</b>\n<i>{original_safe}</i>\n\n"
             f"⚡ {result.action or 'delete'}\n"
             f"🕐 {time_str}"
         )
+
+        # Создаём клавиатуру с кнопками действий (Mute/Ban)
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                # Кнопка мута пользователя
+                InlineKeyboardButton(
+                    text="🔇 Мут",
+                    callback_data=f"mute_user_{user_id}_{chat_id}"
+                ),
+                # Кнопка бана пользователя
+                InlineKeyboardButton(
+                    text="🚫 Бан",
+                    callback_data=f"ban_user_{user_id}_{chat_id}"
+                )
+            ]
+        ])
 
     # ─────────────────────────────────────────────────────────
     # FLOOD DETECTOR
@@ -726,6 +970,56 @@ async def _send_journal_log(
         )
 
     # ─────────────────────────────────────────────────────────
+    # CUSTOM SECTION (кастомные разделы спама)
+    # ─────────────────────────────────────────────────────────
+    elif result.detector_type == 'custom_section':
+        # Название раздела
+        section_name = result.section_name or 'Раздел'
+        # Триггеры (паттерны которые сработали)
+        trigger_safe = html.escape(result.trigger[:100] if result.trigger else 'N/A')
+        # Скор
+        score_text = f" (score: {result.scam_score})" if result.scam_score else ""
+
+        # Полный текст сообщения
+        original_text = message.text or message.caption or ''
+        if len(original_text) > 500:
+            original_text = original_text[:500] + '...'
+        original_safe = html.escape(original_text)
+
+        # Действие
+        action_names = {
+            'delete': '🗑️ Удалено',
+            'mute': '🔇 Мут',
+            'ban': '🚫 Бан',
+            'forward_delete': '📤 Переслано'
+        }
+        action_text = action_names.get(result.action, result.action)
+
+        # Формируем текст для журнала
+        journal_text = (
+            f"📂 <b>Раздел: {html.escape(section_name)}</b>{score_text}\n\n"
+            f"👤 {user_link} [<code>{user_id}</code>]\n"
+            f"🔎 Паттерны: <code>{trigger_safe}</code>\n"
+            f"💬 <b>Текст:</b>\n<i>{original_safe}</i>\n\n"
+            f"⚡ {action_text}\n"
+            f"🕐 {time_str}"
+        )
+
+        # Кнопки модерации
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔇 Мут",
+                    callback_data=f"mute_user_{user_id}_{chat_id}"
+                ),
+                InlineKeyboardButton(
+                    text="🚫 Бан",
+                    callback_data=f"ban_user_{user_id}_{chat_id}"
+                )
+            ]
+        ])
+
+    # ─────────────────────────────────────────────────────────
     # FALLBACK - другие детекторы
     # ─────────────────────────────────────────────────────────
     else:
@@ -739,13 +1033,14 @@ async def _send_journal_log(
             f"🕐 {time_str}"
         )
 
-    # Отправляем в журнал
+    # Отправляем в журнал (с клавиатурой если есть)
     try:
         await send_journal_event(
             bot=message.bot,
             session=session,
             group_id=chat_id,
-            message_text=journal_text
+            message_text=journal_text,
+            reply_markup=keyboard  # Клавиатура с кнопками (для scam detector)
         )
         logger.info(f"[ContentFilter] 📝 Отправлен лог в журнал группы {chat_id}")
     except Exception as e:

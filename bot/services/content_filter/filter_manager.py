@@ -48,13 +48,18 @@ class FilterResult(NamedTuple):
 
     Attributes:
         should_act: True если нужно применить действие
-        detector_type: Какой детектор сработал (word_filter, scam, flood, referral)
+        detector_type: Какой детектор сработал (word_filter, scam, flood, custom_section)
         trigger: Что именно сработало (слово, описание)
         action: Какое действие применить (delete, warn, mute, kick, ban)
         action_duration: Длительность действия в минутах
         scam_score: Скор для scam_detector (или None)
         flood_message_ids: Список ID сообщений для удаления (только для flood)
         word_category: Категория слова (simple, harmful, obfuscated) для word_filter
+        forward_channel_id: ID канала для пересылки
+        section_name: Название кастомного раздела
+        forward_on_delete: Пересылать в канал при действии delete
+        forward_on_mute: Пересылать в канал при действии mute
+        forward_on_ban: Пересылать в канал при действии ban
     """
     # Флаг: нужно ли применять действие
     should_act: bool
@@ -72,6 +77,19 @@ class FilterResult(NamedTuple):
     flood_message_ids: Optional[List[int]] = None
     # Категория слова (simple, harmful, obfuscated) для word_filter
     word_category: Optional[str] = None
+    # ID канала для пересылки
+    forward_channel_id: Optional[int] = None
+    # Название кастомного раздела
+    section_name: Optional[str] = None
+    # Флаги пересылки по действиям (для custom_section)
+    forward_on_delete: bool = False
+    forward_on_mute: bool = False
+    forward_on_ban: bool = False
+    # Кастомные тексты и задержки (для custom_section)
+    custom_mute_text: Optional[str] = None
+    custom_ban_text: Optional[str] = None
+    custom_delete_delay: Optional[int] = None
+    custom_notification_delay: Optional[int] = None
 
 
 class FilterManager:
@@ -390,14 +408,137 @@ class FilterManager:
                     f"score={scam_result.score}, сигналы={signals_str}"
                 )
 
+                # ─────────────────────────────────────────────────────
+                # ОПРЕДЕЛЯЕМ ДЕЙСТВИЕ ПО ПОРОГАМ БАЛЛОВ
+                # ─────────────────────────────────────────────────────
+                # Проверяем есть ли подходящий порог для данного скора
+                # Если есть - используем его action/mute_duration
+                # Если нет - используем scam_action из настроек (или default_action)
+                from bot.services.content_filter.scam_pattern_service import get_threshold_service
+                threshold_service = get_threshold_service()
+
+                # Получаем действие на основе порогов баллов
+                threshold_result = await threshold_service.get_action_for_score(
+                    chat_id=chat_id,
+                    score=scam_result.score,
+                    session=session
+                )
+
+                # Определяем финальное действие и длительность мута
+                if threshold_result:
+                    # Нашли подходящий порог - используем его настройки
+                    action = threshold_result[0]  # action из порога
+                    mute_duration = threshold_result[1]  # mute_duration из порога
+                    # Если mute_duration не задан в пороге - берём из настроек
+                    if mute_duration is None:
+                        mute_duration = settings.scam_mute_duration or settings.default_mute_duration
+                    logger.info(
+                        f"[FilterManager] Порог баллов: {scam_result.score} → {action}"
+                    )
+                else:
+                    # Порог не найден - используем scam_action или default_action
+                    action = settings.scam_action or settings.default_action
+                    mute_duration = settings.scam_mute_duration or settings.default_mute_duration
+
                 return FilterResult(
                     should_act=True,
                     detector_type='scam',
                     trigger=signals_str,
-                    action=settings.default_action,
-                    action_duration=settings.default_mute_duration,
+                    action=action,
+                    action_duration=mute_duration,
                     scam_score=scam_result.score
                 )
+
+        # ─────────────────────────────────────────────────────────
+        # ШАГ 5: Custom Sections (кастомные разделы спама)
+        # ─────────────────────────────────────────────────────────
+        # Проверяем текст на паттерны кастомных разделов.
+        # Каждый раздел имеет свой набор паттернов, порог и действие.
+        from bot.services.content_filter.scam_pattern_service import get_section_service
+        section_service = get_section_service()
+
+        # Получаем все активные разделы группы
+        sections = await section_service.get_sections(chat_id, session, enabled_only=True)
+
+        if sections:
+            # Нормализуем текст один раз
+            normalized_text = self._normalizer.normalize(text).lower()
+
+            for section in sections:
+                # Получаем паттерны раздела
+                patterns = await section_service.get_section_patterns(section.id, session, active_only=True)
+
+                if not patterns:
+                    continue
+
+                # Вычисляем общий скор по паттернам
+                total_score = 0
+                triggered_patterns = []
+
+                for pattern in patterns:
+                    # Проверяем нормализованную версию паттерна в тексте
+                    if pattern.normalized.lower() in normalized_text:
+                        total_score += pattern.weight
+                        triggered_patterns.append(pattern.pattern)
+
+                        # Увеличиваем счётчик срабатываний
+                        await section_service.increment_pattern_trigger(pattern.id, session)
+
+                # Проверяем достижен ли порог
+                if total_score >= section.threshold:
+                    # Раздел сработал!
+                    trigger_str = ', '.join(triggered_patterns[:3])
+                    if len(triggered_patterns) > 3:
+                        trigger_str += f" (+{len(triggered_patterns) - 3})"
+
+                    # ─────────────────────────────────────────────────────
+                    # ПРОВЕРЯЕМ ПОРОГИ БАЛЛОВ РАЗДЕЛА (Баг 1 fix)
+                    # Если есть подходящий порог — используем его action
+                    # Если нет — используем action из самого раздела
+                    # ─────────────────────────────────────────────────────
+                    threshold_result = await section_service.get_action_for_section_score(
+                        section_id=section.id,
+                        score=total_score,
+                        session=session
+                    )
+
+                    # Определяем финальное действие и длительность
+                    if threshold_result:
+                        # Нашли подходящий порог — используем его
+                        final_action = threshold_result[0]
+                        final_mute_duration = threshold_result[1] or section.mute_duration
+                        logger.info(
+                            f"[FilterManager] CustomSection '{section.name}': "
+                            f"порог баллов {total_score} → {final_action}"
+                        )
+                    else:
+                        # Порог не найден — используем action из раздела
+                        final_action = section.action
+                        final_mute_duration = section.mute_duration
+
+                    logger.info(
+                        f"[FilterManager] CustomSection '{section.name}' сработал в чате {chat_id}: "
+                        f"score={total_score}, порог={section.threshold}, action={final_action}"
+                    )
+
+                    return FilterResult(
+                        should_act=True,
+                        detector_type='custom_section',
+                        trigger=trigger_str,
+                        action=final_action,
+                        action_duration=final_mute_duration,
+                        scam_score=total_score,
+                        forward_channel_id=section.forward_channel_id,
+                        section_name=section.name,
+                        forward_on_delete=section.forward_on_delete,
+                        forward_on_mute=section.forward_on_mute,
+                        forward_on_ban=section.forward_on_ban,
+                        # Передаём кастомные тексты и задержки из раздела
+                        custom_mute_text=section.mute_text,
+                        custom_ban_text=section.ban_text,
+                        custom_delete_delay=section.delete_delay,
+                        custom_notification_delay=section.notification_delete_delay
+                    )
 
         # Ничего не найдено
         return FilterResult(should_act=False)
