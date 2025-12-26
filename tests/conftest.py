@@ -332,7 +332,7 @@ def pytest_collection_modifyitems(config, items):
         skip_e2e = pytest.mark.skip(reason="e2e tests are unstable on Windows; run them on Linux CI/prod")
 
         # Файлы которые НЕ пропускаем на Windows
-        allowed_on_windows = {"test_userbot_flows.py", "test_telegram_html.py", "test_mute_by_reaction_e2e.py", "test_custom_sections_e2e.py", "test_escort_spam_e2e.py"}
+        allowed_on_windows = {"test_userbot_flows.py", "test_telegram_html.py", "test_mute_by_reaction_e2e.py", "test_custom_sections_e2e.py", "test_escort_spam_e2e.py", "test_criterion6_e2e.py", "test_content_filter_ui_e2e.py"}
 
         for item in items:
             if "e2e" in item.keywords:
