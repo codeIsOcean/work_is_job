@@ -254,7 +254,7 @@ async def show_patterns_list(
     pattern_service = get_pattern_service()
 
     # Получаем все паттерны
-    patterns = await pattern_service.get_patterns_list(chat_id, session)
+    patterns = await pattern_service.get_patterns(chat_id, session, active_only=False)
 
     # Вычисляем пагинацию
     total_pages = max(1, (len(patterns) + PATTERNS_PER_PAGE - 1) // PATTERNS_PER_PAGE)
@@ -274,8 +274,9 @@ async def show_patterns_list(
             weight_emoji = "🔴" if p.weight >= 200 else "🟡" if p.weight >= 100 else "🟢"
             text += f"{i}. {weight_emoji} <code>{p.pattern}</code> ({p.weight})\n"
 
-    # Клавиатура
-    keyboard = create_patterns_list_menu(chat_id, page, total_pages, len(page_patterns) > 0)
+    # Клавиатура - передаём ID паттернов для кнопок удаления
+    pattern_ids = [p.id for p in page_patterns]
+    keyboard = create_patterns_list_menu(chat_id, page, total_pages, pattern_ids)
 
     try:
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
@@ -479,7 +480,7 @@ async def export_patterns(
     pattern_service = get_pattern_service()
 
     # Получаем все паттерны
-    patterns = await pattern_service.get_patterns_list(chat_id, session)
+    patterns = await pattern_service.get_patterns(chat_id, session, active_only=False)
 
     if not patterns:
         await callback.answer("❌ Нет паттернов для экспорта", show_alert=True)
@@ -494,3 +495,15 @@ async def export_patterns(
     await callback.message.answer(export_text)
 
     await callback.answer("Экспортировано")
+
+
+# ============================================================
+# ИМПОРТ ПАТТЕРНОВ
+# ============================================================
+# Хендлеры импорта вынесены в отдельный модуль import_patterns.py
+# для соблюдения SRP (Правило 30). Там реализован полный flow:
+# - Анализ текста (extract_patterns_from_text)
+# - Preview найденных паттернов
+# - Выбор веса (15/25/40)
+# - Подтверждение импорта
+# ============================================================

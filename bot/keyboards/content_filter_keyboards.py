@@ -504,15 +504,6 @@ def create_category_action_menu(
                 )
             ],
             # ─────────────────────────────────────────────────────
-            # Дополнительные настройки (текст, задержки)
-            # ─────────────────────────────────────────────────────
-            [
-                InlineKeyboardButton(
-                    text="⚙️ Дополнительно",
-                    callback_data=f"cf:{category}adv:{chat_id}"
-                )
-            ],
-            # ─────────────────────────────────────────────────────
             # Назад
             # ─────────────────────────────────────────────────────
             [
@@ -576,7 +567,7 @@ def create_scam_settings_menu(
             [
                 InlineKeyboardButton(
                     text=f"{EMOJI_PATTERNS} Паттерны",
-                    callback_data=f"cf:sp:{chat_id}"
+                    callback_data=f"cf:scp:{chat_id}"
                 ),
                 InlineKeyboardButton(
                     text=f"{EMOJI_IMPORT} Импорт",
@@ -747,6 +738,110 @@ def create_scam_action_menu(
     )
 
     return keyboard
+
+
+# ============================================================
+# МЕНЮ ДОПОЛНИТЕЛЬНЫХ НАСТРОЕК АНТИСКАМА
+# ============================================================
+
+def create_scam_advanced_menu(
+    chat_id: int,
+    settings
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню дополнительных настроек антискама.
+
+    Показывает:
+    - Текст уведомления при муте
+    - Текст уведомления при бане
+    - Задержка удаления уведомления
+
+    Args:
+        chat_id: ID группы
+        settings: Объект ContentFilterSettings
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура дополнительных настроек
+    """
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            # ─────────────────────────────────────────────────────
+            # Текст при муте
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text="📝 Текст при муте",
+                    callback_data=f"cf:scmt:{chat_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Текст при бане
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text="📝 Текст при бане",
+                    callback_data=f"cf:scbt:{chat_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Задержка удаления уведомления
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text="🗑️ Автоудаление уведомления",
+                    callback_data=f"cf:scnd:{chat_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Назад
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI_BACK} Назад",
+                    callback_data=f"cf:scs:{chat_id}"
+                )
+            ]
+        ]
+    )
+
+    return keyboard
+
+
+def create_scam_notification_delay_menu(
+    chat_id: int,
+    current_delay: int = 0
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню выбора задержки автоудаления уведомления для скама.
+
+    Args:
+        chat_id: ID группы
+        current_delay: Текущая задержка в секундах
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура выбора задержки
+    """
+    delays = [0, 5, 10, 15, 30, 60]
+
+    rows = []
+    for delay in delays:
+        check = " ✓" if delay == current_delay else ""
+        label = "Не удалять" if delay == 0 else f"{delay} сек"
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{label}{check}",
+                callback_data=f"cf:scnd:{delay}:{chat_id}"
+            )
+        ])
+
+    rows.append([
+        InlineKeyboardButton(
+            text=f"{EMOJI_BACK} Назад",
+            callback_data=f"cf:scadv:{chat_id}"
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 # ============================================================
@@ -1492,7 +1587,7 @@ def create_scam_patterns_menu(
         [
             InlineKeyboardButton(
                 text=f"{EMOJI_ADD} Добавить паттерн",
-                callback_data=f"cf:spa:{chat_id}"
+                callback_data=f"cf:scpa:{chat_id}"
             )
         ],
         # ─────────────────────────────────────────────────────
@@ -1510,7 +1605,7 @@ def create_scam_patterns_menu(
         [
             InlineKeyboardButton(
                 text=f"{EMOJI_LIST} Список ({patterns_count})",
-                callback_data=f"cf:spl:{chat_id}:0"
+                callback_data=f"cf:scpl:{chat_id}:0"
             )
         ],
     ]
@@ -1522,7 +1617,7 @@ def create_scam_patterns_menu(
         keyboard_rows.append([
             InlineKeyboardButton(
                 text=f"{EMOJI_EXPORT} Экспорт",
-                callback_data=f"cf:spe:{chat_id}"
+                callback_data=f"cf:scpe:{chat_id}"
             )
         ])
 
@@ -1533,7 +1628,7 @@ def create_scam_patterns_menu(
         keyboard_rows.append([
             InlineKeyboardButton(
                 text=f"{EMOJI_DELETE} Удалить все",
-                callback_data=f"cf:spc:{chat_id}"
+                callback_data=f"cf:scpc:{chat_id}"
             )
         ])
 
@@ -1606,7 +1701,7 @@ def create_pattern_type_menu(
             [
                 InlineKeyboardButton(
                     text=f"{EMOJI_BACK} Отмена",
-                    callback_data=f"cf:sp:{chat_id}"
+                    callback_data=f"cf:scp:{chat_id}"
                 )
             ]
         ]
@@ -1671,7 +1766,7 @@ def create_pattern_weight_menu(
             [
                 InlineKeyboardButton(
                     text=f"{EMOJI_BACK} Отмена",
-                    callback_data=f"cf:sp:{chat_id}"
+                    callback_data=f"cf:scp:{chat_id}"
                 )
             ]
         ]
@@ -1785,7 +1880,7 @@ def create_patterns_list_menu(
         buttons.append([
             InlineKeyboardButton(
                 text=f"❌ Удалить #{pattern_id}",
-                callback_data=f"cf:spd:{pattern_id}:{chat_id}"
+                callback_data=f"cf:scpd:{pattern_id}:{chat_id}"
             )
         ])
 
@@ -1800,7 +1895,7 @@ def create_patterns_list_menu(
             nav_row.append(
                 InlineKeyboardButton(
                     text="⬅️",
-                    callback_data=f"cf:spl:{chat_id}:{page - 1}"
+                    callback_data=f"cf:scpl:{chat_id}:{page - 1}"
                 )
             )
 
@@ -1817,7 +1912,7 @@ def create_patterns_list_menu(
             nav_row.append(
                 InlineKeyboardButton(
                     text="➡️",
-                    callback_data=f"cf:spl:{chat_id}:{page + 1}"
+                    callback_data=f"cf:scpl:{chat_id}:{page + 1}"
                 )
             )
 
@@ -1829,7 +1924,7 @@ def create_patterns_list_menu(
     buttons.append([
         InlineKeyboardButton(
             text=f"{EMOJI_BACK} Назад",
-            callback_data=f"cf:sp:{chat_id}"
+            callback_data=f"cf:scp:{chat_id}"
         )
     ])
 
@@ -1862,7 +1957,7 @@ def create_pattern_delete_confirm_menu(
             [
                 InlineKeyboardButton(
                     text="⚠️ Да, удалить",
-                    callback_data=f"cf:spdc:{pattern_id}:{chat_id}"
+                    callback_data=f"cf:scpdc:{pattern_id}:{chat_id}"
                 )
             ],
             # ─────────────────────────────────────────────────────
@@ -1871,7 +1966,7 @@ def create_pattern_delete_confirm_menu(
             [
                 InlineKeyboardButton(
                     text=f"{EMOJI_BACK} Отмена",
-                    callback_data=f"cf:spl:{chat_id}:0"
+                    callback_data=f"cf:scpl:{chat_id}:0"
                 )
             ]
         ]
@@ -1904,7 +1999,7 @@ def create_clear_patterns_confirm_menu(
             [
                 InlineKeyboardButton(
                     text="⚠️ Да, удалить все паттерны",
-                    callback_data=f"cf:spcc:{chat_id}"
+                    callback_data=f"cf:scpcc:{chat_id}"
                 )
             ],
             # ─────────────────────────────────────────────────────
@@ -1913,7 +2008,7 @@ def create_clear_patterns_confirm_menu(
             [
                 InlineKeyboardButton(
                     text=f"{EMOJI_BACK} Отмена",
-                    callback_data=f"cf:sp:{chat_id}"
+                    callback_data=f"cf:scp:{chat_id}"
                 )
             ]
         ]
@@ -1968,7 +2063,7 @@ def create_import_preview_menu(
             [
                 InlineKeyboardButton(
                     text=f"{EMOJI_BACK} Отмена",
-                    callback_data=f"cf:sp:{chat_id}"
+                    callback_data=f"cf:scp:{chat_id}"
                 )
             ]
         ]
@@ -1998,7 +2093,7 @@ def create_cancel_pattern_input_menu(
             [
                 InlineKeyboardButton(
                     text=f"{EMOJI_BACK} Отмена",
-                    callback_data=f"cf:sp:{chat_id}"
+                    callback_data=f"cf:scp:{chat_id}"
                 )
             ]
         ]
@@ -2407,7 +2502,7 @@ def create_section_advanced_menu(
             [
                 InlineKeyboardButton(
                     text=f"🔇 Текст мута: {mute_text_display}",
-                    callback_data=f"cf:secmtxt:{section_id}"
+                    callback_data=f"cf:secmt:{section_id}"
                 )
             ],
             # ─────────────────────────────────────────────────────
@@ -2416,7 +2511,7 @@ def create_section_advanced_menu(
             [
                 InlineKeyboardButton(
                     text=f"🚫 Текст бана: {ban_text_display}",
-                    callback_data=f"cf:secbtxt:{section_id}"
+                    callback_data=f"cf:secbt:{section_id}"
                 )
             ],
             # ─────────────────────────────────────────────────────
@@ -2425,7 +2520,7 @@ def create_section_advanced_menu(
             [
                 InlineKeyboardButton(
                     text=f"⏱️ Удалить уведомление: {delay_text}",
-                    callback_data=f"cf:secdel:{section_id}"
+                    callback_data=f"cf:secnd:{section_id}"
                 )
             ],
             # ─────────────────────────────────────────────────────
@@ -2472,35 +2567,35 @@ def create_section_notification_delay_menu(
             [
                 InlineKeyboardButton(
                     text=f"🚫 Не удалять{check_0}",
-                    callback_data=f"cf:secdel:0:{section_id}"
+                    callback_data=f"cf:secnd:0:{section_id}"
                 )
             ],
             # 10 секунд
             [
                 InlineKeyboardButton(
                     text=f"⏱️ 10 секунд{check_10}",
-                    callback_data=f"cf:secdel:10:{section_id}"
+                    callback_data=f"cf:secnd:10:{section_id}"
                 )
             ],
             # 30 секунд
             [
                 InlineKeyboardButton(
                     text=f"⏱️ 30 секунд{check_30}",
-                    callback_data=f"cf:secdel:30:{section_id}"
+                    callback_data=f"cf:secnd:30:{section_id}"
                 )
             ],
             # 1 минута
             [
                 InlineKeyboardButton(
                     text=f"⏱️ 1 минута{check_60}",
-                    callback_data=f"cf:secdel:60:{section_id}"
+                    callback_data=f"cf:secnd:60:{section_id}"
                 )
             ],
             # 5 минут
             [
                 InlineKeyboardButton(
                     text=f"⏱️ 5 минут{check_300}",
-                    callback_data=f"cf:secdel:300:{section_id}"
+                    callback_data=f"cf:secnd:300:{section_id}"
                 )
             ],
             # Назад
@@ -2588,7 +2683,7 @@ def create_section_mute_duration_menu(
             [
                 InlineKeyboardButton(
                     text="⌨️ Ввести своё",
-                    callback_data=f"cf:secmtc:{section_id}"
+                    callback_data=f"cf:secmdc:{section_id}"
                 )
             ],
             # Назад
@@ -2673,7 +2768,7 @@ def create_section_patterns_menu(
         ),
         InlineKeyboardButton(
             text="📥 Импорт",
-            callback_data=f"cf:secimp:{section_id}"
+            callback_data=f"cf:secpi:{section_id}"
         )
     ])
 

@@ -31,7 +31,11 @@ from bot.keyboards.content_filter_keyboards import (
 # Импортируем общие объекты
 from bot.handlers.content_filter.shared import logger
 # Импортируем FSM states
-from bot.handlers.content_filter.common import SectionMuteTextStates, SectionBanTextStates
+from bot.handlers.content_filter.common import (
+    SectionMuteTextStates,
+    SectionBanTextStates,
+    SectionForwardChannelStates
+)
 # Импортируем сервис разделов
 from bot.services.content_filter.scam_pattern_service import get_section_service
 
@@ -398,3 +402,143 @@ async def process_section_ban_text_input(
         )
     except TelegramAPIError:
         await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# КАНАЛ ПЕРЕСЫЛКИ
+# ============================================================
+
+@advanced_router.callback_query(F.data.regexp(r"^cf:secch:\d+$"))
+async def start_section_forward_channel_input(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Начинает FSM для ввода канала пересылки.
+
+    Callback: cf:secch:{section_id}
+
+    Канал общий для всех действий (delete/mute/ban).
+    Пересылка включается отдельно для каждого действия.
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+    section = await section_service.get_section_by_id(section_id, session)
+
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    await state.update_data(
+        section_id=section_id,
+        instruction_message_id=callback.message.message_id
+    )
+    await state.set_state(SectionForwardChannelStates.waiting_for_channel)
+
+    current = section.forward_channel_id or "не задан"
+
+    text = (
+        f"📢 <b>Канал для пересылки</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n"
+        f"Текущий канал: <code>{current}</code>\n\n"
+        f"Введите ID канала куда будут пересылаться сообщения.\n\n"
+        f"<i>Убедитесь что бот добавлен в канал как админ!</i>\n"
+        f"<i>Пересылка включается отдельно для каждого действия (📤).</i>"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"cf:secac:{section_id}"
+        )]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@advanced_router.message(SectionForwardChannelStates.waiting_for_channel)
+async def process_section_forward_channel(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ввод канала пересылки.
+    """
+    data = await state.get_data()
+    section_id = data.get('section_id')
+    instruction_message_id = data.get('instruction_message_id')
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    if not section_id:
+        await state.clear()
+        await message.answer("❌ Ошибка: данные сессии потеряны.")
+        return
+
+    # Парсим ID канала
+    try:
+        channel_id = int(message.text.strip())
+    except ValueError:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="◀️ Назад",
+                callback_data=f"cf:secac:{section_id}"
+            )]
+        ])
+        if instruction_message_id:
+            try:
+                await message.bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=instruction_message_id,
+                    text="❌ Введите числовой ID канала.\n\nПример: -1001234567890",
+                    reply_markup=keyboard,
+                    parse_mode="HTML"
+                )
+                return
+            except TelegramAPIError:
+                pass
+        return
+
+    # Обновляем раздел
+    section_service = get_section_service()
+    await section_service.update_section(section_id, session, forward_channel_id=channel_id)
+
+    # Очищаем FSM
+    await state.clear()
+
+    confirm_text = f"✅ Канал пересылки: <code>{channel_id}</code>"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="⚡ К действиям",
+            callback_data=f"cf:secac:{section_id}"
+        )]
+    ])
+
+    if instruction_message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=instruction_message_id,
+                text=confirm_text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+            return
+        except TelegramAPIError:
+            pass
+
+    await message.answer(confirm_text, reply_markup=keyboard, parse_mode="HTML")

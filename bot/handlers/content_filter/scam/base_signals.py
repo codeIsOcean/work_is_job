@@ -27,43 +27,95 @@ from aiogram.exceptions import TelegramAPIError
 
 # Импортируем SQLAlchemy
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, delete
 
 # Импортируем общие объекты
 from bot.handlers.content_filter.shared import filter_manager, logger
 # Импортируем FSM states и константы
 from bot.handlers.content_filter.common import EditBaseSignalWeightStates, BASE_SIGNAL_NAMES
+# Импортируем модель BaseSignalOverride
+from bot.database.models_content_filter import BaseSignalOverride
 
 # Создаём роутер для базовых сигналов
 base_signals_router = Router(name='scam_base_signals')
 
 
 # ============================================================
-# МЕНЮ БАЗОВЫХ СИГНАЛОВ
+# HELPER: Получение переопределений из таблицы
 # ============================================================
 
-@base_signals_router.callback_query(F.data.regexp(r"^cf:bsig:-?\d+$"))
-async def base_signals_menu(
-    callback: CallbackQuery,
+async def get_signal_overrides(chat_id: int, session: AsyncSession) -> dict:
+    """
+    Получает переопределения сигналов из таблицы BaseSignalOverride.
+
+    Возвращает словарь вида:
+    {
+        "signal_name": {"enabled": True/False, "weight": 100 или None}
+    }
+    """
+    result = await session.execute(
+        select(BaseSignalOverride).where(BaseSignalOverride.chat_id == chat_id)
+    )
+    overrides_list = result.scalars().all()
+
+    overrides = {}
+    for override in overrides_list:
+        overrides[override.signal_name] = {
+            "enabled": override.enabled,
+            "weight": override.weight_override
+        }
+    return overrides
+
+
+async def get_or_create_signal_override(
+    chat_id: int,
+    signal_name: str,
     session: AsyncSession
+) -> BaseSignalOverride:
+    """
+    Получает или создаёт запись переопределения сигнала.
+    """
+    result = await session.execute(
+        select(BaseSignalOverride).where(
+            BaseSignalOverride.chat_id == chat_id,
+            BaseSignalOverride.signal_name == signal_name
+        )
+    )
+    override = result.scalar_one_or_none()
+
+    if not override:
+        override = BaseSignalOverride(
+            chat_id=chat_id,
+            signal_name=signal_name,
+            enabled=True,
+            weight_override=None
+        )
+        session.add(override)
+
+    return override
+
+
+# ============================================================
+# HELPER: Рендер меню базовых сигналов
+# ============================================================
+
+async def _render_base_signals_menu(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    chat_id: int
 ) -> None:
     """
-    Показывает меню настройки базовых сигналов.
+    Рендерит меню настройки базовых сигналов.
 
-    Callback: cf:bsig:{chat_id}
+    Вынесено в отдельную функцию для переиспользования из toggle/reset.
 
     Args:
         callback: CallbackQuery
         session: Сессия БД
+        chat_id: ID чата
     """
-    # Парсим chat_id
-    parts = callback.data.split(":")
-    chat_id = int(parts[2])
-
-    # Получаем настройки
-    settings = await filter_manager.get_or_create_settings(chat_id, session)
-
-    # Получаем переопределения сигналов
-    overrides = settings.base_signal_overrides or {}
+    # Получаем переопределения из таблицы
+    overrides = await get_signal_overrides(chat_id, session)
 
     # Формируем текст
     text = (
@@ -105,6 +157,10 @@ async def base_signals_menu(
     # Добавляем кнопки управления
     keyboard_rows.append([
         InlineKeyboardButton(
+            text="⚖️ Изменить веса",
+            callback_data=f"cf:bsigwm:{chat_id}"
+        ),
+        InlineKeyboardButton(
             text="🔄 Сбросить всё",
             callback_data=f"cf:bsigr:{chat_id}"
         )
@@ -123,6 +179,30 @@ async def base_signals_menu(
     except TelegramAPIError:
         pass
 
+
+# ============================================================
+# МЕНЮ БАЗОВЫХ СИГНАЛОВ
+# ============================================================
+
+@base_signals_router.callback_query(F.data.regexp(r"^cf:bsig:-?\d+$"))
+async def base_signals_menu(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает меню настройки базовых сигналов.
+
+    Callback: cf:bsig:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        session: Сессия БД
+    """
+    # Парсим chat_id
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    await _render_base_signals_menu(callback, session, chat_id)
     await callback.answer()
 
 
@@ -149,28 +229,94 @@ async def toggle_base_signal(
     signal_key = parts[2]
     chat_id = int(parts[3])
 
-    # Получаем настройки
-    settings = await filter_manager.get_or_create_settings(chat_id, session)
-
-    # Получаем/создаём переопределения
-    overrides = settings.base_signal_overrides or {}
-    if signal_key not in overrides:
-        overrides[signal_key] = {}
+    # Получаем или создаём запись в таблице
+    override = await get_or_create_signal_override(chat_id, signal_key, session)
 
     # Переключаем состояние
-    current_enabled = overrides[signal_key].get('enabled', True)
-    overrides[signal_key]['enabled'] = not current_enabled
-
-    # Сохраняем
-    settings.base_signal_overrides = overrides
+    override.enabled = not override.enabled
     await session.commit()
 
     signal_name = BASE_SIGNAL_NAMES.get(signal_key, signal_key)
-    status = "включён" if not current_enabled else "выключен"
+    status = "включён" if override.enabled else "выключен"
     await callback.answer(f"{signal_name} {status}")
 
-    # Обновляем меню
-    await base_signals_menu(callback, session)
+    # Обновляем меню используя helper
+    await _render_base_signals_menu(callback, session, chat_id)
+
+
+# ============================================================
+# МЕНЮ РЕДАКТИРОВАНИЯ ВЕСОВ
+# ============================================================
+
+@base_signals_router.callback_query(F.data.regexp(r"^cf:bsigwm:-?\d+$"))
+async def weights_menu(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает меню редактирования весов сигналов.
+
+    Callback: cf:bsigwm:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        session: Сессия БД
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Получаем переопределения из таблицы
+    overrides = await get_signal_overrides(chat_id, session)
+
+    # Формируем текст
+    text = (
+        f"⚖️ <b>Редактирование весов сигналов</b>\n\n"
+        f"Нажмите на сигнал чтобы изменить его вес.\n"
+        f"Стандартный вес = 100 баллов.\n\n"
+    )
+
+    for signal_key, signal_name in BASE_SIGNAL_NAMES.items():
+        override = overrides.get(signal_key, {})
+        weight = override.get('weight', None)
+        weight_text = str(weight) if weight is not None else "100 (стд)"
+        text += f"• {signal_name}: <b>{weight_text}</b>\n"
+
+    # Клавиатура - кнопки для редактирования веса каждого сигнала
+    keyboard_rows = []
+    signals = list(BASE_SIGNAL_NAMES.items())
+
+    for i in range(0, len(signals), 2):
+        row = []
+        for j in range(2):
+            if i + j < len(signals):
+                signal_key, signal_name = signals[i + j]
+                override = overrides.get(signal_key, {})
+                weight = override.get('weight', None)
+                weight_text = str(weight) if weight else "100"
+                # Укорачиваем название
+                short_name = signal_key[:6]
+                row.append(InlineKeyboardButton(
+                    text=f"{short_name}:{weight_text}",
+                    callback_data=f"cf:bsigw:{signal_key}:{chat_id}"
+                ))
+        keyboard_rows.append(row)
+
+    # Кнопка назад
+    keyboard_rows.append([
+        InlineKeyboardButton(
+            text="◀️ Назад к сигналам",
+            callback_data=f"cf:bsig:{chat_id}"
+        )
+    ])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
 
 
 # ============================================================
@@ -260,17 +406,11 @@ async def process_signal_weight(
     chat_id = data.get('chat_id')
     signal_key = data.get('signal_key')
 
-    # Получаем настройки
-    settings = await filter_manager.get_or_create_settings(chat_id, session)
+    # Получаем или создаём запись в таблице
+    override = await get_or_create_signal_override(chat_id, signal_key, session)
 
-    # Обновляем переопределения
-    overrides = settings.base_signal_overrides or {}
-    if signal_key not in overrides:
-        overrides[signal_key] = {}
-    overrides[signal_key]['weight'] = weight
-
-    # Сохраняем
-    settings.base_signal_overrides = overrides
+    # Обновляем вес
+    override.weight_override = weight
     await session.commit()
 
     await state.clear()
@@ -308,16 +448,15 @@ async def reset_all_base_signals(
     parts = callback.data.split(":")
     chat_id = int(parts[2])
 
-    # Получаем настройки
-    settings = await filter_manager.get_or_create_settings(chat_id, session)
-
-    # Очищаем переопределения
-    settings.base_signal_overrides = {}
+    # Удаляем все переопределения для группы из таблицы
+    await session.execute(
+        delete(BaseSignalOverride).where(BaseSignalOverride.chat_id == chat_id)
+    )
     await session.commit()
 
     logger.info(f"[ContentFilter] Сброшены базовые сигналы для чата {chat_id}")
 
     await callback.answer("✅ Все сигналы сброшены к дефолтам")
 
-    # Обновляем меню
-    await base_signals_menu(callback, session)
+    # Обновляем меню используя helper
+    await _render_base_signals_menu(callback, session, chat_id)

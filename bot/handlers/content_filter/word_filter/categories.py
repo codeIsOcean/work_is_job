@@ -135,7 +135,7 @@ async def show_category_words_list(
             text += f"{i}. <code>{fw.word}</code>{match_info}\n"
 
     # Клавиатура
-    keyboard = create_category_words_list_menu(chat_id, category, page, total_pages, len(page_words) > 0)
+    keyboard = create_category_words_list_menu(chat_id, category, page, total_pages)
 
     try:
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
@@ -371,7 +371,8 @@ async def confirm_add_category_word(
     total_words = len(result.scalars().all())
 
     category_name = CATEGORY_NAMES.get(category, 'Слова')
-    keyboard = create_category_words_list_menu(chat_id, category, 0, 1, total_words > 0)
+    total_pages = max(1, (total_words + WORDS_PER_PAGE - 1) // WORDS_PER_PAGE)
+    keyboard = create_category_words_list_menu(chat_id, category, 0, total_pages)
 
     try:
         await callback.message.edit_text(
@@ -597,7 +598,8 @@ async def process_delete_category_word(
     total_words = len(result.scalars().all())
 
     category_name = CATEGORY_NAMES.get(category, 'Слова')
-    keyboard = create_category_words_list_menu(chat_id, category, 0, 1, total_words > 0)
+    total_pages = max(1, (total_words + WORDS_PER_PAGE - 1) // WORDS_PER_PAGE)
+    keyboard = create_category_words_list_menu(chat_id, category, 0, total_pages)
 
     try:
         await message.bot.edit_message_text(

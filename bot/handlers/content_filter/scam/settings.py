@@ -26,13 +26,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # Импортируем клавиатуры
 from bot.keyboards.content_filter_keyboards import (
     create_scam_settings_menu,
-    create_scam_action_menu
+    create_scam_action_menu,
+    create_scam_advanced_menu,
+    create_scam_notification_delay_menu
 )
 
 # Импортируем общие объекты
 from bot.handlers.content_filter.shared import filter_manager, logger
 # Импортируем FSM states и helpers
-from bot.handlers.content_filter.common import DurationInputStates, parse_duration
+from bot.handlers.content_filter.common import (
+    DurationInputStates,
+    ScamTextStates,
+    parse_duration
+)
 
 # Создаём роутер для настроек
 settings_router = Router(name='scam_settings')
@@ -344,3 +350,319 @@ async def process_scam_mute_duration(
     )
 
     await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# ДОПОЛНИТЕЛЬНЫЕ НАСТРОЙКИ АНТИСКАМА
+# ============================================================
+
+@settings_router.callback_query(F.data.regexp(r"^cf:scadv:-?\d+$"))
+async def scam_advanced_menu(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает меню дополнительных настроек антискама.
+
+    Callback: cf:scadv:{chat_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+
+    # Формируем превью текстов
+    mute_text_preview = (
+        settings.scam_mute_text[:30] + "..."
+        if settings.scam_mute_text and len(settings.scam_mute_text) > 30
+        else settings.scam_mute_text or "По умолчанию"
+    )
+    ban_text_preview = (
+        settings.scam_ban_text[:30] + "..."
+        if settings.scam_ban_text and len(settings.scam_ban_text) > 30
+        else settings.scam_ban_text or "По умолчанию"
+    )
+    notify_delay = settings.scam_notification_delete_delay or 0
+    notify_delay_text = f"{notify_delay} сек" if notify_delay else "Не удалять"
+
+    text = (
+        f"⚙️ <b>Дополнительные настройки антискама</b>\n\n"
+        f"<b>Текст при муте:</b> {mute_text_preview}\n"
+        f"<b>Текст при бане:</b> {ban_text_preview}\n"
+        f"<b>Автоудаление уведомления:</b> {notify_delay_text}"
+    )
+
+    keyboard = create_scam_advanced_menu(chat_id, settings)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+# ============================================================
+# ТЕКСТ ПРИ МУТЕ (АНТИСКАМ)
+# ============================================================
+
+@settings_router.callback_query(F.data.regexp(r"^cf:scmt:-?\d+$"))
+async def start_scam_mute_text_input(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """
+    Начинает FSM для ввода текста уведомления при муте.
+
+    Callback: cf:scmt:{chat_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+    current_text = settings.scam_mute_text or "Не задан"
+
+    await state.update_data(
+        chat_id=chat_id,
+        bot_message_id=callback.message.message_id,
+        bot_chat_id=callback.message.chat.id
+    )
+    await state.set_state(ScamTextStates.waiting_for_mute_text)
+
+    text = (
+        f"📝 <b>Текст при муте (антискам)</b>\n\n"
+        f"Текущий текст:\n<code>{current_text}</code>\n\n"
+        f"Введите новый текст или <code>-</code> для сброса.\n"
+        f"Доступные переменные: %user%, %time%"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Отмена", callback_data=f"cf:scadv:{chat_id}")]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_router.message(ScamTextStates.waiting_for_mute_text)
+async def process_scam_mute_text_input(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """Обрабатывает ввод текста при муте."""
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    bot_message_id = data.get('bot_message_id')
+    bot_chat_id = data.get('bot_chat_id')
+
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    if not chat_id:
+        await state.clear()
+        await message.answer("❌ Ошибка: данные сессии потеряны.")
+        return
+
+    await state.clear()
+
+    text_input = message.text.strip()
+    if text_input == "-":
+        text_input = None
+
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+    settings.scam_mute_text = text_input
+    await session.commit()
+
+    result_text = "✅ Текст при муте сохранён" if text_input else "✅ Текст при муте сброшен"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data=f"cf:scadv:{chat_id}")]
+    ])
+
+    try:
+        await message.bot.edit_message_text(
+            chat_id=bot_chat_id,
+            message_id=bot_message_id,
+            text=result_text,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    except TelegramAPIError:
+        await message.answer(result_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# ТЕКСТ ПРИ БАНЕ (АНТИСКАМ)
+# ============================================================
+
+@settings_router.callback_query(F.data.regexp(r"^cf:scbt:-?\d+$"))
+async def start_scam_ban_text_input(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """
+    Начинает FSM для ввода текста уведомления при бане.
+
+    Callback: cf:scbt:{chat_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+    current_text = settings.scam_ban_text or "Не задан"
+
+    await state.update_data(
+        chat_id=chat_id,
+        bot_message_id=callback.message.message_id,
+        bot_chat_id=callback.message.chat.id
+    )
+    await state.set_state(ScamTextStates.waiting_for_ban_text)
+
+    text = (
+        f"📝 <b>Текст при бане (антискам)</b>\n\n"
+        f"Текущий текст:\n<code>{current_text}</code>\n\n"
+        f"Введите новый текст или <code>-</code> для сброса.\n"
+        f"Доступные переменные: %user%"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Отмена", callback_data=f"cf:scadv:{chat_id}")]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_router.message(ScamTextStates.waiting_for_ban_text)
+async def process_scam_ban_text_input(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """Обрабатывает ввод текста при бане."""
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    bot_message_id = data.get('bot_message_id')
+    bot_chat_id = data.get('bot_chat_id')
+
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    if not chat_id:
+        await state.clear()
+        await message.answer("❌ Ошибка: данные сессии потеряны.")
+        return
+
+    await state.clear()
+
+    text_input = message.text.strip()
+    if text_input == "-":
+        text_input = None
+
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+    settings.scam_ban_text = text_input
+    await session.commit()
+
+    result_text = "✅ Текст при бане сохранён" if text_input else "✅ Текст при бане сброшен"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data=f"cf:scadv:{chat_id}")]
+    ])
+
+    try:
+        await message.bot.edit_message_text(
+            chat_id=bot_chat_id,
+            message_id=bot_message_id,
+            text=result_text,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    except TelegramAPIError:
+        await message.answer(result_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# ЗАДЕРЖКА АВТОУДАЛЕНИЯ УВЕДОМЛЕНИЯ (АНТИСКАМ)
+# ============================================================
+
+@settings_router.callback_query(F.data.regexp(r"^cf:scnd:-?\d+$"))
+async def scam_notification_delay_menu(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает меню настройки задержки автоудаления уведомления.
+
+    Callback: cf:scnd:{chat_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+    current_delay = settings.scam_notification_delete_delay or 0
+
+    text = (
+        f"🗑️ <b>Автоудаление уведомления</b>\n\n"
+        f"Через сколько секунд удалять уведомление о нарушении.\n\n"
+        f"Текущее значение: <b>{current_delay} сек</b>"
+    )
+
+    keyboard = create_scam_notification_delay_menu(chat_id, current_delay)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_router.callback_query(F.data.regexp(r"^cf:scnd:\d+:-?\d+$"))
+async def set_scam_notification_delay(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Устанавливает задержку автоудаления уведомления.
+
+    Callback: cf:scnd:{delay}:{chat_id}
+    """
+    parts = callback.data.split(":")
+    delay = int(parts[2])
+    chat_id = int(parts[3])
+
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+    settings.scam_notification_delete_delay = delay if delay > 0 else None
+    await session.commit()
+
+    delay_text = f"{delay} сек" if delay else "Не удалять"
+    await callback.answer(f"Автоудаление: {delay_text}")
+
+    # Обновляем меню
+    text = (
+        f"🗑️ <b>Автоудаление уведомления</b>\n\n"
+        f"Через сколько секунд удалять уведомление о нарушении.\n\n"
+        f"Текущее значение: <b>{delay} сек</b>"
+    )
+
+    keyboard = create_scam_notification_delay_menu(chat_id, delay)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass

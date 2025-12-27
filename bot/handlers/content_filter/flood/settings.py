@@ -172,3 +172,141 @@ async def set_flood_time_window(
 
     # Вызываем меню "Дополнительно"
     await flood_advanced_menu(callback, session)
+
+
+# ============================================================
+# ПЕРЕКЛЮЧАТЕЛИ РАСШИРЕННОГО АНТИФЛУДА
+# ============================================================
+
+@settings_router.callback_query(F.data.regexp(r"^cf:t:flany:-?\d+$"))
+async def toggle_flood_any_messages(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Переключает детекцию флуда любых сообщений.
+
+    Callback: cf:t:flany:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        session: Сессия БД
+    """
+    # Парсим chat_id
+    parts = callback.data.split(":")
+    chat_id = int(parts[3])
+
+    # Получаем настройки
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+
+    # Переключаем
+    new_value = not settings.flood_detect_any_messages
+    await filter_manager.update_settings(chat_id, session, flood_detect_any_messages=new_value)
+
+    # Получаем обновлённые настройки
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+
+    # Формируем статус расширенного антифлуда
+    any_status = "✅ Вкл" if settings.flood_detect_any_messages else "❌ Выкл"
+    media_status = "✅ Вкл" if settings.flood_detect_media else "❌ Выкл"
+
+    text = (
+        f"📢 <b>Настройки антифлуда</b>\n\n"
+        f"Флуд — это когда пользователь отправляет одинаковые "
+        f"сообщения несколько раз подряд.\n\n"
+        f"<b>Макс. повторов:</b> {settings.flood_max_repeats}\n"
+        f"<b>Временное окно:</b> {settings.flood_time_window} сек.\n\n"
+        f"<b>Расширенный антифлуд:</b>\n"
+        f"• Любые сообщения подряд: {any_status}\n"
+        f"• Медиа-флуд: {media_status}\n\n"
+        f"Если пользователь отправит больше {settings.flood_max_repeats} "
+        f"одинаковых сообщений за {settings.flood_time_window} секунд — "
+        f"сработает фильтр."
+    )
+
+    keyboard = create_flood_settings_menu(
+        chat_id,
+        settings.flood_max_repeats,
+        settings.flood_time_window,
+        settings.flood_action,
+        settings.flood_mute_duration,
+        settings.flood_detect_any_messages,
+        settings.flood_any_max_messages,
+        settings.flood_any_time_window,
+        settings.flood_detect_media
+    )
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    status_text = "включена" if new_value else "выключена"
+    await callback.answer(f"Детекция любых сообщений {status_text}")
+
+
+@settings_router.callback_query(F.data.regexp(r"^cf:t:flmedia:-?\d+$"))
+async def toggle_flood_media(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Переключает детекцию медиа-флуда.
+
+    Callback: cf:t:flmedia:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        session: Сессия БД
+    """
+    # Парсим chat_id
+    parts = callback.data.split(":")
+    chat_id = int(parts[3])
+
+    # Получаем настройки
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+
+    # Переключаем
+    new_value = not settings.flood_detect_media
+    await filter_manager.update_settings(chat_id, session, flood_detect_media=new_value)
+
+    # Получаем обновлённые настройки
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+
+    # Формируем статус расширенного антифлуда
+    any_status = "✅ Вкл" if settings.flood_detect_any_messages else "❌ Выкл"
+    media_status = "✅ Вкл" if settings.flood_detect_media else "❌ Выкл"
+
+    text = (
+        f"📢 <b>Настройки антифлуда</b>\n\n"
+        f"Флуд — это когда пользователь отправляет одинаковые "
+        f"сообщения несколько раз подряд.\n\n"
+        f"<b>Макс. повторов:</b> {settings.flood_max_repeats}\n"
+        f"<b>Временное окно:</b> {settings.flood_time_window} сек.\n\n"
+        f"<b>Расширенный антифлуд:</b>\n"
+        f"• Любые сообщения подряд: {any_status}\n"
+        f"• Медиа-флуд: {media_status}\n\n"
+        f"Если пользователь отправит больше {settings.flood_max_repeats} "
+        f"одинаковых сообщений за {settings.flood_time_window} секунд — "
+        f"сработает фильтр."
+    )
+
+    keyboard = create_flood_settings_menu(
+        chat_id,
+        settings.flood_max_repeats,
+        settings.flood_time_window,
+        settings.flood_action,
+        settings.flood_mute_duration,
+        settings.flood_detect_any_messages,
+        settings.flood_any_max_messages,
+        settings.flood_any_time_window,
+        settings.flood_detect_media
+    )
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    status_text = "включена" if new_value else "выключена"
+    await callback.answer(f"Детекция медиа-флуда {status_text}")
