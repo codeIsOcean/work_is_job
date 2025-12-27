@@ -427,14 +427,8 @@ class TestCustomSectionDetection:
 
             # Проверяем что сообщение удалено
             exists = await check_message_exists(victim_userbot, chat_id, msg_id)
-            if not exists:
-                print(f"[OK] Spam message was deleted!")
-            else:
-                print(f"[FAIL] Spam message NOT deleted")
-                try:
-                    await spam_msg.delete()
-                except Exception:
-                    pass
+            assert not exists, "FAIL: Spam message was NOT deleted by filter"
+            print(f"[OK] Spam message was deleted!")
 
         finally:
             if section_id:
@@ -498,20 +492,13 @@ class TestCustomSectionDetection:
 
             # Проверяем мут
             restrictions = await get_user_restrictions(bot, chat_id, victim.id)
-            if restrictions.get("is_restricted"):
-                print(f"[OK] Victim is muted!")
-            else:
-                print(f"[FAIL] Victim NOT muted")
+            assert restrictions.get("is_restricted"), "FAIL: Victim was NOT muted"
+            print(f"[OK] Victim is muted!")
 
             # Проверяем удаление сообщения
             exists = await check_message_exists(victim_userbot, chat_id, spam_msg.id)
-            if not exists:
-                print(f"[OK] Message deleted")
-            else:
-                try:
-                    await spam_msg.delete()
-                except Exception:
-                    pass
+            assert not exists, "FAIL: Spam message was NOT deleted"
+            print(f"[OK] Message deleted")
 
         finally:
             if section_id:
@@ -580,23 +567,15 @@ class TestCustomSectionDetection:
 
             # Проверяем что сообщение удалено из группы
             exists = await check_message_exists(victim_userbot, chat_id, spam_msg.id)
-            if not exists:
-                print(f"[OK] Spam message deleted from group")
-            else:
-                print(f"[FAIL] Spam message NOT deleted from group")
-                try:
-                    await spam_msg.delete()
-                except Exception:
-                    pass
+            assert not exists, "FAIL: Spam message was NOT deleted from group"
+            print(f"[OK] Spam message deleted from group")
 
             # Проверяем что сообщение переслано в канал
             found_in_channel = await check_message_in_channel(
                 admin_userbot, FORWARD_CHANNEL_ID, unique_marker, limit=10
             )
-            if found_in_channel:
-                print(f"[OK] Spam message forwarded to channel!")
-            else:
-                print(f"[WARN] Message not found in channel (check manually)")
+            assert found_in_channel, "FAIL: Message was NOT forwarded to channel"
+            print(f"[OK] Spam message forwarded to channel!")
 
         finally:
             if section_id:
@@ -658,11 +637,8 @@ class TestObfuscatedSpam:
             await asyncio.sleep(3)
 
             exists1 = await check_message_exists(victim_userbot, chat_id, msg1.id)
-            if not exists1:
-                print(f"[OK] L33tspeak message deleted!")
-            else:
-                print(f"[WARN] L33tspeak message NOT deleted (normalizer issue?)")
-                await msg1.delete()
+            assert not exists1, "FAIL: L33tspeak message was NOT deleted (normalizer issue?)"
+            print(f"[OK] L33tspeak message deleted!")
 
             # Тест 2: обфусцированное сообщение с латиницей
             msg2 = await victim_userbot.send_message(
@@ -673,11 +649,8 @@ class TestObfuscatedSpam:
             await asyncio.sleep(3)
 
             exists2 = await check_message_exists(victim_userbot, chat_id, msg2.id)
-            if not exists2:
-                print(f"[OK] Latin-obfuscated message deleted!")
-            else:
-                print(f"[WARN] Latin-obfuscated message NOT deleted")
-                await msg2.delete()
+            assert not exists2, "FAIL: Latin-obfuscated message was NOT deleted"
+            print(f"[OK] Latin-obfuscated message deleted!")
 
         finally:
             if section_id:
@@ -729,11 +702,8 @@ class TestObfuscatedSpam:
             await asyncio.sleep(3)
 
             exists = await check_message_exists(victim_userbot, chat_id, msg.id)
-            if not exists:
-                print(f"[OK] Spaced message deleted!")
-            else:
-                print(f"[WARN] Spaced message NOT deleted (normalizer issue?)")
-                await msg.delete()
+            assert not exists, "FAIL: Spaced message was NOT deleted (normalizer issue?)"
+            print(f"[OK] Spaced message deleted!")
 
         finally:
             if section_id:
@@ -798,11 +768,9 @@ class TestCumulativeScore:
             await asyncio.sleep(3)
 
             exists1 = await check_message_exists(victim_userbot, chat_id, msg1.id)
-            if exists1:
-                print(f"[OK] Message with 1 pattern NOT deleted (30 < 80)")
-                await msg1.delete()
-            else:
-                print(f"[WARN] Message with 1 pattern WAS deleted")
+            assert exists1, "FAIL: Message with 1 pattern was deleted but should not (30 < 80)"
+            print(f"[OK] Message with 1 pattern NOT deleted (30 < 80)")
+            await msg1.delete()  # cleanup
 
             # Тест 2: все 3 паттерна (90 > 80) - удаляется
             msg2 = await victim_userbot.send_message(
@@ -813,11 +781,8 @@ class TestCumulativeScore:
             await asyncio.sleep(3)
 
             exists2 = await check_message_exists(victim_userbot, chat_id, msg2.id)
-            if not exists2:
-                print(f"[OK] Message with 3 patterns WAS deleted (90 > 80)")
-            else:
-                print(f"[FAIL] Message with 3 patterns NOT deleted")
-                await msg2.delete()
+            assert not exists2, "FAIL: Message with 3 patterns was NOT deleted (90 > 80)"
+            print(f"[OK] Message with 3 patterns WAS deleted (90 > 80)")
 
         finally:
             if section_id:
@@ -872,18 +837,14 @@ class TestNormalMessages:
             await asyncio.sleep(3)
 
             exists = await check_message_exists(victim_userbot, chat_id, msg.id)
-            if exists:
-                print(f"[OK] Normal message NOT deleted (correct!)")
-                await msg.delete()
-            else:
-                print(f"[FAIL] Normal message was deleted (false positive!)")
+            assert exists, "FAIL: Normal message was deleted (false positive!)"
+            print(f"[OK] Normal message NOT deleted (correct!)")
+            await msg.delete()  # cleanup
 
             # Проверяем что НЕ замучен
             restrictions = await get_user_restrictions(bot, chat_id, victim.id)
-            if not restrictions.get("is_restricted"):
-                print(f"[OK] User NOT muted")
-            else:
-                print(f"[FAIL] User was muted (false positive!)")
+            assert not restrictions.get("is_restricted"), "FAIL: User was muted (false positive!)"
+            print(f"[OK] User NOT muted")
 
         finally:
             if section_id:
@@ -953,19 +914,15 @@ class TestPerActionForwarding:
 
             # Проверяем мут
             restrictions = await get_user_restrictions(bot, chat_id, victim.id)
-            if restrictions.get("is_restricted"):
-                print(f"[OK] Victim is muted")
-            else:
-                print(f"[WARN] Victim NOT muted")
+            assert restrictions.get("is_restricted"), "FAIL: Victim was NOT muted"
+            print(f"[OK] Victim is muted")
 
             # Проверяем пересылку в канал
             found_in_channel = await check_message_in_channel(
                 admin_userbot, FORWARD_CHANNEL_ID, unique_marker, limit=10
             )
-            if found_in_channel:
-                print(f"[OK] Mute action forwarded to channel!")
-            else:
-                print(f"[WARN] Message not found in channel")
+            assert found_in_channel, "FAIL: Mute action was NOT forwarded to channel"
+            print(f"[OK] Mute action forwarded to channel!")
 
         finally:
             if section_id:
@@ -1024,19 +981,15 @@ class TestPerActionForwarding:
 
             # Проверяем что НЕ замучен (action=delete)
             restrictions = await get_user_restrictions(bot, chat_id, victim.id)
-            if not restrictions.get("is_restricted"):
-                print(f"[OK] Victim NOT muted (correct for delete action)")
-            else:
-                print(f"[WARN] Victim is muted (unexpected)")
+            assert not restrictions.get("is_restricted"), "FAIL: Victim was muted (unexpected for delete action)"
+            print(f"[OK] Victim NOT muted (correct for delete action)")
 
             # Проверяем пересылку
             found_in_channel = await check_message_in_channel(
                 admin_userbot, FORWARD_CHANNEL_ID, unique_marker, limit=10
             )
-            if found_in_channel:
-                print(f"[OK] Delete action forwarded to channel!")
-            else:
-                print(f"[WARN] Message not found in channel")
+            assert found_in_channel, "FAIL: Delete action was NOT forwarded to channel"
+            print(f"[OK] Delete action forwarded to channel!")
 
         finally:
             if section_id:
@@ -1095,20 +1048,15 @@ class TestPerActionForwarding:
 
             # Проверяем что сообщение удалено
             exists = await check_message_exists(victim_userbot, chat_id, spam_msg.id)
-            if not exists:
-                print(f"[OK] Message deleted")
-            else:
-                print(f"[WARN] Message NOT deleted")
-                await spam_msg.delete()
+            assert not exists, "FAIL: Spam message was NOT deleted"
+            print(f"[OK] Message deleted")
 
             # Проверяем что НЕ переслано
             found_in_channel = await check_message_in_channel(
                 admin_userbot, FORWARD_CHANNEL_ID, unique_marker, limit=10
             )
-            if not found_in_channel:
-                print(f"[OK] Message NOT forwarded (correct!)")
-            else:
-                print(f"[WARN] Message WAS forwarded (should not be)")
+            assert not found_in_channel, "FAIL: Message WAS forwarded (should not be)"
+            print(f"[OK] Message NOT forwarded (correct!)")
 
         finally:
             if section_id:
@@ -1208,11 +1156,9 @@ class TestSectionToggle:
             await asyncio.sleep(3)
 
             exists = await check_message_exists(victim_userbot, chat_id, msg.id)
-            if exists:
-                print(f"[OK] Message NOT deleted (section disabled - correct!)")
-                await msg.delete()
-            else:
-                print(f"[FAIL] Message WAS deleted (section should be disabled!)")
+            assert exists, "FAIL: Message WAS deleted (section should be disabled!)"
+            print(f"[OK] Message NOT deleted (section disabled - correct!)")
+            await msg.delete()  # cleanup
 
         finally:
             if section_id:

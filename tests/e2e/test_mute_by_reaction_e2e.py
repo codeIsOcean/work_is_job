@@ -341,8 +341,7 @@ class TestReactionMuteSystemMessages:
                     pass
                 break
 
-        if not bot_msg_found:
-            print(f"[WARN] No bot message found - check reaction_mute_announce_enabled")
+        assert bot_msg_found, "FAIL: No bot message found - check reaction_mute_announce_enabled"
 
         # Очистка
         try:
@@ -423,19 +422,16 @@ class TestReactionMuteSystemMessages:
                 print(f"[OK] Bot sent system message (id={bot_msg_id})")
                 break
 
-        if bot_msg_id:
-            # Ждём 6 секунд (автоудаление через 5)
-            print(f"[WAIT] Waiting 6 seconds for auto-delete...")
-            await asyncio.sleep(6)
+        assert bot_msg_id is not None, "FAIL: No bot message found"
 
-            # Проверяем что сообщение удалено
-            exists = await check_message_exists(admin_userbot, chat_id, bot_msg_id)
-            if not exists:
-                print(f"[OK] System message auto-deleted!")
-            else:
-                print(f"[FAIL] System message NOT deleted")
-        else:
-            print(f"[WARN] No bot message found")
+        # Ждём 6 секунд (автоудаление через 5)
+        print(f"[WAIT] Waiting 6 seconds for auto-delete...")
+        await asyncio.sleep(6)
+
+        # Проверяем что сообщение удалено
+        exists = await check_message_exists(admin_userbot, chat_id, bot_msg_id)
+        assert not exists, "FAIL: System message was NOT auto-deleted"
+        print(f"[OK] System message auto-deleted!")
 
         # Очистка
         try:
@@ -505,14 +501,8 @@ class TestReactionMuteMessageDeletion:
 
         # Проверяем что сообщение удалено
         exists = await check_message_exists(victim_userbot, chat_id, msg_id)
-        if not exists:
-            print(f"[OK] Violator message deleted!")
-        else:
-            print(f"[FAIL] Violator message NOT deleted")
-            try:
-                await victim_msg.delete()
-            except Exception:
-                pass
+        assert not exists, "FAIL: Violator message was NOT deleted"
+        print(f"[OK] Violator message deleted!")
 
         await unmute_user(bot, chat_id, victim.id)
 
@@ -568,10 +558,8 @@ class TestReactionMuteMessageDeletion:
         # Сразу проверяем - сообщение должно ещё существовать
         await asyncio.sleep(1)
         exists_immediately = await check_message_exists(victim_userbot, chat_id, msg_id)
-        if exists_immediately:
-            print(f"[OK] Message still exists (delay working)")
-        else:
-            print(f"[WARN] Message deleted immediately (delay not working?)")
+        assert exists_immediately, "FAIL: Message was deleted immediately (delay not working)"
+        print(f"[OK] Message still exists (delay working)")
 
         # Ждём 6 сек (5 сек задержка + 1 сек buffer)
         print(f"[WAIT] Waiting 6 seconds...")
@@ -579,14 +567,8 @@ class TestReactionMuteMessageDeletion:
 
         # Проверяем что сообщение удалено
         exists_after_delay = await check_message_exists(victim_userbot, chat_id, msg_id)
-        if not exists_after_delay:
-            print(f"[OK] Message deleted after delay!")
-        else:
-            print(f"[FAIL] Message NOT deleted after delay")
-            try:
-                await victim_msg.delete()
-            except Exception:
-                pass
+        assert not exists_after_delay, "FAIL: Message was NOT deleted after delay"
+        print(f"[OK] Message deleted after delay!")
 
         await unmute_user(bot, chat_id, victim.id)
 
@@ -666,19 +648,19 @@ class TestReactionMuteCustomText:
                 print(f"[BOT] Message: {msg.text}")
 
                 # Проверяем что плейсхолдеры заменены
-                if "%user%" in msg.text or "%time%" in msg.text:
-                    print(f"[FAIL] Placeholders NOT replaced!")
-                else:
-                    # Проверяем что есть имя пользователя
-                    victim_name = f"@{victim.username}" if victim.username else victim.first_name
-                    if victim.username and f"@{victim.username}" in msg.text:
-                        print(f"[OK] %user% replaced with @{victim.username}")
-                    elif victim.first_name and victim.first_name in msg.text:
-                        print(f"[OK] %user% replaced with {victim.first_name}")
+                assert "%user%" not in msg.text and "%time%" not in msg.text, \
+                    "FAIL: Placeholders NOT replaced!"
 
-                    # Проверяем время
-                    if "3 ч" in msg.text or "3ч" in msg.text:
-                        print(f"[OK] %time% replaced with duration")
+                # Проверяем что есть имя пользователя
+                user_found = (victim.username and f"@{victim.username}" in msg.text) or \
+                             (victim.first_name and victim.first_name in msg.text)
+                assert user_found, "FAIL: User name/username not found in message"
+                print(f"[OK] %user% placeholder replaced correctly")
+
+                # Проверяем время
+                time_found = "3 ч" in msg.text or "3ч" in msg.text or "час" in msg.text.lower()
+                assert time_found, "FAIL: Time placeholder not replaced"
+                print(f"[OK] %time% replaced with duration")
 
                 # Удаляем сообщение бота
                 try:
@@ -755,21 +737,13 @@ class TestReactionMuteDeleteAction:
 
         # Проверяем что сообщение удалено
         exists = await check_message_exists(victim_userbot, chat_id, msg_id)
-        if not exists:
-            print(f"[OK] Message deleted")
-        else:
-            print(f"[FAIL] Message NOT deleted")
-            try:
-                await victim_msg.delete()
-            except Exception:
-                pass
+        assert not exists, "FAIL: Message was NOT deleted"
+        print(f"[OK] Message deleted")
 
         # Проверяем что мут НЕ применён
         restrictions = await get_user_restrictions(bot, chat_id, victim.id)
-        if not restrictions.get("is_restricted"):
-            print(f"[OK] User NOT muted (correct for 'delete' action)")
-        else:
-            print(f"[FAIL] User IS muted (unexpected for 'delete' action)")
+        assert not restrictions.get("is_restricted"), "FAIL: User IS muted (unexpected for 'delete' action)"
+        print(f"[OK] User NOT muted (correct for 'delete' action)")
 
         await unmute_user(bot, chat_id, victim.id)
 
@@ -853,10 +827,8 @@ class TestReactionMuteFullFlow:
         # Ждём 3 сек - сообщение должно удалиться
         await asyncio.sleep(3)
         exists_after_delay = await check_message_exists(victim_userbot, chat_id, msg_id)
-        if not exists_after_delay:
-            print(f"[4] OK: Violator message deleted after delay")
-        else:
-            print(f"[4] FAIL: Violator message NOT deleted")
+        assert not exists_after_delay, "FAIL: Violator message was NOT deleted after delay"
+        print(f"[4] OK: Violator message deleted after delay")
 
         # Ищем сообщение бота
         bot_msg_id = None
@@ -868,21 +840,17 @@ class TestReactionMuteFullFlow:
 
         # Проверяем мут
         restrictions = await get_user_restrictions(bot, chat_id, victim.id)
-        if restrictions.get("is_restricted"):
-            print(f"[6] OK: Victim is muted")
-        else:
-            print(f"[6] FAIL: Victim NOT muted")
+        assert restrictions.get("is_restricted"), "FAIL: Victim was NOT muted"
+        print(f"[6] OK: Victim is muted")
 
         # Ждём автоудаление уведомления (10 сек)
-        if bot_msg_id:
-            print(f"[7] Waiting 12 seconds for bot message auto-delete...")
-            await asyncio.sleep(12)
+        assert bot_msg_id is not None, "FAIL: Bot message not found"
+        print(f"[7] Waiting 12 seconds for bot message auto-delete...")
+        await asyncio.sleep(12)
 
-            bot_msg_exists = await check_message_exists(admin_userbot, chat_id, bot_msg_id)
-            if not bot_msg_exists:
-                print(f"[8] OK: Bot message auto-deleted!")
-            else:
-                print(f"[8] FAIL: Bot message NOT auto-deleted")
+        bot_msg_exists = await check_message_exists(admin_userbot, chat_id, bot_msg_id)
+        assert not bot_msg_exists, "FAIL: Bot message was NOT auto-deleted"
+        print(f"[8] OK: Bot message auto-deleted!")
 
         # Очистка
         try:

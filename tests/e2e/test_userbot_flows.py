@@ -737,11 +737,9 @@ class TestAntispamE2E:
         try:
             # Пытаемся получить сообщение
             messages = await userbot.get_messages(chat_id, msg_id)
-            if messages and messages.text:
-                print(f"[FAIL] Message NOT deleted")
-                await msg.delete()  # Удаляем вручную
-            else:
-                print(f"[OK] Message deleted by bot")
+            message_exists = messages and messages.text
+            assert not message_exists, "FAIL: Spam message was NOT deleted by bot"
+            print(f"[OK] Message deleted by bot")
         except Exception as e:
             print(f"[OK] Message deleted (error getting: {e})")
 
@@ -930,10 +928,8 @@ class TestMuteByReactionE2E:
         print(f"[CHECK] Victim restrictions: {restrictions}")
 
         # Первая реакция = предупреждение, мута быть не должно
-        if restrictions.get("is_restricted"):
-            print(f"[INFO] Victim is restricted (unexpected for first 👎)")
-        else:
-            print(f"[OK] Victim NOT restricted (correct for first 👎 = warning)")
+        assert not restrictions.get("is_restricted"), "FAIL: Victim is restricted (unexpected for first warning)"
+        print(f"[OK] Victim NOT restricted (correct for first 👎 = warning)")
 
         # Удаляем сообщение
         try:
@@ -994,10 +990,8 @@ class TestMuteByReactionE2E:
         restrictions = await get_user_restrictions(bot, chat_id, victim.id)
         print(f"[CHECK] Victim restrictions: {restrictions}")
 
-        if restrictions.get("is_restricted"):
-            print(f"[OK] MUTE TRIGGERED: Victim muted for 🤢 reaction")
-        else:
-            print(f"[FAIL] Victim NOT muted (expected mute for 🤢)")
+        assert restrictions.get("is_restricted"), "FAIL: Victim was NOT muted (expected mute for 🤢)"
+        print(f"[OK] MUTE TRIGGERED: Victim muted for 🤢 reaction")
 
         # Удаляем сообщение
         try:
@@ -1060,10 +1054,8 @@ class TestMuteByReactionE2E:
         restrictions = await get_user_restrictions(bot, chat_id, victim.id)
         print(f"[CHECK] Victim restrictions: {restrictions}")
 
-        if restrictions.get("is_restricted"):
-            print(f"[OK] FOREVER MUTE TRIGGERED: Victim muted for 💩 reaction")
-        else:
-            print(f"[FAIL] Victim NOT muted (expected forever mute for 💩)")
+        assert restrictions.get("is_restricted"), "FAIL: Victim was NOT muted (expected forever mute for 💩)"
+        print(f"[OK] FOREVER MUTE TRIGGERED: Victim muted for 💩 reaction")
 
         # Проверяем запись в БД
         from bot.database.session import get_session
@@ -1143,10 +1135,8 @@ class TestMuteByReactionE2E:
         restrictions = await get_user_restrictions(bot, chat_id, victim.id)
         print(f"[CHECK] Victim restrictions: {restrictions}")
 
-        if not restrictions.get("is_restricted"):
-            print(f"[OK] Victim NOT muted (correct for 😡 = warning only)")
-        else:
-            print(f"[FAIL] Victim muted (unexpected, 😡 should be warning only)")
+        assert not restrictions.get("is_restricted"), "FAIL: Victim was muted (unexpected, 😡 should be warning only)"
+        print(f"[OK] Victim NOT muted (correct for 😡 = warning only)")
 
         # Удаляем сообщение
         try:
@@ -1206,10 +1196,8 @@ class TestMuteByReactionE2E:
         restrictions = await get_user_restrictions(bot, chat_id, victim.id)
         print(f"[CHECK] Victim restrictions: {restrictions}")
 
-        if not restrictions.get("is_restricted"):
-            print(f"[OK] Victim NOT muted (correct - non-admin reaction ignored)")
-        else:
-            print(f"[FAIL] Victim muted (unexpected - non-admin reaction should be ignored)")
+        assert not restrictions.get("is_restricted"), "FAIL: Victim was muted (unexpected - non-admin reaction should be ignored)"
+        print(f"[OK] Victim NOT muted (correct - non-admin reaction ignored)")
 
         # Удаляем сообщение
         try:

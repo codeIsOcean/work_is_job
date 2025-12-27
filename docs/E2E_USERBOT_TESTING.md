@@ -795,4 +795,1023 @@ async def bot():
 
 ---
 
-*Последнее обновление: 2025-12-26* (добавлены safe_str, callback patterns, FloodWait минимизация, bot fixture cleanup)
+---
+
+## ⚠️ КРИТИЧЕСКИЕ ПРАВИЛА ПОЛНОТЫ ТЕСТИРОВАНИЯ (2025-12-26)
+
+> **УРОК:** E2E тесты с неправильными паттернами и soft-failures дают ЛОЖНУЮ УВЕРЕННОСТЬ.
+> Тесты прошли, но кнопки не работали в production!
+
+### 14. СТРОГИЕ ASSERTIONS — НИКАКИХ SOFT-FAILURES!
+
+**Проблема:** Тесты используют `print("WARN: ...")` и продолжают. Баг не обнаруживается.
+
+```python
+# ❌ ПЛОХО — soft failure, тест проходит даже если кнопка сломана
+if not button_clicked:
+    print("WARN: Button not found, continuing...")
+    await click_by_text(...)  # fallback
+
+# ✅ ХОРОШО — strict assertion, тест падает если что-то не так
+button_clicked = await click_button(userbot, bot_chat_id, pattern)
+assert button_clicked, f"FAIL: Button with pattern '{pattern}' not found! Available: {buttons}"
+```
+
+**Правило:** Каждое действие должно иметь ASSERTION. Если кнопка не найдена — тест ДОЛЖЕН УПАСТЬ.
+
+### 15. ТОЧНОЕ СООТВЕТСТВИЕ CALLBACK PATTERNS
+
+**Проблема:** Тест ожидает `cf:bsigw:{chat_id}:{signal}`, а хендлер использует `cf:bsigw:{signal}:{chat_id}`.
+
+**Решение:** ПЕРЕД написанием теста выгрузи ВСЕ паттерны из хендлеров:
+
+```bash
+# Выгрузить все callback patterns из модуля
+grep -rE "F\.data\.regexp\(r\"" bot/handlers/content_filter/ | grep -oE "r\"[^\"]+\""
+```
+
+**Пример маппинга (content_filter):**
+```python
+# Паттерн в хендлере → Пример callback_data
+# ^cf:bsig:-?\d+$     → cf:bsig:-1001234567
+# ^cf:bsigt:\w+:-?\d+$ → cf:bsigt:money_amount:-1001234567
+# ^cf:bsigw:\w+:-?\d+$ → cf:bsigw:money_amount:-1001234567
+# ^cf:bsigr:-?\d+$    → cf:bsigr:-1001234567
+
+# ВАЖНО: signal_key ПЕРВЫМ, chat_id ПОСЛЕДНИМ!
+```
+
+### 16. ПРОВЕРКА ИЗМЕНЕНИЯ СОСТОЯНИЯ
+
+**Проблема:** Тест кликает на toggle, но не проверяет что состояние изменилось.
+
+```python
+# ❌ ПЛОХО — кликнули и всё
+await click_button(userbot, bot_id, "cf:bsigt:money_amount:-1000")
+print("OK: Clicked toggle")
+
+# ✅ ХОРОШО — проверяем что состояние изменилось
+# Шаг 1: Запомнить состояние ДО
+buttons_before = await list_buttons(userbot, bot_id)
+status_before = get_toggle_status(buttons_before, "money_amount")  # ✅ или ❌
+
+# Шаг 2: Кликнуть
+await click_button(userbot, bot_id, f"cf:bsigt:money_amount:{chat_id}")
+await asyncio.sleep(2)
+
+# Шаг 3: Проверить состояние ПОСЛЕ
+buttons_after = await list_buttons(userbot, bot_id)
+status_after = get_toggle_status(buttons_after, "money_amount")
+
+# Шаг 4: ASSERT что изменилось
+assert status_before != status_after, f"Toggle did not change! Before: {status_before}, After: {status_after}"
+```
+
+### 17. ТЕСТИРОВАНИЕ ВСЕХ УРОВНЕЙ МЕНЮ
+
+**Проблема:** Тесты проверяют только верхний уровень навигации. Глубокие меню не тестируются.
+
+**Решение:** Для каждого модуля создать ПОЛНЫЙ ПУТЬ тестирования:
+
+```
+/settings
+  └── Группа
+      └── cf:m:{chat_id}  (Фильтр контента)
+          ├── cf:t:sc:{chat_id} (Toggle Антискам)
+          ├── cf:scs:{chat_id} (Настройки антискам)
+          │   ├── cf:scact:{chat_id} (Действие)
+          │   │   ├── cf:scact:delete:{chat_id}
+          │   │   ├── cf:scact:mute:{chat_id}
+          │   │   └── cf:scact:ban:{chat_id}
+          │   ├── cf:bsig:{chat_id} (Базовые сигналы) ← БАГ БЫЛ ЗДЕСЬ!
+          │   │   ├── cf:bsigt:{signal}:{chat_id} (Toggle сигнала)
+          │   │   ├── cf:bsigw:{signal}:{chat_id} (Вес сигнала)
+          │   │   └── cf:bsigr:{chat_id} (Сброс)
+          │   ├── cf:scadv:{chat_id} (Дополнительно) ← И ЗДЕСЬ!
+          │   │   ├── cf:scmt:{chat_id} (Текст мута)
+          │   │   ├── cf:scbt:{chat_id} (Текст бана)
+          │   │   └── cf:scnd:{chat_id} (Задержка уведомлений)
+          │   └── cf:scp:{chat_id} (Паттерны)
+          ...
+```
+
+**Каждый callback в дереве должен иметь тест!**
+
+### 18. CROSS-REFERENCE: HANDLER ↔ TEST
+
+**Правило:** Для каждого модуля создать таблицу соответствия:
+
+```python
+# tests/e2e/test_content_filter_comprehensive.py
+
+HANDLER_TEST_MAPPING = {
+    # Handler pattern              → Test method
+    "cf:bsig:-?\\d+$":             "test_base_signals_menu_opens",
+    "cf:bsigt:\\w+:-?\\d+$":       "test_base_signals_toggle",
+    "cf:bsigw:\\w+:-?\\d+$":       "test_base_signals_weight_fsm",
+    "cf:bsigr:-?\\d+$":            "test_base_signals_reset",
+    "cf:scadv:-?\\d+$":            "test_scam_advanced_menu_opens",
+    "cf:scmt:-?\\d+$":             "test_scam_mute_text_fsm",
+    "cf:scbt:-?\\d+$":             "test_scam_ban_text_fsm",
+    "cf:scnd:-?\\d+$":             "test_scam_notification_delay_menu",
+    # ... ВСЕ паттерны!
+}
+
+def test_all_handlers_have_tests():
+    """Мета-тест: проверяет что все хендлеры покрыты тестами."""
+    for pattern, test_name in HANDLER_TEST_MAPPING.items():
+        assert hasattr(TestContentFilterE2E, test_name), f"Missing test for {pattern}"
+```
+
+### 19. FSM FLOW — ПОЛНОЕ ТЕСТИРОВАНИЕ
+
+**Проблема:** FSM тесты проверяют только happy path.
+
+**Решение:** Для каждого FSM тестировать:
+1. **Valid input** — правильный ввод обрабатывается
+2. **Invalid input** — неправильный ввод отклоняется с сообщением об ошибке
+3. **Cancel** — отмена возвращает в предыдущее меню
+4. **State persistence** — состояние сохраняется в БД
+
+```python
+async def test_weight_fsm_complete(self, admin, bot_id, chat_id):
+    """Полный тест FSM ввода веса."""
+    # Navigate to weight input
+    await navigate_to(admin, bot_id, f"cf:bsigw:money_amount:{chat_id}")
+    await asyncio.sleep(2)
+
+    # TEST 1: Invalid input (text)
+    await admin.send_message(bot_id, "not_a_number")
+    await asyncio.sleep(2)
+    msg = await get_last_message(admin, bot_id)
+    assert "положительное число" in msg.text.lower(), "Invalid input not rejected"
+
+    # TEST 2: Invalid input (negative)
+    await admin.send_message(bot_id, "-50")
+    await asyncio.sleep(2)
+    msg = await get_last_message(admin, bot_id)
+    assert "положительное" in msg.text.lower(), "Negative input not rejected"
+
+    # TEST 3: Valid input
+    await admin.send_message(bot_id, "150")
+    await asyncio.sleep(2)
+    msg = await get_last_message(admin, bot_id)
+    assert "установлен" in msg.text.lower() or "сохранён" in msg.text.lower()
+
+    # TEST 4: Verify state persisted
+    await navigate_to(admin, bot_id, f"cf:bsig:{chat_id}")
+    await asyncio.sleep(2)
+    buttons = await list_buttons(admin, bot_id)
+    assert any("150" in str(b) or "(150)" in str(b) for b in buttons), "Weight not shown in menu"
+```
+
+### 20. ОБЯЗАТЕЛЬНЫЙ ЧЕКЛИСТ ПЕРЕД PR
+
+Перед созданием PR с E2E тестами проверь:
+
+- [ ] **Все callback patterns выгружены** из хендлеров (`grep -rE "F\.data\.regexp"`)
+- [ ] **Patterns в тестах ТОЧНО совпадают** с хендлерами (порядок параметров!)
+- [ ] **Каждый callback имеет тест** (таблица HANDLER_TEST_MAPPING)
+- [ ] **Все assertions строгие** (assert, не print/warn)
+- [ ] **Toggle тесты проверяют изменение состояния** (before != after)
+- [ ] **FSM тесты покрывают все ветки** (valid, invalid, cancel)
+- [ ] **Тесты запущены локально** и ВСЕ прошли
+- [ ] **Тесты запущены с реальным ботом** (не только mock)
+
+---
+
+## Пример комплексного теста (Content Filter)
+
+```python
+class TestContentFilterComprehensive:
+    """
+    Комплексный тест Content Filter.
+
+    Покрывает ВСЕ callbacks из:
+    - bot/handlers/content_filter/scam/base_signals.py
+    - bot/handlers/content_filter/scam/settings.py
+    - bot/handlers/content_filter/scam/patterns.py
+    """
+
+    # Mapping всех patterns → тестов
+    REQUIRED_TESTS = [
+        ("cf:bsig:-?\\d+$", "test_01_base_signals_menu"),
+        ("cf:bsigt:\\w+:-?\\d+$", "test_02_base_signals_toggle"),
+        ("cf:bsigw:\\w+:-?\\d+$", "test_03_base_signals_weight"),
+        ("cf:bsigr:-?\\d+$", "test_04_base_signals_reset"),
+        ("cf:scadv:-?\\d+$", "test_05_scam_advanced_menu"),
+        ("cf:scmt:-?\\d+$", "test_06_scam_mute_text"),
+        ("cf:scbt:-?\\d+$", "test_07_scam_ban_text"),
+        ("cf:scnd:-?\\d+$", "test_08_notification_delay"),
+    ]
+
+    @pytest.mark.asyncio
+    async def test_00_verify_all_tests_exist(self):
+        """Мета-тест: все хендлеры имеют тесты."""
+        for pattern, test_name in self.REQUIRED_TESTS:
+            assert hasattr(self, test_name), f"MISSING TEST: {test_name} for pattern {pattern}"
+
+    @pytest.mark.asyncio
+    async def test_01_base_signals_menu(self, admin, bot_id, chat_id):
+        """Тест: меню базовых сигналов открывается."""
+        # Navigate
+        await navigate_to_content_filter(admin, bot_id, chat_id)
+        await click_button(admin, bot_id, f"cf:scs:{chat_id}")  # Антискам
+        await asyncio.sleep(2)
+
+        # Click base signals
+        clicked = await click_button(admin, bot_id, f"cf:bsig:{chat_id}")
+        assert clicked, "Failed to click cf:bsig button"
+        await asyncio.sleep(2)
+
+        # VERIFY: Menu opened with signal buttons
+        buttons = await list_buttons(admin, bot_id)
+        signal_buttons = [b for b in buttons if "bsigt:" in str(b.callback_data)]
+        assert len(signal_buttons) >= 5, f"Expected 5+ signal buttons, got {len(signal_buttons)}"
+
+    @pytest.mark.asyncio
+    async def test_02_base_signals_toggle(self, admin, bot_id, chat_id):
+        """Тест: toggle сигнала меняет состояние."""
+        await navigate_to_base_signals(admin, bot_id, chat_id)
+
+        # Get status BEFORE
+        buttons = await list_buttons(admin, bot_id)
+        money_btn = find_button(buttons, "money")
+        status_before = "✅" in money_btn.text
+
+        # Toggle
+        await click_button(admin, bot_id, f"cf:bsigt:money_amount:{chat_id}")
+        await asyncio.sleep(2)
+
+        # Get status AFTER
+        buttons = await list_buttons(admin, bot_id)
+        money_btn = find_button(buttons, "money")
+        status_after = "✅" in money_btn.text
+
+        # STRICT ASSERTION
+        assert status_before != status_after, \
+            f"Toggle FAILED! Before: {status_before}, After: {status_after}"
+```
+
+---
+
+## ⚠️ КРИТИЧЕСКИЕ ПРАВИЛА ВЕРИФИКАЦИИ (2025-12-27)
+
+> **УРОК:** Тесты показывали "24 passed", но кнопки не работали!
+> Причина: тесты проверяли "бот ответил", но НЕ проверяли "ответ без ошибок".
+
+### 21. МОНИТОРИНГ DOCKER ЛОГОВ ВО ВРЕМЯ ТЕСТОВ
+
+**Проблема:** Тест кликает кнопку → бот отвечает → тест считает успехом.
+Но в логах бота: `AttributeError: 'Service' object has no attribute 'method_name'`.
+
+**Решение:** Запускать логи Docker ПАРАЛЛЕЛЬНО с тестами:
+
+```bash
+# Терминал 1: Логи бота (следим за ошибками в реальном времени)
+docker logs -f bot_test 2>&1 | grep -E "ERROR|Exception|AttributeError|TypeError|KeyError"
+
+# Терминал 2: Запуск тестов
+pytest tests/e2e/test_module.py -v
+```
+
+**Автоматизация в тестах:**
+
+```python
+import subprocess
+import threading
+
+class TestWithLogMonitoring:
+    """Тест с мониторингом логов."""
+
+    @pytest.fixture(autouse=True)
+    def monitor_logs(self):
+        """Запускает мониторинг логов Docker перед каждым тестом."""
+        self.errors_found = []
+
+        def log_monitor():
+            process = subprocess.Popen(
+                ["docker", "logs", "-f", "bot_test"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True
+            )
+            for line in process.stdout:
+                if any(err in line for err in ["ERROR", "Exception", "AttributeError", "TypeError"]):
+                    self.errors_found.append(line.strip())
+
+        self.log_thread = threading.Thread(target=log_monitor, daemon=True)
+        self.log_thread.start()
+
+        yield
+
+        # ПОСЛЕ теста проверяем что ошибок не было
+        assert not self.errors_found, f"ERRORS in Docker logs:\n" + "\n".join(self.errors_found)
+```
+
+### 22. ПРОВЕРКА РЕАЛЬНОГО ОТВЕТА, А НЕ ФАКТА ОТВЕТА
+
+**Проблема:**
+
+```python
+# ❌ ПЛОХО — проверяем только что бот ответил
+await click_button(userbot, bot_id, f"cf:scpe:{chat_id}")
+await asyncio.sleep(2)
+msg = await get_last_message(userbot, bot_id)
+assert msg is not None  # Бот ответил? ДА! Тест прошёл!
+# Но ответ может быть "Произошла ошибка" или вообще старое сообщение!
+```
+
+**Решение:**
+
+```python
+# ✅ ХОРОШО — проверяем СОДЕРЖИМОЕ ответа
+await click_button(userbot, bot_id, f"cf:scpe:{chat_id}")
+await asyncio.sleep(2)
+msg = await get_last_message(userbot, bot_id)
+
+# 1. Проверяем что это НОВОЕ сообщение (не старое)
+assert msg.date > test_start_time, "No new message received"
+
+# 2. Проверяем что ответ НЕ содержит ошибку
+assert "ошибка" not in msg.text.lower(), f"Error in response: {msg.text}"
+assert "error" not in msg.text.lower(), f"Error in response: {msg.text}"
+
+# 3. Проверяем ОЖИДАЕМОЕ содержимое
+assert "экспорт" in msg.text.lower() or "паттерн" in msg.text.lower(), \
+    f"Unexpected response: {msg.text[:100]}"
+```
+
+### 23. FAST ITERATION: VOLUME MOUNT ДЛЯ КОДА
+
+**Проблема:** Каждое изменение кода требует `docker build` (30-60 секунд).
+
+**Решение:** В `docker-compose.test.yml` добавлен volume mount:
+
+```yaml
+volumes:
+  - ./bot:/app/bot:ro  # Код бота - изменения применяются после restart!
+```
+
+**Теперь workflow:**
+
+```bash
+# 1. Изменил код
+# 2. Рестарт контейнера (2-3 секунды вместо 60)
+docker-compose -f docker-compose.test.yml restart bot_test
+
+# 3. Запуск теста
+pytest tests/e2e/test_module.py -v
+```
+
+**ВАЖНО:** Volume mount НЕ затрагивает БД и Redis — группы НЕ отвалятся!
+
+### 24. ЧЕКЛИСТ: ЧТО ПРОВЕРЯЕТ ТЕСТ
+
+Для КАЖДОГО теста ответь на вопросы:
+
+| Вопрос | ❌ Плохо | ✅ Хорошо |
+|--------|----------|-----------|
+| Кнопка нажалась? | `await click()` | `assert await click(), "Button not found"` |
+| Бот ответил? | `msg = await get_msg()` | `assert msg.date > start, "No response"` |
+| Ответ корректный? | (не проверяется) | `assert "ошибка" not in msg.text` |
+| Состояние изменилось? | (не проверяется) | `assert before != after` |
+| Логи без ошибок? | (не проверяется) | Мониторинг Docker logs |
+| Данные в БД? | (не проверяется) | `assert await db.get(...) == expected` |
+
+### 25. ОБНОВЛЁННЫЙ ЧЕКЛИСТ ПЕРЕД PR
+
+- [ ] **Docker logs мониторились** во время тестов (правило 21)
+- [ ] **Ответы проверены на содержимое**, не только факт (правило 22)
+- [ ] **Volume mount настроен** для быстрой итерации (правило 23)
+- [ ] Все callback patterns выгружены из хендлеров
+- [ ] Patterns в тестах ТОЧНО совпадают с хендлерами
+- [ ] Каждый callback имеет тест (HANDLER_TEST_MAPPING)
+- [ ] Все assertions строгие (assert, не print/warn)
+- [ ] Toggle тесты проверяют изменение состояния
+- [ ] FSM тесты покрывают все ветки
+- [ ] **Тесты запущены с мониторингом логов** — 0 ошибок в Docker logs
+
+---
+
+---
+
+## ⛔ КРИТИЧЕСКОЕ ПРАВИЛО 26: ТЕСТИРОВАТЬ ВСЕ УРОВНИ МЕНЮ ВГЛУБЬ (2025-12-27)
+
+> **УРОК:** Тесты проверяли "меню открылось, кнопки есть", но НЕ кликали на КАЖДУЮ кнопку.
+> Результат: 14 тестов PASSED, но 3 кнопки упали с TypeError в production!
+
+### Реальные примеры пропущенных багов:
+
+| Проблема | Почему тесты не поймали |
+|----------|-------------------------|
+| `create_category_words_list_menu()` — TypeError: 4 args вместо 5 | Тесты не кликали на `cf:swl:`, `cf:hwl:`, `cf:owl:` (списки слов категории) |
+| `cf:secimp` vs `cf:secpi` — handler не найден | Тесты не кликали на кнопку "📥 Импорт" в разделах |
+| `base_signals_menu()` — frozen CallbackQuery | Тесты не кликали на toggle сигналов `cf:bsigt:` |
+
+**Вывод:** Если тест проверяет только "открылось меню", он пропустит ВСЕ баги во вложенных кнопках!
+
+### Проблема:
+
+```python
+# ❌ ПЛОХО — проверяем только первый уровень
+async def test_word_filter_menu(self, admin, bot_id, chat_id):
+    await click_button(admin, bot_id, f"cf:wfs:{chat_id}")  # Открыть меню
+    buttons = await list_buttons(admin, bot_id)
+    assert len(buttons) > 0  # Есть кнопки? Да! PASSED!
+    # НО: кнопки cf:swl:, cf:hwl:, cf:owl: НЕ кликались!
+```
+
+### Решение — ОБЯЗАТЕЛЬНО кликать КАЖДУЮ кнопку:
+
+```python
+# ✅ ХОРОШО — проверяем ВСЕ кнопки вглубь
+async def test_word_filter_menu_complete(self, admin, bot_id, chat_id):
+    await click_button(admin, bot_id, f"cf:wfs:{chat_id}")
+    await asyncio.sleep(2)
+
+    # 1. Кликаем на КАЖДУЮ категорию
+    for category in ["sw", "hw", "ow"]:
+        clicked = await click_button(admin, bot_id, f"cf:{category}l:{chat_id}:0")
+        assert clicked, f"Button cf:{category}l not found"
+
+        # 2. Проверяем ответ без ошибок
+        ok, text = await verify_no_error(admin, bot_id)
+        assert ok, f"Error in {category} list: {text}"
+
+        # 3. Возвращаемся назад
+        await click_button(admin, bot_id, f"cf:wfs:{chat_id}")
+        await asyncio.sleep(1)
+```
+
+### Правило:
+
+**Если меню содержит N кнопок, тест должен кликнуть на ВСЕ N кнопок и проверить каждый ответ!**
+
+| Что тест проверял | Что нужно проверять |
+|-------------------|---------------------|
+| "Меню открылось" | "Меню открылось + КАЖДАЯ кнопка работает" |
+| 1 клик + assert buttons | N кликов + N assertions |
+| Поверхностно | В глубину |
+
+---
+
+## ТИПЫ ТЕСТОВ: UI vs ЛОГИКА (РАЗДЕЛЕНИЕ)
+
+### Два разных типа тестов:
+
+| Тип | Что проверяет | Файл |
+|-----|---------------|------|
+| **E2E UI тесты** | Кнопки работают, FSM диалоги работают | `test_*_e2e.py` |
+| **Тесты логики детекции** | Спам детектируется, легитимное НЕ блокируется | `test_*_detection_e2e.py` |
+
+### E2E UI тест (кнопки):
+
+```python
+# tests/e2e/test_content_filter_ui_e2e.py
+async def test_scam_patterns_menu_works(self, admin, bot_id):
+    """Проверяет что UI меню паттернов работает."""
+    await click_button(admin, bot_id, f"cf:scp:{chat_id}")
+    # Проверяем что меню открылось без ошибок
+```
+
+### Тест логики детекции (ОТДЕЛЬНЫЙ ФАЙЛ):
+
+```python
+# tests/e2e/test_content_filter_detection_e2e.py
+class TestSpamDetection:
+    """Тесты ЛОГИКИ детекции спама - отправляем сообщения и проверяем действия."""
+
+    async def test_spam_message_deleted(self, admin, victim, bot, chat_id):
+        """Спам-сообщение должно быть удалено."""
+        # 1. Админ настраивает фильтр через UI
+        await navigate_to_scam_settings(admin, bot_id, chat_id)
+        await enable_scam_detection(admin, bot_id, chat_id)
+
+        # 2. Жертва отправляет СПАМ в группу
+        spam_msg = await victim.send_message(
+            chat_id,
+            "Заработок 100к в день! Пиши в ЛС!"
+        )
+        await asyncio.sleep(5)  # Ждём обработки
+
+        # 3. Проверяем что сообщение УДАЛЕНО
+        exists = await check_message_exists(victim, chat_id, spam_msg.id)
+        assert not exists, "SPAM message was NOT deleted!"
+
+    async def test_legitimate_message_not_blocked(self, admin, victim, chat_id):
+        """Легитимное сообщение НЕ должно блокироваться."""
+        # 1. Жертва отправляет ЛЕГИТИМНОЕ сообщение
+        normal_msg = await victim.send_message(chat_id, "Привет, как дела?")
+        await asyncio.sleep(5)
+
+        # 2. Проверяем что сообщение НЕ удалено
+        exists = await check_message_exists(victim, chat_id, normal_msg.id)
+        assert exists, "Legitimate message was DELETED by mistake!"
+
+    async def test_word_filter_blocks_forbidden_word(self, admin, victim, chat_id):
+        """Запрещённое слово должно блокироваться."""
+        # 1. Админ добавляет слово через UI
+        await add_word_via_ui(admin, bot_id, chat_id, category="sw", word="тестспам")
+
+        # 2. Жертва отправляет сообщение с этим словом
+        msg = await victim.send_message(chat_id, "Продаю тестспам дёшево!")
+        await asyncio.sleep(5)
+
+        # 3. Проверяем действие
+        exists = await check_message_exists(victim, chat_id, msg.id)
+        assert not exists, "Forbidden word was NOT filtered!"
+```
+
+### Checklist для полного тестирования модуля:
+
+- [ ] **UI тесты** — каждая кнопка кликнута и проверена
+- [ ] **FSM тесты** — каждый FSM диалог пройден (valid + invalid input)
+- [ ] **Тесты логики** — спам блокируется, легитимное НЕ блокируется
+- [ ] **Edge cases** — граничные случаи (пустые списки, максимальные значения)
+
+---
+
+---
+
+## ⛔ КРИТИЧЕСКИЕ ПРАВИЛА НАПИСАНИЯ ТЕСТОВ (2025-12-27)
+
+> **УРОК:** Тесты с `print()` вместо `assert` давали ложную уверенность.
+> Тесты с `MagicMock` не тестировали реальную логику бота!
+
+### 27. ASSERT ВМЕСТО PRINT — ВСЕГДА!
+
+**Проблема:** Тесты используют `if/else` с `print()` вместо `assert`. Тест ВСЕГДА проходит!
+
+```python
+# ❌ ПЛОХО — тест НИКОГДА не упадёт
+async def test_spam_deleted(self, userbot, chat_id):
+    msg = await userbot.send_message(chat_id, "spam text")
+    await asyncio.sleep(3)
+    exists = await check_message_exists(userbot, chat_id, msg.id)
+
+    if not exists:
+        print("[OK] Message deleted!")
+    else:
+        print("[FAIL] Message NOT deleted")  # Тест пройдёт с FAIL в логах!
+```
+
+**Решение:**
+
+```python
+# ✅ ХОРОШО — тест упадёт если условие не выполнено
+async def test_spam_deleted(self, userbot, chat_id):
+    msg = await userbot.send_message(chat_id, "spam text")
+    await asyncio.sleep(3)
+    exists = await check_message_exists(userbot, chat_id, msg.id)
+
+    assert not exists, "FAIL: Spam message was NOT deleted!"
+    print("[OK] Message deleted!")  # Печатаем только при успехе
+```
+
+**Правило:** Каждая проверка = `assert`. `print()` — только для логирования ПОСЛЕ assert.
+
+### 28. НЕ ИСПОЛЬЗОВАТЬ MagicMock В E2E ТЕСТАХ!
+
+**Проблема:** Тесты в папке `tests/e2e/` используют `MagicMock` вместо реальных взаимодействий.
+
+```python
+# ❌ ПЛОХО — это НЕ E2E тест!
+from unittest.mock import MagicMock, AsyncMock
+
+async def test_antispam_blocks_links():
+    message = MagicMock()
+    message.text = "t.me/spam_channel"
+    message.delete = AsyncMock()
+
+    await antispam_filter(message)  # Вызываем напрямую
+    message.delete.assert_called_once()  # Проверяем mock
+```
+
+**Что не так:**
+- Mock не проверяет реальную логику бота
+- Хендлеры не регистрируются в aiogram
+- Middleware не применяется
+- База данных не используется
+
+**Решение — НАСТОЯЩИЙ E2E с юзерботами:**
+
+```python
+# ✅ ХОРОШО — реальный E2E тест
+async def test_antispam_blocks_links(self, userbot, bot, chat_id):
+    """Проверяем что бот РЕАЛЬНО удаляет ссылки."""
+    # 1. Включаем антиспам через БД (setup)
+    await enable_antispam_rule(chat_id, "telegram_links", action="delete")
+
+    # 2. Юзербот отправляет сообщение со ссылкой
+    msg = await userbot.send_message(chat_id, "Заходи t.me/spam_group")
+    await asyncio.sleep(3)
+
+    # 3. Проверяем что сообщение РЕАЛЬНО удалено
+    exists = await check_message_exists(userbot, chat_id, msg.id)
+    assert not exists, "FAIL: Link message was NOT deleted by bot!"
+```
+
+**Правило:** В папке `tests/e2e/` — ТОЛЬКО реальные юзерботы + реальный бот. Mock = unit тесты!
+
+### 29. SRP — ОДИН ТЕСТ = ОДНА ПРОВЕРКА
+
+**Проблема:** Тест проверяет 5 вещей сразу. При падении непонятно что сломалось.
+
+```python
+# ❌ ПЛОХО — слишком много в одном тесте
+async def test_antispam_full_flow():
+    # Проверка 1: telegram links
+    # Проверка 2: external links
+    # Проверка 3: whitelist
+    # Проверка 4: mute action
+    # Проверка 5: delete action
+    # 200 строк кода...
+```
+
+**Решение — Single Responsibility Principle:**
+
+```python
+# ✅ ХОРОШО — каждый тест проверяет ОДНО
+class TestAntispamTelegramLinks:
+    async def test_telegram_link_detected_and_deleted(self):
+        """Telegram ссылка детектируется и удаляется."""
+        ...
+
+    async def test_telegram_link_whitelisted_allowed(self):
+        """Ссылка из whitelist НЕ удаляется."""
+        ...
+
+    async def test_clean_text_allowed(self):
+        """Текст без ссылок НЕ блокируется."""
+        ...
+
+class TestAntispamMuteAction:
+    async def test_telegram_link_triggers_mute(self):
+        """При action=mute пользователь мутится."""
+        ...
+```
+
+**Преимущества SRP:**
+- При падении сразу видно ЧТО сломалось
+- Легче дебажить
+- Легче понять что тестирует тест
+- Можно запускать тесты по одному
+
+### 30. HELPER-ФУНКЦИИ ДЛЯ ПОВТОРЯЮЩИХСЯ ДЕЙСТВИЙ
+
+**Проблема:** Каждый тест копипастит 20 строк навигации.
+
+```python
+# ❌ ПЛОХО — дублирование кода
+async def test_1():
+    await admin.send_message(bot_id, "/settings")
+    await asyncio.sleep(2)
+    await click_button(admin, bot_id, "Фильтр контента")
+    await asyncio.sleep(2)
+    await click_button(admin, bot_id, "Антискам")
+    await asyncio.sleep(2)
+    await click_button(admin, bot_id, "Паттерны")
+    # ... и так в каждом тесте
+```
+
+**Решение — helper-функции в начале файла:**
+
+```python
+# ✅ ХОРОШО — переиспользуемые helpers
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
+async def navigate_to_patterns_menu(userbot, bot_chat_id, chat_id) -> bool:
+    """Navigate: /settings -> Группа -> Фильтр контента -> Антискам -> Паттерны."""
+    await userbot.send_message(bot_chat_id, "/settings")
+    await asyncio.sleep(2)
+
+    clicked = await click_button_by_callback(userbot, bot_chat_id, f"gs:{chat_id}")
+    if not clicked:
+        return False
+    await asyncio.sleep(1)
+
+    clicked = await click_button_by_callback(userbot, bot_chat_id, f"cf:m:{chat_id}")
+    if not clicked:
+        return False
+    # ...
+    return True
+
+
+async def add_test_pattern(userbot, bot_chat_id, chat_id, pattern_text=None) -> str:
+    """Добавить тестовый паттерн через UI. Возвращает текст паттерна."""
+    await navigate_to_patterns_menu(userbot, bot_chat_id, chat_id)
+    await click_button_by_callback(userbot, bot_chat_id, f"cf:scpn:{chat_id}")
+
+    pattern = pattern_text or f"test_pattern_{int(time.time())}"
+    await userbot.send_message(bot_chat_id, pattern)
+    return pattern
+
+
+# Теперь тесты короткие и понятные
+async def test_add_pattern(self, userbot, bot_chat_id, chat_id):
+    pattern = await add_test_pattern(userbot, bot_chat_id, chat_id, "спам слово")
+    assert await verify_message_contains(userbot, bot_chat_id, pattern)
+```
+
+### 31. SETUP ЧЕРЕЗ БД — КОГДА ДОПУСТИМО
+
+**Главное правило:** UI тесты через UI, но для SETUP логики можно использовать БД напрямую.
+
+```python
+# ✅ ДОПУСТИМО — setup через БД для тестов ЛОГИКИ детекции
+async def enable_antispam_telegram_links(chat_id: int, action: str = "delete"):
+    """Включить правило антиспама для telegram ссылок (через БД)."""
+    async for session in get_test_session():
+        from bot.database.models_antispam import AntiSpamRule
+
+        rule = await session.execute(
+            select(AntiSpamRule).where(
+                AntiSpamRule.chat_id == chat_id,
+                AntiSpamRule.rule_type == AntiSpamRuleType.TELEGRAM_LINKS
+            )
+        )
+        rule = rule.scalar_one_or_none()
+
+        if rule:
+            rule.is_enabled = True
+            rule.action = action
+        else:
+            rule = AntiSpamRule(
+                chat_id=chat_id,
+                rule_type=AntiSpamRuleType.TELEGRAM_LINKS,
+                is_enabled=True,
+                action=action
+            )
+            session.add(rule)
+
+        await session.commit()
+
+
+# Использование в тесте логики детекции
+async def test_telegram_link_detected(self, userbot, chat_id):
+    """Тест ЛОГИКИ: telegram ссылка удаляется."""
+    # SETUP через БД — это БЫСТРЕЕ и не зависит от UI
+    await enable_antispam_telegram_links(chat_id, action="delete")
+
+    # ДЕЙСТВИЕ — реальное сообщение через юзербота
+    msg = await userbot.send_message(chat_id, "t.me/spam_channel")
+    await asyncio.sleep(3)
+
+    # ПРОВЕРКА — реальная проверка существования
+    assert not await check_message_exists(userbot, chat_id, msg.id)
+```
+
+**Когда использовать БД напрямую:**
+| Сценарий | БД | UI |
+|----------|----|----|
+| Тест UI меню настроек | ❌ | ✅ |
+| Тест FSM диалогов | ❌ | ✅ |
+| Тест детекции спама (нужен быстрый setup) | ✅ | ❌ |
+| Тест whitelist/blacklist логики | ✅ | ❌ |
+| Интеграционный тест полного flow | ✅ setup | ✅ действия |
+
+### 32. CLEANUP — ВСЕГДА ВОССТАНАВЛИВАТЬ ИСХОДНОЕ СОСТОЯНИЕ
+
+**Проблема:** Тест изменил настройки, следующий тест упал из-за этого.
+
+```python
+# ❌ ПЛОХО — нет cleanup
+async def test_enable_antispam():
+    await enable_antispam_rule(chat_id, "telegram_links")
+    # ... тест ...
+    # Правило осталось включённым! Следующие тесты могут упасть
+```
+
+**Решение — finally блок:**
+
+```python
+# ✅ ХОРОШО — cleanup в finally
+async def test_enable_antispam(self, userbot, chat_id):
+    try:
+        # SETUP
+        await enable_antispam_telegram_links(chat_id, action="delete")
+
+        # TEST
+        msg = await userbot.send_message(chat_id, "t.me/spam")
+        await asyncio.sleep(3)
+        assert not await check_message_exists(userbot, chat_id, msg.id)
+
+    finally:
+        # CLEANUP — ВСЕГДА выполнится
+        await disable_antispam_telegram_links(chat_id)
+        await clear_whitelist(chat_id)
+```
+
+---
+
+## Полный пример правильного E2E теста (2025-12-27)
+
+```python
+"""
+E2E тесты для Antispam модуля.
+
+Запуск: pytest tests/e2e/test_antispam_flow.py -v -s
+
+ВАЖНО: Это РЕАЛЬНЫЕ E2E тесты с юзерботами, НЕ unit тесты с MagicMock!
+"""
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# КРИТИЧЕСКИ ВАЖНО: загружаем .env.test ДО ВСЕХ других импортов
+env_test_path = Path(__file__).parent.parent.parent / ".env.test"
+load_dotenv(env_test_path, override=True)
+
+import asyncio
+import pytest
+from datetime import datetime
+from pyrogram import Client
+from aiogram import Bot
+from sqlalchemy import select
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+TEST_BOT_TOKEN = os.getenv("TEST_BOT_TOKEN")
+TEST_CHAT_ID = int(os.getenv("TEST_CHAT_ID", "0"))
+PYROGRAM_API_ID = os.getenv("PYROGRAM_API_ID")
+PYROGRAM_API_HASH = os.getenv("PYROGRAM_API_HASH")
+TEST_USERBOT_SESSION = os.getenv("TEST_USERBOT_SESSION")
+
+
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
+async def get_test_session():
+    """Изолированная сессия БД для E2E тестов."""
+    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+    from sqlalchemy.pool import NullPool
+
+    database_url = "postgresql+asyncpg://user:pass@127.0.0.1:5433/db"
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    session_maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    session = session_maker()
+    try:
+        yield session
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+async def enable_antispam_telegram_links(chat_id: int, action: str = "delete"):
+    """Включить правило антиспама через БД."""
+    async for session in get_test_session():
+        from bot.database.models_antispam import AntiSpamRule, AntiSpamRuleType
+
+        rule = await session.execute(
+            select(AntiSpamRule).where(
+                AntiSpamRule.chat_id == chat_id,
+                AntiSpamRule.rule_type == AntiSpamRuleType.TELEGRAM_LINKS
+            )
+        )
+        rule = rule.scalar_one_or_none()
+
+        if rule:
+            rule.is_enabled = True
+            rule.action = action
+        else:
+            rule = AntiSpamRule(
+                chat_id=chat_id,
+                rule_type=AntiSpamRuleType.TELEGRAM_LINKS,
+                is_enabled=True,
+                action=action
+            )
+            session.add(rule)
+
+        await session.commit()
+
+
+async def disable_antispam_telegram_links(chat_id: int):
+    """Отключить правило антиспама."""
+    async for session in get_test_session():
+        from bot.database.models_antispam import AntiSpamRule, AntiSpamRuleType
+
+        result = await session.execute(
+            select(AntiSpamRule).where(
+                AntiSpamRule.chat_id == chat_id,
+                AntiSpamRule.rule_type == AntiSpamRuleType.TELEGRAM_LINKS
+            )
+        )
+        rule = result.scalar_one_or_none()
+        if rule:
+            rule.is_enabled = False
+            await session.commit()
+
+
+async def check_message_exists(client: Client, chat_id: int, message_id: int) -> bool:
+    """Проверить существует ли сообщение."""
+    try:
+        messages = await client.get_messages(chat_id, message_id)
+        return messages and not messages.empty
+    except Exception:
+        return False
+
+
+# ============================================================
+# FIXTURES
+# ============================================================
+
+@pytest.fixture
+async def userbot():
+    """Pyrogram юзербот."""
+    if not TEST_USERBOT_SESSION:
+        pytest.skip("No userbot session")
+
+    client = Client(
+        name="test_userbot",
+        api_id=int(PYROGRAM_API_ID),
+        api_hash=PYROGRAM_API_HASH,
+        session_string=TEST_USERBOT_SESSION,
+        in_memory=True
+    )
+    await client.start()
+    yield client
+    await client.stop()
+
+
+@pytest.fixture
+async def bot():
+    """Aiogram Bot."""
+    bot_instance = Bot(token=TEST_BOT_TOKEN)
+    try:
+        yield bot_instance
+    finally:
+        await bot_instance.session.close()
+
+
+@pytest.fixture
+def chat_id():
+    return TEST_CHAT_ID
+
+
+# ============================================================
+# TESTS — SRP: один тест = одна проверка
+# ============================================================
+
+class TestAntispamTelegramLinks:
+    """Тесты детекции telegram ссылок."""
+
+    @pytest.mark.asyncio
+    async def test_telegram_link_detected_and_deleted(self, userbot, chat_id):
+        """Telegram ссылка должна быть удалена."""
+        try:
+            # SETUP
+            await enable_antispam_telegram_links(chat_id, action="delete")
+
+            # ACTION
+            msg = await userbot.send_message(
+                chat_id,
+                f"[TEST] Check spam link t.me/test_spam_{datetime.now().timestamp()}"
+            )
+            await asyncio.sleep(4)
+
+            # ASSERT — строгая проверка!
+            exists = await check_message_exists(userbot, chat_id, msg.id)
+            assert not exists, "FAIL: Telegram link message was NOT deleted!"
+            print("[OK] Telegram link message was deleted by antispam")
+
+        finally:
+            # CLEANUP
+            await disable_antispam_telegram_links(chat_id)
+
+    @pytest.mark.asyncio
+    async def test_clean_text_allowed(self, userbot, chat_id):
+        """Текст без ссылок НЕ должен блокироваться."""
+        try:
+            await enable_antispam_telegram_links(chat_id, action="delete")
+
+            msg = await userbot.send_message(
+                chat_id,
+                f"[TEST] Clean text without links {datetime.now().timestamp()}"
+            )
+            await asyncio.sleep(4)
+
+            # ASSERT — сообщение должно остаться
+            exists = await check_message_exists(userbot, chat_id, msg.id)
+            assert exists, "FAIL: Clean message was deleted by mistake!"
+            print("[OK] Clean text was NOT deleted")
+
+            # Cleanup сообщения
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+
+        finally:
+            await disable_antispam_telegram_links(chat_id)
+```
+
+---
+
+*Последнее обновление: 2025-12-27* (добавлены правила 27-32: assert vs print, без MagicMock, SRP, helper-функции, setup через БД, cleanup)

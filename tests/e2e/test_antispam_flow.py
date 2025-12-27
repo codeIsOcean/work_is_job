@@ -1,824 +1,601 @@
 """
 E2E-тесты для антиспам модуля.
 
-Этот модуль тестирует полный поток работы антиспам системы:
+РЕАЛЬНЫЕ E2E ТЕСТЫ с использованием Pyrogram юзерботов.
+Тестирует полный поток работы антиспам системы:
 - Фильтрация сообщений с Telegram ссылками
 - Фильтрация пересылок из разных источников
 - Работа белого списка
-- Применение различных действий (WARN, KICK, RESTRICT, BAN)
+- Применение различных действий (WARN, RESTRICT, BAN)
+
+Запуск:
+    pytest tests/e2e/test_antispam_flow.py -v -s
+
+Требования:
+    - .env.test с TEST_USERBOT_SESSION, TEST_BOT_TOKEN, TEST_CHAT_ID
+    - Тестовая группа где бот админ
+    - Юзербот1 (админ) - настраивает правила
+    - Юзербот2 (жертва) - отправляет спам
 """
 
-# Импорт стандартных библиотек
-from __future__ import annotations
-# Импорт datetime для работы со временем
-from datetime import datetime, timezone
-# Импорт types для создания SimpleNamespace
-from types import SimpleNamespace
-# Импорт unittest.mock для создания заглушек
-from unittest.mock import AsyncMock, MagicMock
+import os
+from pathlib import Path
+from dotenv import load_dotenv
 
-# Импорт pytest для тестирования
+# КРИТИЧЕСКИ ВАЖНО: загружаем .env.test ДО ВСЕХ других импортов
+env_test_path = Path(__file__).parent.parent.parent / ".env.test"
+load_dotenv(env_test_path, override=True)
+
+import asyncio
 import pytest
-# Импорт aiogram компонентов
-from aiogram import Bot, Dispatcher, Router
-# Импорт базовой сессии aiogram
-from aiogram.client.session.base import BaseSession
-# Импорт TelegramAPIServer для создания тестового бота
-from aiogram.client.telegram import TelegramAPIServer
-# Импорт типа Update
-from aiogram.types import Update, Message
-# Импорт FSM storage
-from aiogram.fsm.storage.memory import MemoryStorage
+from datetime import datetime
 
-# Импорт моделей БД
-from bot.database.models import ChatSettings, Group
-# Импорт моделей антиспам
-from bot.database.models_antispam import (
-    AntiSpamRule,
-    AntiSpamWhitelist,
-    RuleType,
-    ActionType,
-    WhitelistScope,
-)
-# Импорт middleware для сессий БД
-from bot.middleware.db_session import DbSessionMiddleware
-# Импорт модуля сессий БД
-from bot.database import session as db_session_module
-# Импорт сервисов антиспам
-from bot.services.antispam import (
-    check_message_for_spam,
-    upsert_rule,
-    add_whitelist_pattern,
-    AntiSpamDecision,
-)
+from pyrogram import Client
+from pyrogram.errors import FloodWait, UserAlreadyParticipant
+from aiogram import Bot
+
+# Конфигурация
+TEST_BOT_TOKEN = os.getenv("TEST_BOT_TOKEN")
+TEST_CHAT_ID = os.getenv("TEST_CHAT_ID")
+TEST_CHAT_INVITE_LINK = os.getenv("TEST_CHAT_INVITE_LINK")
+PYROGRAM_API_ID = os.getenv("PYROGRAM_API_ID")
+PYROGRAM_API_HASH = os.getenv("PYROGRAM_API_HASH")
+
+USERBOT_SESSIONS = [
+    {"session": os.getenv("TEST_USERBOT_SESSION"), "username": "admin_user"},
+    {"session": os.getenv("TEST_USERBOT2_SESSION"), "username": "victim_user"},
+]
+
+
+def skip_if_no_credentials():
+    """Skip test if credentials missing."""
+    if not TEST_BOT_TOKEN:
+        pytest.skip("TEST_BOT_TOKEN not set")
+    if not TEST_CHAT_ID:
+        pytest.skip("TEST_CHAT_ID not set")
+    if not any(s["session"] for s in USERBOT_SESSIONS):
+        pytest.skip("No TEST_USERBOT_SESSION set")
+
+
+def get_available_session(index: int = 0):
+    """Get available userbot session."""
+    available = [s for s in USERBOT_SESSIONS if s["session"]]
+    return available[index] if index < len(available) else None
+
+
+def safe_str(text: str) -> str:
+    """Convert string to ASCII-safe version for Windows console."""
+    if not text:
+        return ""
+    return text.encode('ascii', 'replace').decode('ascii')
 
 
 # ============================================================
-# ВСПОМОГАТЕЛЬНЫЙ КЛАСС ДЛЯ ЗАПИСИ ЗАПРОСОВ К API TELEGRAM
+# FIXTURES
 # ============================================================
 
-class RecordingSession(BaseSession):
-    """
-    Сессия для записи запросов к Telegram API.
+@pytest.fixture
+async def admin_userbot():
+    """Admin userbot fixture."""
+    skip_if_no_credentials()
+    session_info = get_available_session(0)
+    if not session_info:
+        pytest.skip("No admin userbot session available")
+    client = Client(
+        name="antispam_admin",
+        api_id=int(PYROGRAM_API_ID),
+        api_hash=PYROGRAM_API_HASH,
+        session_string=session_info["session"],
+        in_memory=True
+    )
+    await client.start()
+    yield client
+    await client.stop()
 
-    Используется в E2E тестах для отслеживания
-    каких методов вызывался бот.
-    """
 
-    # Конструктор класса
-    def __init__(self) -> None:
-        # Вызываем конструктор родительского класса
-        super().__init__(api=TelegramAPIServer.from_base("https://api.test"))
-        # Список для хранения запросов
-        self.requests = []
+@pytest.fixture
+async def victim_userbot():
+    """Victim userbot fixture."""
+    skip_if_no_credentials()
+    session_info = get_available_session(1)
+    if not session_info:
+        pytest.skip("No victim userbot session available")
+    client = Client(
+        name="antispam_victim",
+        api_id=int(PYROGRAM_API_ID),
+        api_hash=PYROGRAM_API_HASH,
+        session_string=session_info["session"],
+        in_memory=True
+    )
+    await client.start()
+    yield client
+    await client.stop()
 
-    # Метод для выполнения запроса к API
-    async def make_request(self, bot: Bot, method, timeout=None):
-        # Получаем название метода API
-        method_name = getattr(method, "__api_method__", "")
-        # Сохраняем запрос
-        self.requests.append(method_name)
-        # Возвращаем успешный результат для sendMessage
-        if method_name == "sendMessage":
-            return {"ok": True}
-        # Для остальных методов возвращаем True
-        return True
 
-    # Метод для закрытия сессии
-    async def close(self) -> None:
-        # Ничего не делаем
+@pytest.fixture
+async def bot():
+    """Aiogram Bot fixture."""
+    skip_if_no_credentials()
+    bot_instance = Bot(token=TEST_BOT_TOKEN)
+    try:
+        yield bot_instance
+    finally:
+        if bot_instance.session:
+            await bot_instance.session.close()
+
+
+@pytest.fixture
+def chat_id():
+    return int(TEST_CHAT_ID)
+
+
+@pytest.fixture
+def invite_link():
+    return TEST_CHAT_INVITE_LINK
+
+
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
+async def ensure_user_in_chat(userbot: Client, chat_id: int, invite_link: str = None):
+    """Ensure userbot is in the chat."""
+    if invite_link:
+        try:
+            await userbot.join_chat(invite_link)
+            await asyncio.sleep(1)
+        except UserAlreadyParticipant:
+            pass
+        except FloodWait as e:
+            if e.value < 60:
+                await asyncio.sleep(e.value + 5)
+
+
+async def get_bot_username(bot: Bot) -> str:
+    """Get bot username."""
+    me = await bot.get_me()
+    return me.username
+
+
+async def unmute_user(bot: Bot, chat_id: int, user_id: int):
+    """Unmute user in chat."""
+    from aiogram.types import ChatPermissions
+    try:
+        await bot.restrict_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            permissions=ChatPermissions(
+                can_send_messages=True,
+                can_send_media_messages=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True
+            )
+        )
+    except Exception:
         pass
 
-    # Метод для потоковой передачи ответа
-    async def stream_response(self, *args, **kwargs):
-        # Возвращаем None
-        return None
 
-    # Метод для потоковой передачи контента
-    async def stream_content(self, *args, **kwargs):
-        # Возвращаем None
-        return None
+async def check_message_exists(userbot: Client, chat_id: int, message_id: int) -> bool:
+    """Check if message exists."""
+    try:
+        msg = await userbot.get_messages(chat_id, message_id)
+        return msg and msg.text is not None
+    except Exception:
+        return False
 
 
-# ============================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ СОЗДАНИЯ ТЕСТОВЫХ ДАННЫХ
-# ============================================================
+async def get_user_restrictions(bot: Bot, chat_id: int, user_id: int) -> dict:
+    """Get user restrictions in chat."""
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+        if hasattr(member, 'can_send_messages'):
+            return {
+                "is_restricted": member.can_send_messages is False,
+                "can_send_messages": member.can_send_messages
+            }
+        return {"is_restricted": False}
+    except Exception:
+        return {"is_restricted": False}
 
-def build_message_update_payload(
-    # ID чата
-    chat_id: int,
-    # ID пользователя отправителя
-    user_id: int,
-    # Текст сообщения
-    text: str,
-    # ID сообщения (по умолчанию 1)
-    message_id: int = 1,
-) -> dict:
-    """
-    Создать payload обычного текстового сообщения.
 
-    Args:
-        chat_id: ID чата
-        user_id: ID пользователя отправителя
-        text: Текст сообщения
-        message_id: ID сообщения
+async def enable_antispam_telegram_links(chat_id: int, action: str = "delete"):
+    """Enable antispam rule for Telegram links."""
+    from bot.database.session import get_session
+    from bot.database.models_antispam import AntiSpamRule, RuleType, ActionType
+    from sqlalchemy import select, delete
 
-    Returns:
-        Словарь с данными Update
-    """
-    # Получаем текущую временную метку
-    timestamp = int(datetime.now(timezone.utc).timestamp())
-    # Формируем и возвращаем payload
-    return {
-        "update_id": 1,
-        "message": {
-            "message_id": message_id,
-            "date": timestamp,
-            "chat": {"id": chat_id, "type": "supergroup", "title": "Test Group"},
-            "from": {
-                "id": user_id,
-                "is_bot": False,
-                "first_name": "TestUser",
-                "username": "testuser",
-            },
-            "text": text,
-        },
+    action_map = {
+        "warn": ActionType.WARN,
+        "delete": ActionType.WARN,  # delete with warn
+        "mute": ActionType.RESTRICT,
+        "ban": ActionType.BAN,
     }
 
+    async with get_session() as session:
+        # Remove existing rule
+        await session.execute(
+            delete(AntiSpamRule).where(
+                AntiSpamRule.chat_id == chat_id,
+                AntiSpamRule.rule_type == RuleType.TELEGRAM_LINK
+            )
+        )
+        # Create new rule
+        rule = AntiSpamRule(
+            chat_id=chat_id,
+            rule_type=RuleType.TELEGRAM_LINK,
+            action=action_map.get(action, ActionType.WARN),
+            enabled=True,
+            delete_message=True,
+            restrict_minutes=60 if action == "mute" else None
+        )
+        session.add(rule)
+        await session.commit()
 
-def build_forward_update_payload(
-    # ID чата назначения
-    chat_id: int,
-    # ID пользователя отправителя
-    user_id: int,
-    # Текст пересланного сообщения
-    text: str,
-    # Тип источника пересылки ("channel", "supergroup", "user", "bot")
-    source_type: str,
-    # ID источника пересылки
-    source_id: int,
-) -> dict:
-    """
-    Создать payload пересланного сообщения.
 
-    Args:
-        chat_id: ID чата назначения
-        user_id: ID пользователя который переслал
-        text: Текст пересланного сообщения
-        source_type: Тип источника пересылки
-        source_id: ID источника пересылки
+async def disable_antispam_telegram_links(chat_id: int):
+    """Disable antispam rule for Telegram links."""
+    from bot.database.session import get_session
+    from bot.database.models_antispam import AntiSpamRule, RuleType
+    from sqlalchemy import update
 
-    Returns:
-        Словарь с данными Update
-    """
-    # Получаем текущую временную метку
-    timestamp = int(datetime.now(timezone.utc).timestamp())
+    async with get_session() as session:
+        await session.execute(
+            update(AntiSpamRule).where(
+                AntiSpamRule.chat_id == chat_id,
+                AntiSpamRule.rule_type == RuleType.TELEGRAM_LINK
+            ).values(enabled=False)
+        )
+        await session.commit()
 
-    # Формируем forward_origin в зависимости от типа источника
-    forward_origin = {}
-    # Если источник - канал или группа
-    if source_type in ("channel", "supergroup", "group"):
-        # Формируем forward_origin для чата
-        forward_origin = {
-            "type": "chat",
-            "date": timestamp,
-            "chat": {
-                "id": source_id,
-                "type": source_type,
-                "title": f"Source {source_type}",
-            },
-        }
-    # Если источник - пользователь или бот
-    else:
-        # Формируем forward_origin для пользователя
-        forward_origin = {
-            "type": "user",
-            "date": timestamp,
-            "sender_user": {
-                "id": source_id,
-                "is_bot": source_type == "bot",
-                "first_name": "SourceUser",
-            },
-        }
 
-    # Формируем и возвращаем payload
-    return {
-        "update_id": 1,
-        "message": {
-            "message_id": 1,
-            "date": timestamp,
-            "chat": {"id": chat_id, "type": "supergroup", "title": "Test Group"},
-            "from": {
-                "id": user_id,
-                "is_bot": False,
-                "first_name": "TestUser",
-                "username": "testuser",
-            },
-            "text": text,
-            "forward_origin": forward_origin,
-        },
-    }
+async def add_to_whitelist(chat_id: int, pattern: str):
+    """Add pattern to whitelist."""
+    from bot.database.session import get_session
+    from bot.database.models_antispam import AntiSpamWhitelist, WhitelistScope
+
+    async with get_session() as session:
+        whitelist = AntiSpamWhitelist(
+            chat_id=chat_id,
+            scope=WhitelistScope.TELEGRAM_LINK,
+            pattern=pattern,
+            added_by=123456789
+        )
+        session.add(whitelist)
+        await session.commit()
+
+
+async def clear_whitelist(chat_id: int):
+    """Clear whitelist for chat."""
+    from bot.database.session import get_session
+    from bot.database.models_antispam import AntiSpamWhitelist
+    from sqlalchemy import delete
+
+    async with get_session() as session:
+        await session.execute(
+            delete(AntiSpamWhitelist).where(AntiSpamWhitelist.chat_id == chat_id)
+        )
+        await session.commit()
 
 
 # ============================================================
-# E2E ТЕСТЫ ДЛЯ АНТИСПАМ МОДУЛЯ
+# TEST CLASS: Telegram Link Detection
 # ============================================================
 
-@pytest.mark.asyncio
 @pytest.mark.e2e
-async def test_e2e_telegram_link_detected_and_blocked(db_session):
-    """
-    E2E тест: Telegram ссылка обнаружена и заблокирована.
+class TestAntispamTelegramLinks:
+    """E2E tests for Telegram link detection."""
 
-    Сценарий:
-    1. Создаем группу с правилом блокировки Telegram ссылок (WARN + удаление)
-    2. Отправляем сообщение с Telegram ссылкой
-    3. Проверяем что сообщение определено как спам
-    """
-    # ID чата для теста
-    chat_id = -1001234567001
-    # ID пользователя
-    user_id = 111111111
+    @pytest.mark.asyncio
+    async def test_telegram_link_detected_and_deleted(
+        self, admin_userbot: Client, victim_userbot: Client, bot: Bot,
+        chat_id: int, invite_link: str
+    ):
+        """
+        Test: Telegram link is detected and message is deleted.
 
-    # Создаем группу в БД
-    group = Group(chat_id=chat_id, title="E2E Test Group")
-    # Добавляем группу в сессию
-    db_session.add(group)
-    # Сохраняем изменения
-    await db_session.commit()
+        Scenario:
+        1. Enable antispam rule for Telegram links
+        2. Victim sends message with t.me link
+        3. Verify message is deleted by bot
+        """
+        victim = await victim_userbot.get_me()
 
-    # Создаем правило для Telegram ссылок
-    await upsert_rule(
-        db_session,
-        chat_id,
-        RuleType.TELEGRAM_LINK,
-        ActionType.WARN,
-        delete_message=True,
-        restrict_minutes=None,
-    )
-    # Сохраняем изменения
-    await db_session.commit()
+        await ensure_user_in_chat(admin_userbot, chat_id, invite_link=invite_link)
+        await ensure_user_in_chat(victim_userbot, chat_id, invite_link=invite_link)
+        await unmute_user(bot, chat_id, victim.id)
+        await asyncio.sleep(1)
 
-    # Создаем mock сообщения с Telegram ссылкой
-    message_mock = MagicMock(spec=Message)
-    # Устанавливаем атрибуты
-    message_mock.chat = MagicMock()
-    # Устанавливаем ID чата
-    message_mock.chat.id = chat_id
-    # Устанавливаем текст с Telegram ссылкой
-    message_mock.text = "Подписывайтесь на канал https://t.me/spam_channel_123"
-    # Устанавливаем caption в None
-    message_mock.caption = None
-    # Устанавливаем forward_origin в None (не пересылка)
-    message_mock.forward_origin = None
-    # Устанавливаем reply_to_message в None (не ответ)
-    message_mock.reply_to_message = None
+        # Enable antispam
+        await enable_antispam_telegram_links(chat_id, action="delete")
+        await asyncio.sleep(1)
 
-    # Проверяем сообщение через антиспам сервис
-    decision = await check_message_for_spam(message_mock, db_session)
+        try:
+            # Victim sends spam
+            spam_msg = await victim_userbot.send_message(
+                chat_id=chat_id,
+                text=f"Join our channel https://t.me/spam_channel_{datetime.now().strftime('%H%M%S')}"
+            )
+            msg_id = spam_msg.id
+            print(f"[SEND] Sent spam link (msg_id={msg_id})")
+            await asyncio.sleep(3)
 
-    # Проверяем что сообщение определено как спам
-    assert decision.is_spam is True
-    # Проверяем действие
-    assert decision.action == ActionType.WARN
-    # Проверяем что сообщение нужно удалить
-    assert decision.delete_message is True
-    # Проверяем тип сработавшего правила
-    assert decision.triggered_rule_type == RuleType.TELEGRAM_LINK
-    # Проверяем что причина содержит информацию о ссылке
-    assert "t.me" in decision.reason.lower()
+            # Verify message deleted
+            exists = await check_message_exists(victim_userbot, chat_id, msg_id)
+            assert not exists, "FAIL: Spam message with Telegram link was NOT deleted"
+            print(f"[OK] Spam message deleted by antispam")
+
+        finally:
+            await disable_antispam_telegram_links(chat_id)
+            await unmute_user(bot, chat_id, victim.id)
+
+    @pytest.mark.asyncio
+    async def test_telegram_link_whitelisted_allowed(
+        self, admin_userbot: Client, victim_userbot: Client, bot: Bot,
+        chat_id: int, invite_link: str
+    ):
+        """
+        Test: Whitelisted Telegram link is allowed.
+
+        Scenario:
+        1. Enable antispam rule for Telegram links
+        2. Add link pattern to whitelist
+        3. Victim sends message with whitelisted link
+        4. Verify message is NOT deleted
+        """
+        victim = await victim_userbot.get_me()
+
+        await ensure_user_in_chat(victim_userbot, chat_id, invite_link=invite_link)
+        await unmute_user(bot, chat_id, victim.id)
+        await asyncio.sleep(1)
+
+        # Enable antispam and add to whitelist
+        await enable_antispam_telegram_links(chat_id, action="delete")
+        await add_to_whitelist(chat_id, "t.me/allowed_channel")
+        await asyncio.sleep(1)
+
+        try:
+            # Victim sends whitelisted link
+            msg = await victim_userbot.send_message(
+                chat_id=chat_id,
+                text=f"Check our official https://t.me/allowed_channel"
+            )
+            msg_id = msg.id
+            print(f"[SEND] Sent whitelisted link (msg_id={msg_id})")
+            await asyncio.sleep(3)
+
+            # Verify message NOT deleted
+            exists = await check_message_exists(victim_userbot, chat_id, msg_id)
+            assert exists, "FAIL: Whitelisted link message was deleted (should be allowed)"
+            print(f"[OK] Whitelisted link allowed")
+
+            # Cleanup
+            await msg.delete()
+
+        finally:
+            await disable_antispam_telegram_links(chat_id)
+            await clear_whitelist(chat_id)
+            await unmute_user(bot, chat_id, victim.id)
+
+    @pytest.mark.asyncio
+    async def test_clean_text_allowed(
+        self, admin_userbot: Client, victim_userbot: Client, bot: Bot,
+        chat_id: int, invite_link: str
+    ):
+        """
+        Test: Clean text without links is allowed.
+
+        Scenario:
+        1. Enable antispam rule for Telegram links
+        2. Victim sends normal message without links
+        3. Verify message is NOT deleted
+        """
+        victim = await victim_userbot.get_me()
+
+        await ensure_user_in_chat(victim_userbot, chat_id, invite_link=invite_link)
+        await unmute_user(bot, chat_id, victim.id)
+        await asyncio.sleep(1)
+
+        # Enable antispam
+        await enable_antispam_telegram_links(chat_id, action="delete")
+        await asyncio.sleep(1)
+
+        try:
+            # Victim sends clean message
+            msg = await victim_userbot.send_message(
+                chat_id=chat_id,
+                text=f"Hello everyone! Great weather today! {datetime.now().strftime('%H:%M:%S')}"
+            )
+            msg_id = msg.id
+            print(f"[SEND] Sent clean message (msg_id={msg_id})")
+            await asyncio.sleep(3)
+
+            # Verify message NOT deleted
+            exists = await check_message_exists(victim_userbot, chat_id, msg_id)
+            assert exists, "FAIL: Clean message was deleted (false positive)"
+            print(f"[OK] Clean message allowed")
+
+            # Cleanup
+            await msg.delete()
+
+        finally:
+            await disable_antispam_telegram_links(chat_id)
+            await unmute_user(bot, chat_id, victim.id)
+
+    @pytest.mark.asyncio
+    async def test_rule_disabled_allows_links(
+        self, admin_userbot: Client, victim_userbot: Client, bot: Bot,
+        chat_id: int, invite_link: str
+    ):
+        """
+        Test: When rule is disabled, links are allowed.
+
+        Scenario:
+        1. Disable antispam rule
+        2. Victim sends message with Telegram link
+        3. Verify message is NOT deleted
+        """
+        victim = await victim_userbot.get_me()
+
+        await ensure_user_in_chat(victim_userbot, chat_id, invite_link=invite_link)
+        await unmute_user(bot, chat_id, victim.id)
+        await asyncio.sleep(1)
+
+        # Disable antispam
+        await disable_antispam_telegram_links(chat_id)
+        await asyncio.sleep(1)
+
+        try:
+            # Victim sends link
+            msg = await victim_userbot.send_message(
+                chat_id=chat_id,
+                text=f"Check https://t.me/some_channel_{datetime.now().strftime('%H%M%S')}"
+            )
+            msg_id = msg.id
+            print(f"[SEND] Sent link with rule disabled (msg_id={msg_id})")
+            await asyncio.sleep(3)
+
+            # Verify message NOT deleted (rule disabled)
+            exists = await check_message_exists(victim_userbot, chat_id, msg_id)
+            assert exists, "FAIL: Message deleted even with rule disabled"
+            print(f"[OK] Link allowed when rule disabled")
+
+            # Cleanup
+            await msg.delete()
+
+        finally:
+            await unmute_user(bot, chat_id, victim.id)
 
 
-@pytest.mark.asyncio
+# ============================================================
+# TEST CLASS: Mute Action
+# ============================================================
+
 @pytest.mark.e2e
-async def test_e2e_telegram_link_whitelisted_allowed(db_session):
-    """
-    E2E тест: Telegram ссылка из белого списка разрешена.
+class TestAntispamMuteAction:
+    """E2E tests for mute action."""
 
-    Сценарий:
-    1. Создаем группу с правилом блокировки Telegram ссылок
-    2. Добавляем ссылку в белый список
-    3. Отправляем сообщение с этой ссылкой
-    4. Проверяем что сообщение НЕ определено как спам
-    """
-    # ID чата для теста
-    chat_id = -1001234567002
-    # ID пользователя
-    user_id = 222222222
+    @pytest.mark.asyncio
+    async def test_telegram_link_triggers_mute(
+        self, admin_userbot: Client, victim_userbot: Client, bot: Bot,
+        chat_id: int, invite_link: str
+    ):
+        """
+        Test: Telegram link triggers mute action.
 
-    # Создаем группу в БД
-    group = Group(chat_id=chat_id, title="E2E Whitelist Test Group")
-    # Добавляем группу в сессию
-    db_session.add(group)
-    # Сохраняем изменения
-    await db_session.commit()
+        Scenario:
+        1. Enable antispam with mute action
+        2. Victim sends spam link
+        3. Verify victim is muted
+        """
+        victim = await victim_userbot.get_me()
 
-    # Создаем правило для Telegram ссылок (строгое - BAN)
-    await upsert_rule(
-        db_session,
-        chat_id,
-        RuleType.TELEGRAM_LINK,
-        ActionType.BAN,
-        delete_message=True,
-        restrict_minutes=None,
-    )
-    # Добавляем разрешенную ссылку в белый список
-    await add_whitelist_pattern(
-        db_session,
-        chat_id,
-        WhitelistScope.TELEGRAM_LINK,
-        "t.me/official_channel",
-        added_by=user_id,
-    )
-    # Сохраняем изменения
-    await db_session.commit()
+        await ensure_user_in_chat(victim_userbot, chat_id, invite_link=invite_link)
+        await unmute_user(bot, chat_id, victim.id)
+        await asyncio.sleep(1)
 
-    # Создаем mock сообщения с разрешенной Telegram ссылкой
-    message_mock = MagicMock(spec=Message)
-    # Устанавливаем атрибуты
-    message_mock.chat = MagicMock()
-    # Устанавливаем ID чата
-    message_mock.chat.id = chat_id
-    # Устанавливаем текст с разрешенной ссылкой
-    message_mock.text = "Наш канал: https://t.me/official_channel/news"
-    # Устанавливаем caption в None
-    message_mock.caption = None
-    # Устанавливаем forward_origin в None
-    message_mock.forward_origin = None
-    # Устанавливаем reply_to_message в None
-    message_mock.reply_to_message = None
+        # Enable antispam with mute
+        await enable_antispam_telegram_links(chat_id, action="mute")
+        await asyncio.sleep(1)
 
-    # Проверяем сообщение через антиспам сервис
-    decision = await check_message_for_spam(message_mock, db_session)
+        try:
+            # Victim sends spam
+            spam_msg = await victim_userbot.send_message(
+                chat_id=chat_id,
+                text=f"Join spam https://t.me/mute_test_{datetime.now().strftime('%H%M%S')}"
+            )
+            print(f"[SEND] Sent spam to trigger mute")
+            await asyncio.sleep(3)
 
-    # Проверяем что сообщение НЕ определено как спам (в белом списке)
-    assert decision.is_spam is False
-    # Проверяем что действие OFF
-    assert decision.action == ActionType.OFF
+            # Verify mute
+            restrictions = await get_user_restrictions(bot, chat_id, victim.id)
+            assert restrictions.get("is_restricted"), "FAIL: Victim was NOT muted for spam link"
+            print(f"[OK] Victim muted for spam link")
+
+        finally:
+            await disable_antispam_telegram_links(chat_id)
+            await unmute_user(bot, chat_id, victim.id)
 
 
-@pytest.mark.asyncio
+# ============================================================
+# TEST CLASS: External Links
+# ============================================================
+
 @pytest.mark.e2e
-async def test_e2e_forward_from_channel_blocked(db_session):
-    """
-    E2E тест: Пересылка из канала заблокирована.
+class TestAntispamExternalLinks:
+    """E2E tests for external link detection."""
 
-    Сценарий:
-    1. Создаем группу с правилом блокировки пересылок из каналов
-    2. Отправляем пересланное сообщение из канала
-    3. Проверяем что сообщение определено как спам
-    """
-    # ID чата для теста
-    chat_id = -1001234567003
-    # ID пользователя
-    user_id = 333333333
-    # ID канала-источника
-    source_channel_id = -1001999999999
+    @pytest.mark.asyncio
+    async def test_external_link_detected(
+        self, admin_userbot: Client, victim_userbot: Client, bot: Bot,
+        chat_id: int, invite_link: str
+    ):
+        """
+        Test: External links are detected.
 
-    # Создаем группу в БД
-    group = Group(chat_id=chat_id, title="E2E Forward Test Group")
-    # Добавляем группу в сессию
-    db_session.add(group)
-    # Сохраняем изменения
-    await db_session.commit()
+        Note: This test depends on having an "any link" rule configured.
+        """
+        victim = await victim_userbot.get_me()
 
-    # Создаем правило для пересылок из каналов (RESTRICT на 30 минут)
-    await upsert_rule(
-        db_session,
-        chat_id,
-        RuleType.FORWARD_CHANNEL,
-        ActionType.RESTRICT,
-        delete_message=True,
-        restrict_minutes=30,
-    )
-    # Сохраняем изменения
-    await db_session.commit()
+        await ensure_user_in_chat(victim_userbot, chat_id, invite_link=invite_link)
+        await unmute_user(bot, chat_id, victim.id)
+        await asyncio.sleep(1)
 
-    # Создаем mock сообщения с пересылкой из канала
-    message_mock = MagicMock(spec=Message)
-    # Устанавливаем атрибуты
-    message_mock.chat = MagicMock()
-    # Устанавливаем ID чата
-    message_mock.chat.id = chat_id
-    # Устанавливаем текст
-    message_mock.text = "Пересланное сообщение из спам-канала"
-    # Устанавливаем caption в None
-    message_mock.caption = None
-    # Создаем mock forward_origin для канала
-    forward_origin = MagicMock()
-    # Создаем mock чата источника
-    forward_origin.chat = MagicMock()
-    # Устанавливаем тип чата
-    forward_origin.chat.type = "channel"
-    # Устанавливаем ID чата источника
-    forward_origin.chat.id = source_channel_id
-    # Устанавливаем forward_origin
-    message_mock.forward_origin = forward_origin
-    # Устанавливаем reply_to_message в None
-    message_mock.reply_to_message = None
+        # Enable any link rule
+        from bot.database.session import get_session
+        from bot.database.models_antispam import AntiSpamRule, RuleType, ActionType
+        from sqlalchemy import delete
 
-    # Проверяем сообщение через антиспам сервис
-    decision = await check_message_for_spam(message_mock, db_session)
+        async with get_session() as session:
+            await session.execute(
+                delete(AntiSpamRule).where(
+                    AntiSpamRule.chat_id == chat_id,
+                    AntiSpamRule.rule_type == RuleType.ANY_LINK
+                )
+            )
+            rule = AntiSpamRule(
+                chat_id=chat_id,
+                rule_type=RuleType.ANY_LINK,
+                action=ActionType.WARN,
+                enabled=True,
+                delete_message=True
+            )
+            session.add(rule)
+            await session.commit()
 
-    # Проверяем что сообщение определено как спам
-    assert decision.is_spam is True
-    # Проверяем действие
-    assert decision.action == ActionType.RESTRICT
-    # Проверяем что сообщение нужно удалить
-    assert decision.delete_message is True
-    # Проверяем длительность ограничения
-    assert decision.restrict_minutes == 30
-    # Проверяем тип сработавшего правила
-    assert decision.triggered_rule_type == RuleType.FORWARD_CHANNEL
+        await asyncio.sleep(1)
 
+        try:
+            # Victim sends external link
+            spam_msg = await victim_userbot.send_message(
+                chat_id=chat_id,
+                text=f"Check out https://spam-site.com/offer_{datetime.now().strftime('%H%M%S')}"
+            )
+            msg_id = spam_msg.id
+            print(f"[SEND] Sent external link (msg_id={msg_id})")
+            await asyncio.sleep(3)
 
-@pytest.mark.asyncio
-@pytest.mark.e2e
-async def test_e2e_any_link_blocked(db_session):
-    """
-    E2E тест: Любая ссылка заблокирована.
+            # Verify message deleted
+            exists = await check_message_exists(victim_userbot, chat_id, msg_id)
+            assert not exists, "FAIL: External link was NOT deleted"
+            print(f"[OK] External link deleted by antispam")
 
-    Сценарий:
-    1. Создаем группу с правилом блокировки всех ссылок
-    2. Отправляем сообщение с обычной HTTP ссылкой
-    3. Проверяем что сообщение определено как спам
-    """
-    # ID чата для теста
-    chat_id = -1001234567004
-    # ID пользователя
-    user_id = 444444444
-
-    # Создаем группу в БД
-    group = Group(chat_id=chat_id, title="E2E Any Link Test Group")
-    # Добавляем группу в сессию
-    db_session.add(group)
-    # Сохраняем изменения
-    await db_session.commit()
-
-    # Создаем правило для любых ссылок (KICK)
-    await upsert_rule(
-        db_session,
-        chat_id,
-        RuleType.ANY_LINK,
-        ActionType.KICK,
-        delete_message=True,
-        restrict_minutes=None,
-    )
-    # Сохраняем изменения
-    await db_session.commit()
-
-    # Создаем mock сообщения с обычной ссылкой
-    message_mock = MagicMock(spec=Message)
-    # Устанавливаем атрибуты
-    message_mock.chat = MagicMock()
-    # Устанавливаем ID чата
-    message_mock.chat.id = chat_id
-    # Устанавливаем текст с обычной ссылкой
-    message_mock.text = "Смотрите здесь: https://spam-site.com/malware"
-    # Устанавливаем caption в None
-    message_mock.caption = None
-    # Устанавливаем forward_origin в None
-    message_mock.forward_origin = None
-    # Устанавливаем reply_to_message в None
-    message_mock.reply_to_message = None
-
-    # Проверяем сообщение через антиспам сервис
-    decision = await check_message_for_spam(message_mock, db_session)
-
-    # Проверяем что сообщение определено как спам
-    assert decision.is_spam is True
-    # Проверяем действие
-    assert decision.action == ActionType.KICK
-    # Проверяем тип сработавшего правила
-    assert decision.triggered_rule_type == RuleType.ANY_LINK
+        finally:
+            # Disable rule
+            async with get_session() as session:
+                from sqlalchemy import update
+                await session.execute(
+                    update(AntiSpamRule).where(
+                        AntiSpamRule.chat_id == chat_id,
+                        AntiSpamRule.rule_type == RuleType.ANY_LINK
+                    ).values(enabled=False)
+                )
+                await session.commit()
+            await unmute_user(bot, chat_id, victim.id)
 
 
-@pytest.mark.asyncio
-@pytest.mark.e2e
-async def test_e2e_multiple_rules_telegram_priority(db_session):
-    """
-    E2E тест: При наличии нескольких правил Telegram ссылки имеют приоритет.
+# ============================================================
+# Run tests
+# ============================================================
 
-    Сценарий:
-    1. Создаем группу с правилами для Telegram ссылок и любых ссылок
-    2. Отправляем сообщение с Telegram ссылкой
-    3. Проверяем что сработало правило для Telegram ссылок (не ANY_LINK)
-    """
-    # ID чата для теста
-    chat_id = -1001234567005
-    # ID пользователя
-    user_id = 555555555
-
-    # Создаем группу в БД
-    group = Group(chat_id=chat_id, title="E2E Priority Test Group")
-    # Добавляем группу в сессию
-    db_session.add(group)
-    # Сохраняем изменения
-    await db_session.commit()
-
-    # Создаем правило для любых ссылок (KICK - менее строгое)
-    await upsert_rule(
-        db_session,
-        chat_id,
-        RuleType.ANY_LINK,
-        ActionType.KICK,
-        delete_message=False,
-        restrict_minutes=None,
-    )
-    # Создаем правило для Telegram ссылок (BAN - более строгое)
-    await upsert_rule(
-        db_session,
-        chat_id,
-        RuleType.TELEGRAM_LINK,
-        ActionType.BAN,
-        delete_message=True,
-        restrict_minutes=None,
-    )
-    # Сохраняем изменения
-    await db_session.commit()
-
-    # Создаем mock сообщения с Telegram ссылкой
-    message_mock = MagicMock(spec=Message)
-    # Устанавливаем атрибуты
-    message_mock.chat = MagicMock()
-    # Устанавливаем ID чата
-    message_mock.chat.id = chat_id
-    # Устанавливаем текст с Telegram ссылкой
-    message_mock.text = "Переходи на https://t.me/spam_channel"
-    # Устанавливаем caption в None
-    message_mock.caption = None
-    # Устанавливаем forward_origin в None
-    message_mock.forward_origin = None
-    # Устанавливаем reply_to_message в None
-    message_mock.reply_to_message = None
-
-    # Проверяем сообщение через антиспам сервис
-    decision = await check_message_for_spam(message_mock, db_session)
-
-    # Проверяем что сообщение определено как спам
-    assert decision.is_spam is True
-    # Проверяем что сработало правило для Telegram ссылок (BAN, не KICK)
-    assert decision.action == ActionType.BAN
-    # Проверяем что тип правила - TELEGRAM_LINK (не ANY_LINK)
-    assert decision.triggered_rule_type == RuleType.TELEGRAM_LINK
-    # Проверяем что delete_message из правила TELEGRAM_LINK
-    assert decision.delete_message is True
-
-
-@pytest.mark.asyncio
-@pytest.mark.e2e
-async def test_e2e_rule_off_allows_message(db_session):
-    """
-    E2E тест: Выключенное правило пропускает сообщение.
-
-    Сценарий:
-    1. Создаем группу с выключенным правилом для Telegram ссылок
-    2. Отправляем сообщение с Telegram ссылкой
-    3. Проверяем что сообщение НЕ определено как спам
-    """
-    # ID чата для теста
-    chat_id = -1001234567006
-    # ID пользователя
-    user_id = 666666666
-
-    # Создаем группу в БД
-    group = Group(chat_id=chat_id, title="E2E Rule Off Test Group")
-    # Добавляем группу в сессию
-    db_session.add(group)
-    # Сохраняем изменения
-    await db_session.commit()
-
-    # Создаем правило для Telegram ссылок с действием OFF
-    await upsert_rule(
-        db_session,
-        chat_id,
-        RuleType.TELEGRAM_LINK,
-        ActionType.OFF,
-        delete_message=False,
-        restrict_minutes=None,
-    )
-    # Сохраняем изменения
-    await db_session.commit()
-
-    # Создаем mock сообщения с Telegram ссылкой
-    message_mock = MagicMock(spec=Message)
-    # Устанавливаем атрибуты
-    message_mock.chat = MagicMock()
-    # Устанавливаем ID чата
-    message_mock.chat.id = chat_id
-    # Устанавливаем текст с Telegram ссылкой
-    message_mock.text = "Наш канал https://t.me/some_channel"
-    # Устанавливаем caption в None
-    message_mock.caption = None
-    # Устанавливаем forward_origin в None
-    message_mock.forward_origin = None
-    # Устанавливаем reply_to_message в None
-    message_mock.reply_to_message = None
-
-    # Проверяем сообщение через антиспам сервис
-    decision = await check_message_for_spam(message_mock, db_session)
-
-    # Проверяем что сообщение НЕ определено как спам (правило OFF)
-    assert decision.is_spam is False
-    # Проверяем что действие OFF
-    assert decision.action == ActionType.OFF
-
-
-@pytest.mark.asyncio
-@pytest.mark.e2e
-async def test_e2e_clean_text_allowed(db_session):
-    """
-    E2E тест: Чистый текст без ссылок проходит проверку.
-
-    Сценарий:
-    1. Создаем группу со всеми активными правилами
-    2. Отправляем обычное текстовое сообщение без ссылок
-    3. Проверяем что сообщение НЕ определено как спам
-    """
-    # ID чата для теста
-    chat_id = -1001234567007
-    # ID пользователя
-    user_id = 777777777
-
-    # Создаем группу в БД
-    group = Group(chat_id=chat_id, title="E2E Clean Text Test Group")
-    # Добавляем группу в сессию
-    db_session.add(group)
-    # Сохраняем изменения
-    await db_session.commit()
-
-    # Создаем все активные правила
-    await upsert_rule(
-        db_session, chat_id, RuleType.TELEGRAM_LINK, ActionType.BAN, True, None
-    )
-    # Правило для любых ссылок
-    await upsert_rule(
-        db_session, chat_id, RuleType.ANY_LINK, ActionType.BAN, True, None
-    )
-    # Правило для пересылок из каналов
-    await upsert_rule(
-        db_session, chat_id, RuleType.FORWARD_CHANNEL, ActionType.BAN, True, None
-    )
-    # Сохраняем изменения
-    await db_session.commit()
-
-    # Создаем mock сообщения без ссылок
-    message_mock = MagicMock(spec=Message)
-    # Устанавливаем атрибуты
-    message_mock.chat = MagicMock()
-    # Устанавливаем ID чата
-    message_mock.chat.id = chat_id
-    # Устанавливаем обычный текст без ссылок
-    message_mock.text = "Привет! Как дела? Отличная погода сегодня!"
-    # Устанавливаем caption в None
-    message_mock.caption = None
-    # Устанавливаем forward_origin в None (не пересылка)
-    message_mock.forward_origin = None
-    # Устанавливаем reply_to_message в None (не ответ)
-    message_mock.reply_to_message = None
-
-    # Проверяем сообщение через антиспам сервис
-    decision = await check_message_for_spam(message_mock, db_session)
-
-    # Проверяем что сообщение НЕ определено как спам
-    assert decision.is_spam is False
-    # Проверяем что действие OFF
-    assert decision.action == ActionType.OFF
-    # Проверяем что нет сработавшего правила
-    assert decision.triggered_rule_type is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.e2e
-async def test_e2e_forward_from_bot_blocked(db_session):
-    """
-    E2E тест: Пересылка от бота заблокирована.
-
-    Сценарий:
-    1. Создаем группу с правилом блокировки пересылок от ботов
-    2. Отправляем пересланное сообщение от бота
-    3. Проверяем что сообщение определено как спам
-    """
-    # ID чата для теста
-    chat_id = -1001234567008
-    # ID пользователя
-    user_id = 888888888
-    # ID бота-источника
-    source_bot_id = 123456789
-
-    # Создаем группу в БД
-    group = Group(chat_id=chat_id, title="E2E Forward Bot Test Group")
-    # Добавляем группу в сессию
-    db_session.add(group)
-    # Сохраняем изменения
-    await db_session.commit()
-
-    # Создаем правило для пересылок от ботов
-    await upsert_rule(
-        db_session,
-        chat_id,
-        RuleType.FORWARD_BOT,
-        ActionType.WARN,
-        delete_message=True,
-        restrict_minutes=None,
-    )
-    # Сохраняем изменения
-    await db_session.commit()
-
-    # Создаем mock сообщения с пересылкой от бота
-    message_mock = MagicMock(spec=Message)
-    # Устанавливаем атрибуты
-    message_mock.chat = MagicMock()
-    # Устанавливаем ID чата
-    message_mock.chat.id = chat_id
-    # Устанавливаем текст
-    message_mock.text = "Сообщение от бота"
-    # Устанавливаем caption в None
-    message_mock.caption = None
-    # Создаем mock forward_origin для бота
-    forward_origin = MagicMock()
-    # Удаляем атрибут chat (это пересылка от пользователя/бота)
-    del forward_origin.chat
-    # Создаем mock sender_user
-    forward_origin.sender_user = MagicMock()
-    # Устанавливаем is_bot в True
-    forward_origin.sender_user.is_bot = True
-    # Устанавливаем ID бота
-    forward_origin.sender_user.id = source_bot_id
-    # Устанавливаем forward_origin
-    message_mock.forward_origin = forward_origin
-    # Устанавливаем reply_to_message в None
-    message_mock.reply_to_message = None
-
-    # Проверяем сообщение через антиспам сервис
-    decision = await check_message_for_spam(message_mock, db_session)
-
-    # Проверяем что сообщение определено как спам
-    assert decision.is_spam is True
-    # Проверяем действие
-    assert decision.action == ActionType.WARN
-    # Проверяем тип сработавшего правила
-    assert decision.triggered_rule_type == RuleType.FORWARD_BOT
-
-
-@pytest.mark.asyncio
-@pytest.mark.e2e
-async def test_e2e_restrict_with_duration(db_session):
-    """
-    E2E тест: RESTRICT с указанной длительностью.
-
-    Сценарий:
-    1. Создаем группу с правилом RESTRICT на 60 минут
-    2. Отправляем запрещенное сообщение
-    3. Проверяем что действие RESTRICT и длительность 60 минут
-    """
-    # ID чата для теста
-    chat_id = -1001234567009
-    # ID пользователя
-    user_id = 999999999
-
-    # Создаем группу в БД
-    group = Group(chat_id=chat_id, title="E2E Restrict Duration Test Group")
-    # Добавляем группу в сессию
-    db_session.add(group)
-    # Сохраняем изменения
-    await db_session.commit()
-
-    # Создаем правило с RESTRICT на 60 минут
-    await upsert_rule(
-        db_session,
-        chat_id,
-        RuleType.TELEGRAM_LINK,
-        ActionType.RESTRICT,
-        delete_message=True,
-        restrict_minutes=60,
-    )
-    # Сохраняем изменения
-    await db_session.commit()
-
-    # Создаем mock сообщения с Telegram ссылкой
-    message_mock = MagicMock(spec=Message)
-    # Устанавливаем атрибуты
-    message_mock.chat = MagicMock()
-    # Устанавливаем ID чата
-    message_mock.chat.id = chat_id
-    # Устанавливаем текст с Telegram ссылкой
-    message_mock.text = "Реклама https://t.me/ad_channel"
-    # Устанавливаем caption в None
-    message_mock.caption = None
-    # Устанавливаем forward_origin в None
-    message_mock.forward_origin = None
-    # Устанавливаем reply_to_message в None
-    message_mock.reply_to_message = None
-
-    # Проверяем сообщение через антиспам сервис
-    decision = await check_message_for_spam(message_mock, db_session)
-
-    # Проверяем что сообщение определено как спам
-    assert decision.is_spam is True
-    # Проверяем действие
-    assert decision.action == ActionType.RESTRICT
-    # Проверяем длительность ограничения
-    assert decision.restrict_minutes == 60
-    # Проверяем что сообщение нужно удалить
-    assert decision.delete_message is True
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "-s"])
