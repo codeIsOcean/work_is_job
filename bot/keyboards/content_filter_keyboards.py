@@ -432,7 +432,9 @@ def create_category_action_menu(
     chat_id: int,
     category: str,
     current_action: str = None,
-    current_duration: int = None
+    current_duration: int = None,
+    mute_text: str = None,
+    notification_delay: int = None
 ) -> InlineKeyboardMarkup:
     """
     Создаёт меню выбора действия для категории слов.
@@ -441,12 +443,16 @@ def create_category_action_menu(
     - Удалить (+ опциональная задержка)
     - Мут (+ ручной ввод времени)
     - Бан (+ ручной ввод времени)
+    - Кастомный текст мута (%user%, %time%)
+    - Задержка удаления уведомления
 
     Args:
         chat_id: ID группы
         category: Категория (sw=simple, hw=harmful, ow=obfuscated)
         current_action: Текущее действие
         current_duration: Текущая длительность (в минутах)
+        mute_text: Кастомный текст мута или None
+        notification_delay: Задержка удаления уведомления в секундах или None
 
     Returns:
         InlineKeyboardMarkup: Клавиатура выбора действия
@@ -501,6 +507,24 @@ def create_category_action_menu(
                 InlineKeyboardButton(
                     text="⏱️",
                     callback_data=f"cf:{category}bt:{chat_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Кастомный текст мута
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text=f"📝 Текст мута: {'✅' if mute_text else '❌'}",
+                    callback_data=f"cf:{category}mt:{chat_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # Задержка удаления уведомления
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text=f"⏰ Удалять уведомление: {f'{notification_delay}с' if notification_delay else 'Нет'}",
+                    callback_data=f"cf:{category}nd:{chat_id}"
                 )
             ],
             # ─────────────────────────────────────────────────────
@@ -1079,7 +1103,8 @@ def create_word_filter_action_menu(
 
 def create_flood_action_menu(
     chat_id: int,
-    current_action: str = None
+    current_action: str = None,
+    mute_duration: int = None
 ) -> InlineKeyboardMarkup:
     """
     Создаёт меню выбора действия для антифлуда.
@@ -1087,57 +1112,163 @@ def create_flood_action_menu(
     Args:
         chat_id: ID группы
         current_action: Текущее действие (None = использовать общее)
+        mute_duration: Длительность мута в минутах (для отображения)
 
     Returns:
         InlineKeyboardMarkup: Клавиатура выбора действия
     """
-    # Определяем галочки
+    # Определяем галочки для каждого действия
     delete_check = " ✓" if current_action == 'delete' or current_action is None else ""
     warn_check = " ✓" if current_action == 'warn' else ""
     mute_check = " ✓" if current_action == 'mute' else ""
     ban_check = " ✓" if current_action == 'ban' else ""
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            # Только удалить (по умолчанию)
-            [
-                InlineKeyboardButton(
-                    text=f"🗑️ Только удалить{delete_check}",
-                    callback_data=f"cf:fact:delete:{chat_id}"
-                )
-            ],
-            # Предупреждение
-            [
-                InlineKeyboardButton(
-                    text=f"⚠️ Удалить + Предупреждение{warn_check}",
-                    callback_data=f"cf:fact:warn:{chat_id}"
-                )
-            ],
-            # Мут (с ручным вводом времени)
-            [
-                InlineKeyboardButton(
-                    text=f"🔇 Удалить + Мут{mute_check}",
-                    callback_data=f"cf:fact:mute:{chat_id}"
-                )
-            ],
-            # Бан
-            [
-                InlineKeyboardButton(
-                    text=f"🚫 Удалить + Бан{ban_check}",
-                    callback_data=f"cf:fact:ban:{chat_id}"
-                )
-            ],
-            # Назад к меню "Дополнительно" антифлуда
-            [
-                InlineKeyboardButton(
-                    text=f"{EMOJI_BACK} Назад",
-                    callback_data=f"cf:fladv:{chat_id}"
-                )
-            ]
-        ]
-    )
+    # Формируем список кнопок
+    buttons = [
+        # Только удалить (по умолчанию)
+        [
+            InlineKeyboardButton(
+                text=f"🗑️ Только удалить{delete_check}",
+                callback_data=f"cf:fact:delete:{chat_id}"
+            )
+        ],
+        # Предупреждение
+        [
+            InlineKeyboardButton(
+                text=f"⚠️ Удалить + Предупреждение{warn_check}",
+                callback_data=f"cf:fact:warn:{chat_id}"
+            )
+        ],
+        # Мут (с ручным вводом времени)
+        [
+            InlineKeyboardButton(
+                text=f"🔇 Удалить + Мут{mute_check}",
+                callback_data=f"cf:fact:mute:{chat_id}"
+            )
+        ],
+    ]
+
+    # Если выбран мут - показываем кнопку настройки времени
+    if current_action == 'mute':
+        # Форматируем текущее время мута для отображения
+        if mute_duration:
+            # Переводим минуты в читаемый формат
+            if mute_duration >= 1440:
+                # 24 часа и более - показываем в днях/часах
+                days = mute_duration // 1440
+                hours = (mute_duration % 1440) // 60
+                if days > 0 and hours > 0:
+                    duration_text = f"{days}д {hours}ч"
+                elif days > 0:
+                    duration_text = f"{days}д"
+                else:
+                    duration_text = f"{hours}ч"
+            elif mute_duration >= 60:
+                # Часы
+                hours = mute_duration // 60
+                mins = mute_duration % 60
+                if mins > 0:
+                    duration_text = f"{hours}ч {mins}мин"
+                else:
+                    duration_text = f"{hours}ч"
+            else:
+                # Минуты
+                duration_text = f"{mute_duration}мин"
+        else:
+            # Время не задано - используется общее
+            duration_text = "24ч (по умолчанию)"
+
+        # Кнопка настройки времени мута
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"⏱️ Время мута: {duration_text}",
+                callback_data=f"cf:fldur:{chat_id}"
+            )
+        ])
+
+    # Бан
+    buttons.append([
+        InlineKeyboardButton(
+            text=f"🚫 Удалить + Бан{ban_check}",
+            callback_data=f"cf:fact:ban:{chat_id}"
+        )
+    ])
+
+    # Назад к меню "Дополнительно" антифлуда
+    buttons.append([
+        InlineKeyboardButton(
+            text=f"{EMOJI_BACK} Назад",
+            callback_data=f"cf:fladv:{chat_id}"
+        )
+    ])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
 
     return keyboard
+
+
+# ============================================================
+# МЕНЮ ВЫБОРА ВРЕМЕНИ МУТА ДЛЯ АНТИФЛУДА
+# ============================================================
+
+def create_flood_mute_duration_menu(
+    chat_id: int,
+    current_duration: int = None
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню выбора времени мута для антифлуда.
+
+    Args:
+        chat_id: ID группы
+        current_duration: Текущая длительность в минутах (для галочки)
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура выбора времени
+    """
+    # Варианты времени: значение в минутах -> текст для кнопки
+    duration_options = [
+        (10, "10 мин"),
+        (30, "30 мин"),
+        (60, "1 час"),
+        (180, "3 часа"),
+        (360, "6 часов"),
+        (720, "12 часов"),
+        (1440, "24 часа"),
+        (4320, "3 дня"),
+        (10080, "7 дней"),
+    ]
+
+    # Формируем кнопки по 3 в ряд
+    buttons = []
+    row = []
+
+    for duration_min, duration_text in duration_options:
+        # Добавляем галочку если это текущее значение
+        check = " ✓" if current_duration == duration_min else ""
+
+        row.append(InlineKeyboardButton(
+            text=f"{duration_text}{check}",
+            callback_data=f"cf:fldur:{duration_min}:{chat_id}"
+        ))
+
+        # По 3 кнопки в ряд
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+
+    # Добавляем оставшиеся кнопки
+    if row:
+        buttons.append(row)
+
+    # Кнопка назад к меню действий
+    buttons.append([
+        InlineKeyboardButton(
+            text=f"{EMOJI_BACK} Назад",
+            callback_data=f"cf:fact:{chat_id}"
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 # ============================================================

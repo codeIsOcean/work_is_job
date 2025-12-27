@@ -670,14 +670,519 @@ async def delete_all_category_words(
 
 
 # ============================================================
-# РАСШИРЕННЫЕ НАСТРОЙКИ КАТЕГОРИИ (PLACEHOLDER)
+# КАСТОМНЫЙ ТЕКСТ МУТА ДЛЯ КАТЕГОРИИ
 # ============================================================
-# TODO: Дополнить хендлерами для:
-# - category_advanced_menu
-# - request_mute_text_input / process_mute_text_input
-# - request_ban_text_input / process_ban_text_input
-# - request_delete_delay_input / process_delete_delay_input
-# - request_notification_delay_input / process_notification_delay_input
-#
-# Эти хендлеры будут добавлены в следующей итерации рефакторинга.
+
+# Маппинг категории на поле в БД
+MUTE_TEXT_FIELD_MAP = {
+    'sw': 'simple_words_mute_text',
+    'hw': 'harmful_words_mute_text',
+    'ow': 'obfuscated_words_mute_text'
+}
+
+NOTIFICATION_DELAY_FIELD_MAP = {
+    'sw': 'simple_words_notification_delete_delay',
+    'hw': 'harmful_words_notification_delete_delay',
+    'ow': 'obfuscated_words_notification_delete_delay'
+}
+
+
+@categories_router.callback_query(F.data.regexp(r"^cf:(sw|hw|ow)mt:-?\d+$"))
+async def request_mute_text_input(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает меню для ввода кастомного текста мута.
+
+    Callback: cf:{category}mt:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        state: FSMContext
+        session: Сессия БД
+    """
+    # Парсим данные
+    parts = callback.data.split(":")
+    category = parts[1][:2]  # sw, hw, ow
+    chat_id = int(parts[2])
+
+    category_name = CATEGORY_NAMES.get(category, 'Слова')
+
+    # Получаем текущий текст
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+    current_text = getattr(settings, MUTE_TEXT_FIELD_MAP[category], None)
+
+    # Сохраняем в FSM
+    await state.update_data(
+        chat_id=chat_id,
+        category=category,
+        instruction_message_id=callback.message.message_id
+    )
+    await state.set_state(CategoryTextStates.waiting_for_mute_text)
+
+    text = (
+        f"📝 <b>Текст мута: {category_name}</b>\n\n"
+        f"Отправьте текст уведомления при муте.\n\n"
+        f"<b>Плейсхолдеры:</b>\n"
+        f"• <code>%user%</code> — упоминание пользователя\n"
+        f"• <code>%time%</code> — время мута (например, 1ч)\n\n"
+        f"<b>Пример:</b>\n"
+        f"<i>%user%, вы получили мут на %time% за нарушение правил.</i>\n\n"
+    )
+    if current_text:
+        text += f"<b>Текущий текст:</b>\n<i>{current_text[:200]}</i>"
+    else:
+        text += "<b>Текущий текст:</b> <i>не задан (стандартный)</i>"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="🗑️ Сбросить",
+                callback_data=f"cf:{category}mtc:{chat_id}"
+            )
+        ],
+        [InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"cf:{category}a:{chat_id}"
+        )]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@categories_router.message(CategoryTextStates.waiting_for_mute_text)
+async def process_mute_text_input(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ввод кастомного текста мута.
+
+    Args:
+        message: Сообщение с текстом
+        state: FSMContext
+        session: Сессия БД
+    """
+    # Получаем данные из FSM
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    category = data.get('category')
+    instruction_message_id = data.get('instruction_message_id')
+
+    if not chat_id or not category:
+        await message.answer("❌ Ошибка: не найдены данные.")
+        await state.clear()
+        return
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    # Получаем текст и ограничиваем 500 символов
+    mute_text = message.text.strip()[:500]
+
+    # Сохраняем в БД
+    field_name = MUTE_TEXT_FIELD_MAP[category]
+    await filter_manager.update_settings(chat_id, session, **{field_name: mute_text})
+
+    await state.clear()
+
+    category_name = CATEGORY_NAMES.get(category, 'Слова')
+    logger.info(f"[ContentFilter] Установлен текст мута для {category}: chat={chat_id}")
+
+    # Возвращаемся в меню действия категории
+    # Используем callback simulation
+    from bot.keyboards.content_filter_keyboards import create_category_action_menu
+
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+
+    action_field_map = {'sw': 'simple_words_action', 'hw': 'harmful_words_action', 'ow': 'obfuscated_words_action'}
+    duration_field_map = {'sw': 'simple_words_mute_duration', 'hw': 'harmful_words_mute_duration', 'ow': 'obfuscated_words_mute_duration'}
+
+    current_action = getattr(settings, action_field_map[category], 'delete')
+    current_duration = getattr(settings, duration_field_map[category], None)
+    notification_delay = getattr(settings, NOTIFICATION_DELAY_FIELD_MAP[category], None)
+
+    text = (
+        f"✅ Текст мута сохранён!\n\n"
+        f"⚡ <b>Действие: {category_name}</b>\n\n"
+        f"Выберите действие при срабатывании:\n"
+        f"• 🗑️ Удалить — только удалить сообщение\n"
+        f"• 🔇 Мут — удалить + мут на время\n"
+        f"• 🚫 Бан — удалить + бан"
+    )
+
+    keyboard = create_category_action_menu(
+        chat_id, category, current_action, current_duration,
+        mute_text, notification_delay
+    )
+
+    try:
+        await message.bot.edit_message_text(
+            text=text,
+            chat_id=message.chat.id,
+            message_id=instruction_message_id,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    except TelegramAPIError:
+        await message.answer("✅ Текст мута сохранён!")
+
+
+@categories_router.callback_query(F.data.regexp(r"^cf:(sw|hw|ow)mtc:-?\d+$"))
+async def clear_mute_text(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Сбрасывает кастомный текст мута.
+
+    Callback: cf:{category}mtc:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        state: FSMContext
+        session: Сессия БД
+    """
+    await state.clear()
+
+    # Парсим данные
+    parts = callback.data.split(":")
+    category = parts[1][:2]  # sw, hw, ow
+    chat_id = int(parts[2])
+
+    # Сбрасываем в БД
+    field_name = MUTE_TEXT_FIELD_MAP[category]
+    await filter_manager.update_settings(chat_id, session, **{field_name: None})
+
+    category_name = CATEGORY_NAMES.get(category, 'Слова')
+    logger.info(f"[ContentFilter] Сброшен текст мута для {category}: chat={chat_id}")
+
+    # Возвращаемся в меню действия категории
+    from bot.keyboards.content_filter_keyboards import create_category_action_menu
+
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+
+    action_field_map = {'sw': 'simple_words_action', 'hw': 'harmful_words_action', 'ow': 'obfuscated_words_action'}
+    duration_field_map = {'sw': 'simple_words_mute_duration', 'hw': 'harmful_words_mute_duration', 'ow': 'obfuscated_words_mute_duration'}
+
+    current_action = getattr(settings, action_field_map[category], 'delete')
+    current_duration = getattr(settings, duration_field_map[category], None)
+    notification_delay = getattr(settings, NOTIFICATION_DELAY_FIELD_MAP[category], None)
+
+    text = (
+        f"🗑️ Текст мута сброшен!\n\n"
+        f"⚡ <b>Действие: {category_name}</b>\n\n"
+        f"Выберите действие при срабатывании:\n"
+        f"• 🗑️ Удалить — только удалить сообщение\n"
+        f"• 🔇 Мут — удалить + мут на время\n"
+        f"• 🚫 Бан — удалить + бан"
+    )
+
+    keyboard = create_category_action_menu(
+        chat_id, category, current_action, current_duration,
+        None, notification_delay
+    )
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer("Текст мута сброшен")
+
+
 # ============================================================
+# ЗАДЕРЖКА УДАЛЕНИЯ УВЕДОМЛЕНИЯ ДЛЯ КАТЕГОРИИ
+# ============================================================
+
+@categories_router.callback_query(F.data.regexp(r"^cf:(sw|hw|ow)nd:-?\d+$"))
+async def request_notification_delay_input(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает меню для ввода задержки удаления уведомления.
+
+    Callback: cf:{category}nd:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        state: FSMContext
+        session: Сессия БД
+    """
+    # Парсим данные
+    parts = callback.data.split(":")
+    category = parts[1][:2]  # sw, hw, ow
+    chat_id = int(parts[2])
+
+    category_name = CATEGORY_NAMES.get(category, 'Слова')
+
+    # Получаем текущую задержку
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+    current_delay = getattr(settings, NOTIFICATION_DELAY_FIELD_MAP[category], None)
+
+    # Сохраняем в FSM
+    await state.update_data(
+        chat_id=chat_id,
+        category=category,
+        instruction_message_id=callback.message.message_id
+    )
+    await state.set_state(CategoryDelayStates.waiting_for_notification_delay)
+
+    delay_text = f"{current_delay}с" if current_delay else "не удаляется"
+
+    text = (
+        f"⏰ <b>Удаление уведомления: {category_name}</b>\n\n"
+        f"Через сколько секунд удалять уведомление бота после мута?\n\n"
+        f"Выберите кнопку или <b>отправьте своё значение</b>.\n\n"
+        f"<b>Форматы:</b>\n"
+        f"• <code>30</code> или <code>30s</code> — 30 секунд\n"
+        f"• <code>5min</code> — 5 минут\n"
+        f"• <code>1h</code> — 1 час\n\n"
+        f"<b>Текущее:</b> {delay_text}"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="30с", callback_data=f"cf:{category}nds:30:{chat_id}"),
+            InlineKeyboardButton(text="1мин", callback_data=f"cf:{category}nds:60:{chat_id}"),
+            InlineKeyboardButton(text="5мин", callback_data=f"cf:{category}nds:300:{chat_id}")
+        ],
+        [
+            InlineKeyboardButton(
+                text="🗑️ Не удалять",
+                callback_data=f"cf:{category}ndc:{chat_id}"
+            )
+        ],
+        [InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"cf:{category}a:{chat_id}"
+        )]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@categories_router.callback_query(F.data.regexp(r"^cf:(sw|hw|ow)nds:\d+:-?\d+$"))
+async def set_notification_delay_quick(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Быстрая установка задержки удаления уведомления.
+
+    Callback: cf:{category}nds:{seconds}:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        state: FSMContext
+        session: Сессия БД
+    """
+    await state.clear()
+
+    # Парсим данные
+    parts = callback.data.split(":")
+    category = parts[1][:2]  # sw, hw, ow
+    delay_seconds = int(parts[2])
+    chat_id = int(parts[3])
+
+    # Сохраняем в БД
+    field_name = NOTIFICATION_DELAY_FIELD_MAP[category]
+    await filter_manager.update_settings(chat_id, session, **{field_name: delay_seconds})
+
+    category_name = CATEGORY_NAMES.get(category, 'Слова')
+    logger.info(f"[ContentFilter] Установлена задержка уведомления {delay_seconds}s для {category}: chat={chat_id}")
+
+    # Возвращаемся в меню действия категории
+    from bot.keyboards.content_filter_keyboards import create_category_action_menu
+
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+
+    action_field_map = {'sw': 'simple_words_action', 'hw': 'harmful_words_action', 'ow': 'obfuscated_words_action'}
+    duration_field_map = {'sw': 'simple_words_mute_duration', 'hw': 'harmful_words_mute_duration', 'ow': 'obfuscated_words_mute_duration'}
+
+    current_action = getattr(settings, action_field_map[category], 'delete')
+    current_duration = getattr(settings, duration_field_map[category], None)
+    mute_text = getattr(settings, MUTE_TEXT_FIELD_MAP[category], None)
+
+    text = (
+        f"✅ Задержка установлена: {delay_seconds}с\n\n"
+        f"⚡ <b>Действие: {category_name}</b>"
+    )
+
+    keyboard = create_category_action_menu(
+        chat_id, category, current_action, current_duration,
+        mute_text, delay_seconds
+    )
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer(f"Задержка: {delay_seconds}с")
+
+
+@categories_router.message(CategoryDelayStates.waiting_for_notification_delay)
+async def process_notification_delay_input(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ручной ввод задержки удаления уведомления.
+
+    Args:
+        message: Сообщение с задержкой
+        state: FSMContext
+        session: Сессия БД
+    """
+    # Получаем данные из FSM
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    category = data.get('category')
+    instruction_message_id = data.get('instruction_message_id')
+
+    if not chat_id or not category:
+        await message.answer("❌ Ошибка: не найдены данные.")
+        await state.clear()
+        return
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    # Парсим задержку
+    delay_seconds = parse_delay_seconds(message.text.strip())
+
+    if delay_seconds is None:
+        await message.answer(
+            "❌ Неверный формат. Используйте:\n"
+            "• 30 или 30s — секунды\n"
+            "• 5min — минуты\n"
+            "• 1h — часы"
+        )
+        return
+
+    # Сохраняем в БД
+    field_name = NOTIFICATION_DELAY_FIELD_MAP[category]
+    await filter_manager.update_settings(chat_id, session, **{field_name: delay_seconds})
+
+    await state.clear()
+
+    category_name = CATEGORY_NAMES.get(category, 'Слова')
+    logger.info(f"[ContentFilter] Установлена задержка уведомления {delay_seconds}s для {category}: chat={chat_id}")
+
+    # Возвращаемся в меню действия категории
+    from bot.keyboards.content_filter_keyboards import create_category_action_menu
+
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+
+    action_field_map = {'sw': 'simple_words_action', 'hw': 'harmful_words_action', 'ow': 'obfuscated_words_action'}
+    duration_field_map = {'sw': 'simple_words_mute_duration', 'hw': 'harmful_words_mute_duration', 'ow': 'obfuscated_words_mute_duration'}
+
+    current_action = getattr(settings, action_field_map[category], 'delete')
+    current_duration = getattr(settings, duration_field_map[category], None)
+    mute_text = getattr(settings, MUTE_TEXT_FIELD_MAP[category], None)
+
+    text = (
+        f"✅ Задержка установлена: {delay_seconds}с\n\n"
+        f"⚡ <b>Действие: {category_name}</b>"
+    )
+
+    keyboard = create_category_action_menu(
+        chat_id, category, current_action, current_duration,
+        mute_text, delay_seconds
+    )
+
+    try:
+        await message.bot.edit_message_text(
+            text=text,
+            chat_id=message.chat.id,
+            message_id=instruction_message_id,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    except TelegramAPIError:
+        await message.answer(f"✅ Задержка: {delay_seconds}с")
+
+
+@categories_router.callback_query(F.data.regexp(r"^cf:(sw|hw|ow)ndc:-?\d+$"))
+async def clear_notification_delay(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Сбрасывает задержку удаления уведомления (не удалять).
+
+    Callback: cf:{category}ndc:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        state: FSMContext
+        session: Сессия БД
+    """
+    await state.clear()
+
+    # Парсим данные
+    parts = callback.data.split(":")
+    category = parts[1][:2]  # sw, hw, ow
+    chat_id = int(parts[2])
+
+    # Сбрасываем в БД
+    field_name = NOTIFICATION_DELAY_FIELD_MAP[category]
+    await filter_manager.update_settings(chat_id, session, **{field_name: None})
+
+    category_name = CATEGORY_NAMES.get(category, 'Слова')
+    logger.info(f"[ContentFilter] Сброшена задержка уведомления для {category}: chat={chat_id}")
+
+    # Возвращаемся в меню действия категории
+    from bot.keyboards.content_filter_keyboards import create_category_action_menu
+
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+
+    action_field_map = {'sw': 'simple_words_action', 'hw': 'harmful_words_action', 'ow': 'obfuscated_words_action'}
+    duration_field_map = {'sw': 'simple_words_mute_duration', 'hw': 'harmful_words_mute_duration', 'ow': 'obfuscated_words_mute_duration'}
+
+    current_action = getattr(settings, action_field_map[category], 'delete')
+    current_duration = getattr(settings, duration_field_map[category], None)
+    mute_text = getattr(settings, MUTE_TEXT_FIELD_MAP[category], None)
+
+    text = (
+        f"🗑️ Уведомление не будет удаляться\n\n"
+        f"⚡ <b>Действие: {category_name}</b>"
+    )
+
+    keyboard = create_category_action_menu(
+        chat_id, category, current_action, current_duration,
+        mute_text, None
+    )
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer("Уведомление не будет удаляться")

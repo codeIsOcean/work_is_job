@@ -195,6 +195,7 @@ class FilterManager:
         user_id = message.from_user.id if message.from_user else 0
 
         # Определяем тип медиа (для медиа-флуда)
+        # Поддерживаются ВСЕ типы медиа из Telegram API
         media_type: Optional[str] = None
         if message.photo:
             media_type = 'photo'
@@ -202,10 +203,28 @@ class FilterManager:
             media_type = 'sticker'
         elif message.video:
             media_type = 'video'
+        elif message.animation:
+            # GIF в Telegram API
+            media_type = 'animation'
         elif message.voice:
             media_type = 'voice'
         elif message.video_note:
             media_type = 'video_note'
+        elif message.audio:
+            # Аудиофайлы/музыка
+            media_type = 'audio'
+        elif message.document:
+            # Документы/файлы (не фото/видео/аудио)
+            media_type = 'document'
+        elif message.contact:
+            media_type = 'contact'
+        elif message.location:
+            media_type = 'location'
+        elif message.poll:
+            media_type = 'poll'
+        elif message.dice:
+            # Кубик, дартс, боулинг и др. игры
+            media_type = 'dice'
 
         # ─────────────────────────────────────────────────────────
         # ШАГ 2: Flood Detector (самый быстрый)
@@ -245,7 +264,14 @@ class FilterManager:
         # ─────────────────────────────────────────────────────────
         # ШАГ 2.1: Расширенный антифлуд - любые сообщения подряд
         # ─────────────────────────────────────────────────────────
-        if settings.flood_detect_any_messages and self._flood_detector:
+        # ВАЖНО: Проверяем media_group_id для поддержки альбомов
+        # Альбом (несколько фото/видео сразу) = одно действие пользователя
+        # Telegram отправляет каждое фото альбома как отдельное сообщение
+        # Но все они имеют одинаковый media_group_id - пропускаем их
+        is_album = bool(message.media_group_id)
+
+        # Проверяем флуд любых сообщений ТОЛЬКО если это НЕ альбом
+        if settings.flood_detect_any_messages and self._flood_detector and not is_album:
             # Проверяем на флуд любых сообщений (не только одинаковых)
             any_msg_result = await self._flood_detector.check_any_messages(
                 chat_id=chat_id,
@@ -277,14 +303,7 @@ class FilterManager:
         # ─────────────────────────────────────────────────────────
         # ШАГ 2.2: Расширенный антифлуд - медиа (фото, стикеры, видео, войсы)
         # ─────────────────────────────────────────────────────────
-        # ВАЖНО: Проверяем media_group_id для поддержки альбомов
-        # Когда пользователь отправляет альбом (несколько фото сразу):
-        # - Telegram отправляет каждое фото как ОТДЕЛЬНОЕ сообщение
-        # - Но все сообщения альбома имеют ОДИНАКОВЫЙ media_group_id
-        # - Мы пропускаем проверку для альбомов чтобы не было false positive
-        # - Альбом = одно действие пользователя, не флуд
-        is_album = bool(message.media_group_id)
-
+        # is_album уже определён выше в ШАГ 2.1
         # Проверяем медиа-флуд ТОЛЬКО если это НЕ альбом
         if settings.flood_detect_media and self._flood_detector and media_type and not is_album:
             # Проверяем на медиа-флуд
@@ -306,8 +325,15 @@ class FilterManager:
                     'photo': 'фото',
                     'sticker': 'стикеров',
                     'video': 'видео',
+                    'animation': 'GIF',
                     'voice': 'голосовых',
-                    'video_note': 'кружков'
+                    'video_note': 'кружков',
+                    'audio': 'аудио',
+                    'document': 'документов',
+                    'contact': 'контактов',
+                    'location': 'геолокаций',
+                    'poll': 'опросов',
+                    'dice': 'игр'
                 }
                 media_name = media_names.get(media_type, media_type)
 

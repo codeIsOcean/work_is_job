@@ -213,6 +213,16 @@ async def category_action_menu(
         'hw': 'harmful_words_mute_duration',
         'ow': 'obfuscated_words_mute_duration'
     }
+    mute_text_field_map = {
+        'sw': 'simple_words_mute_text',
+        'hw': 'harmful_words_mute_text',
+        'ow': 'obfuscated_words_mute_text'
+    }
+    notification_delay_field_map = {
+        'sw': 'simple_words_notification_delete_delay',
+        'hw': 'harmful_words_notification_delete_delay',
+        'ow': 'obfuscated_words_notification_delete_delay'
+    }
     category_names = {
         'sw': 'Простые слова',
         'hw': 'Вредные слова',
@@ -225,6 +235,8 @@ async def category_action_menu(
     # Получаем текущие значения
     current_action = getattr(settings, action_field_map[category], 'delete')
     current_duration = getattr(settings, duration_field_map[category], None)
+    mute_text = getattr(settings, mute_text_field_map[category], None)
+    notification_delay = getattr(settings, notification_delay_field_map[category], None)
 
     # Формируем текст
     text = (
@@ -233,12 +245,17 @@ async def category_action_menu(
         f"• 🗑️ Удалить — только удалить сообщение\n"
         f"• 🔇 Мут — удалить + мут на время\n"
         f"• 🚫 Бан — удалить + бан\n\n"
+        f"📝 Текст мута — своё уведомление (%user%, %time%)\n"
+        f"⏰ Удалять уведомление — через сколько секунд\n\n"
         f"⏱️ — задать время вручную\n"
         f"Форматы: 30s, 5min, 1h, 1d, 1m"
     )
 
     # Клавиатура
-    keyboard = create_category_action_menu(chat_id, category, current_action, current_duration)
+    keyboard = create_category_action_menu(
+        chat_id, category, current_action, current_duration,
+        mute_text, notification_delay
+    )
 
     try:
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")

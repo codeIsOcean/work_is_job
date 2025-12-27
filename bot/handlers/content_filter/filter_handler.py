@@ -299,16 +299,28 @@ async def _apply_action(
     # ШАГ 1: Удаляем сообщение(я) (для всех действий)
     # ─────────────────────────────────────────────────────────
     # Для флуда - удаляем ВСЕ сообщения из списка (без задержки)
+    # Только если flood_delete_messages = True (по умолчанию True)
     if result.flood_message_ids:
+        # Проверяем настройку удаления флуд-сообщений
+        should_delete_flood = getattr(settings, 'flood_delete_messages', True)
         deleted_count = 0
-        for msg_id in result.flood_message_ids:
-            try:
-                await message.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-                deleted_count += 1
-            except TelegramAPIError:
-                # Некоторые сообщения могут быть уже удалены
-                pass
-        logger.info(f"[ContentFilter] Удалено {deleted_count}/{len(result.flood_message_ids)} флуд-сообщений")
+
+        if should_delete_flood:
+            # Удаляем все флуд-сообщения
+            for msg_id in result.flood_message_ids:
+                try:
+                    await message.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+                    deleted_count += 1
+                except TelegramAPIError:
+                    # Некоторые сообщения могут быть уже удалены
+                    pass
+            logger.info(f"[ContentFilter] Удалено {deleted_count}/{len(result.flood_message_ids)} флуд-сообщений")
+        else:
+            # Не удаляем - только применяем действие
+            logger.info(
+                f"[ContentFilter] Флуд-сообщения НЕ удалены (настройка flood_delete_messages=False), "
+                f"msg_ids={result.flood_message_ids}"
+            )
     else:
         # Для остальных детекторов - удаляем с опциональной задержкой
         if delete_delay and delete_delay > 0:
@@ -535,10 +547,18 @@ async def _mute_user(
 
         # Формируем текст уведомления
         user_mention = message.from_user.mention_html()
-        hours = duration_minutes // 60
-        minutes = duration_minutes % 60
 
-        if hours > 0:
+        # Форматируем длительность с поддержкой дней
+        days = duration_minutes // 1440  # 1440 минут = 1 день
+        remaining_minutes = duration_minutes % 1440
+        hours = remaining_minutes // 60
+        minutes = remaining_minutes % 60
+
+        if days > 0:
+            duration_text = f"{days}д"
+            if hours > 0:
+                duration_text += f" {hours}ч"
+        elif hours > 0:
             duration_text = f"{hours}ч"
             if minutes > 0:
                 duration_text += f" {minutes}мин"
@@ -904,12 +924,18 @@ async def _send_journal_log(
         }
         action_text = action_names.get(result.action, result.action)
 
-        # Длительность мута/бана
+        # Длительность мута/бана (с поддержкой дней)
         duration_text = ""
         if result.action in ('mute', 'ban') and result.action_duration:
-            hours = result.action_duration // 60
-            minutes = result.action_duration % 60
-            if hours > 0:
+            days = result.action_duration // 1440
+            remaining = result.action_duration % 1440
+            hours = remaining // 60
+            minutes = remaining % 60
+            if days > 0:
+                duration_text = f" {days}д"
+                if hours > 0:
+                    duration_text += f" {hours}ч"
+            elif hours > 0:
                 duration_text = f" {hours}ч"
                 if minutes > 0:
                     duration_text += f" {minutes}мин"
@@ -1014,13 +1040,44 @@ async def _send_journal_log(
     # FLOOD DETECTOR
     # ─────────────────────────────────────────────────────────
     elif result.detector_type == 'flood':
+        # Количество удалённых сообщений
         deleted_count = len(result.flood_message_ids) if result.flood_message_ids else 0
+
+        # Маппинг действий на читаемые названия
+        action_names = {
+            'delete': '🗑️ Удаление',
+            'warn': '⚠️ Предупреждение',
+            'mute': '🔇 Мут',
+            'kick': '👢 Кик',
+            'ban': '🚫 Бан'
+        }
+        # Получаем название действия или само значение если неизвестно
+        action_text = action_names.get(result.action, result.action or 'N/A')
+
+        # Добавляем длительность мута если действие = mute (с поддержкой дней)
+        duration_text = ""
+        if result.action == 'mute' and result.action_duration:
+            days = result.action_duration // 1440
+            remaining = result.action_duration % 1440
+            hours = remaining // 60
+            minutes = remaining % 60
+            if days > 0:
+                duration_text = f" на {days}д"
+                if hours > 0:
+                    duration_text += f" {hours}ч"
+            elif hours > 0:
+                duration_text = f" на {hours}ч"
+                if minutes > 0:
+                    duration_text += f" {minutes}мин"
+            else:
+                duration_text = f" на {minutes}мин"
 
         journal_text = (
             f"📢 <b>Антифлуд</b>\n\n"
             f"👤 {user_link} [<code>{user_id}</code>]\n"
             f"🔁 Повторов: {result.trigger}\n"
             f"🗑️ Удалено сообщений: {deleted_count}\n"
+            f"⚡ Действие: {action_text}{duration_text}\n"
             f"🕐 {time_str}"
         )
 
