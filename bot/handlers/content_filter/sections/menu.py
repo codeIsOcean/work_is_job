@@ -47,15 +47,16 @@ menu_router = Router(name='sections_menu')
 async def custom_sections_menu(
     callback: CallbackQuery,
     session: AsyncSession,
-    state: FSMContext
+    state: FSMContext = None
 ) -> None:
     """
     Показывает список кастомных разделов спама.
 
     Callback: cf:sccat:{chat_id}
     """
-    # Очищаем FSM состояние
-    await state.clear()
+    # Очищаем FSM состояние (если state передан)
+    if state:
+        await state.clear()
 
     # Парсим chat_id
     parts = callback.data.split(":")
