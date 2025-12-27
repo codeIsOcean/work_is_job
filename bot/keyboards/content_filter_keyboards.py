@@ -2821,7 +2821,8 @@ def create_section_delete_confirm_menu(
             [
                 InlineKeyboardButton(
                     text="⚠️ Да, удалить раздел",
-                    callback_data=f"cf:secdc:{section_id}"
+                    # ВАЖНО: добавляем chat_id для хендлера cf:secdc:\d+:-?\d+$
+                    callback_data=f"cf:secdc:{section_id}:{chat_id}"
                 )
             ],
             [
