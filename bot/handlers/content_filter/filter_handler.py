@@ -344,7 +344,16 @@ async def _apply_action(
 
     elif action == 'mute':
         # Мутим пользователя
-        duration_minutes = result.action_duration or 1440  # 24 часа по умолчанию
+        # Определяем длительность мута с учётом типа детектора
+        if result.action_duration:
+            # Если длительность указана в result — используем её
+            duration_minutes = result.action_duration
+        elif result.detector_type == 'scam':
+            # Для scam используем scam_mute_duration или fallback на default
+            duration_minutes = getattr(settings, 'scam_mute_duration', None) or getattr(settings, 'default_mute_duration', 1440)
+        else:
+            # Для остальных детекторов — default_mute_duration
+            duration_minutes = getattr(settings, 'default_mute_duration', 1440)
         await _mute_user(message, duration_minutes, result, custom_mute_text, notification_delay, session)
         # Проверяем нужно ли пересылать при mute
         should_forward = getattr(result, 'forward_on_mute', False) and forward_channel_id
@@ -536,9 +545,12 @@ async def _mute_user(
         else:
             duration_text = f"{minutes}мин"
 
-        # Если есть кастомный текст - используем его с заменой %user%
+        # Если есть кастомный текст - используем его с заменой плейсхолдеров
         if custom_text:
+            # Заменяем %user% на HTML mention пользователя
             mute_text = custom_text.replace('%user%', user_mention)
+            # Заменяем %time% на форматированное время мута
+            mute_text = mute_text.replace('%time%', duration_text)
         else:
             # Стандартный текст
             mute_text = (
@@ -923,6 +935,30 @@ async def _send_journal_log(
             f"🕐 {time_str}"
         )
 
+        # Кнопки модерации для фильтра слов
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔇 Мут",
+                    callback_data=f"mute_user_{user_id}_{chat_id}"
+                ),
+                InlineKeyboardButton(
+                    text="🔊 Размут",
+                    callback_data=f"unmute_user_{user_id}_{chat_id}"
+                ),
+                InlineKeyboardButton(
+                    text="🚫 Бан",
+                    callback_data=f"ban_user_{user_id}_{chat_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🗑️ Удалить сообщения",
+                    callback_data=f"delmsg_user_{user_id}_{chat_id}"
+                )
+            ]
+        ])
+
     # ─────────────────────────────────────────────────────────
     # SCAM DETECTOR
     # ─────────────────────────────────────────────────────────
@@ -950,18 +986,26 @@ async def _send_journal_log(
             f"🕐 {time_str}"
         )
 
-        # Создаём клавиатуру с кнопками действий (Mute/Ban)
+        # Создаём клавиатуру с кнопками действий (Mute/Unmute/Ban)
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
-                # Кнопка мута пользователя
                 InlineKeyboardButton(
                     text="🔇 Мут",
                     callback_data=f"mute_user_{user_id}_{chat_id}"
                 ),
-                # Кнопка бана пользователя
+                InlineKeyboardButton(
+                    text="🔊 Размут",
+                    callback_data=f"unmute_user_{user_id}_{chat_id}"
+                ),
                 InlineKeyboardButton(
                     text="🚫 Бан",
                     callback_data=f"ban_user_{user_id}_{chat_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🗑️ Удалить сообщения",
+                    callback_data=f"delmsg_user_{user_id}_{chat_id}"
                 )
             ]
         ])
@@ -979,6 +1023,30 @@ async def _send_journal_log(
             f"🗑️ Удалено сообщений: {deleted_count}\n"
             f"🕐 {time_str}"
         )
+
+        # Кнопки модерации для антифлуда
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔇 Мут",
+                    callback_data=f"mute_user_{user_id}_{chat_id}"
+                ),
+                InlineKeyboardButton(
+                    text="🔊 Размут",
+                    callback_data=f"unmute_user_{user_id}_{chat_id}"
+                ),
+                InlineKeyboardButton(
+                    text="🚫 Бан",
+                    callback_data=f"ban_user_{user_id}_{chat_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🗑️ Удалить сообщения",
+                    callback_data=f"delmsg_user_{user_id}_{chat_id}"
+                )
+            ]
+        ])
 
     # ─────────────────────────────────────────────────────────
     # CUSTOM SECTION (кастомные разделы спама)
@@ -1024,8 +1092,18 @@ async def _send_journal_log(
                     callback_data=f"mute_user_{user_id}_{chat_id}"
                 ),
                 InlineKeyboardButton(
+                    text="🔊 Размут",
+                    callback_data=f"unmute_user_{user_id}_{chat_id}"
+                ),
+                InlineKeyboardButton(
                     text="🚫 Бан",
                     callback_data=f"ban_user_{user_id}_{chat_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🗑️ Удалить сообщения",
+                    callback_data=f"delmsg_user_{user_id}_{chat_id}"
                 )
             ]
         ])

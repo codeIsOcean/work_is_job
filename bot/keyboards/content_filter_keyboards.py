@@ -2827,7 +2827,7 @@ def create_section_delete_confirm_menu(
             ],
             [
                 InlineKeyboardButton(
-                    text=f"{EMOJI_BACK} Отмена",
+                    text=f"{EMOJI_BACK} Назад",
                     callback_data=f"cf:secs:{section_id}"
                 )
             ]

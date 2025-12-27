@@ -1973,8 +1973,10 @@ class CustomSectionService:
         Проходит по всем активным порогам раздела и ищет
         порог где min_score <= score <= max_score.
 
-        Если найден — возвращает действие из порога.
-        Если НЕ найден — возвращает None (использовать action из раздела).
+        Логика:
+        1. Если score попадает в диапазон порога — используем его action
+        2. Если score ПРЕВЫШАЕТ все пороги — используем ПОСЛЕДНИЙ (самый строгий) порог
+        3. Если score МЕНЬШЕ всех порогов — возвращаем None (action из раздела)
 
         Args:
             section_id: ID раздела
@@ -1986,6 +1988,12 @@ class CustomSectionService:
         """
         # Получаем все активные пороги раздела отсортированные по min_score
         thresholds = await self.get_section_thresholds(section_id, session, enabled_only=True)
+
+        if not thresholds:
+            return None
+
+        # Сохраняем последний (самый строгий) порог для случая превышения
+        last_threshold = thresholds[-1]
 
         # Ищем подходящий порог
         for threshold in thresholds:
@@ -2004,7 +2012,17 @@ class CustomSectionService:
             )
             return (threshold.action, threshold.mute_duration)
 
-        # Не нашли подходящий порог — вернём None, чтобы использовался action из раздела
+        # Не нашли подходящий порог
+        # Проверяем: если score превышает последний порог — используем его
+        if score >= last_threshold.min_score:
+            logger.debug(
+                f"[CustomSectionService] Скор {score} превышает все пороги, "
+                f"используем последний порог [{last_threshold.min_score}-"
+                f"{last_threshold.max_score or '∞'}]: {last_threshold.action}"
+            )
+            return (last_threshold.action, last_threshold.mute_duration)
+
+        # Score меньше всех порогов — вернём None, чтобы использовался action из раздела
         return None
 
 

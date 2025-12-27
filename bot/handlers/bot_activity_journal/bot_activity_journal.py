@@ -637,6 +637,63 @@ async def unmute_user_callback(callback):
         await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
 
 
+@bot_activity_journal_router.callback_query(lambda c: c.data.startswith("delmsg_user_"))
+async def delete_user_messages_callback(callback):
+    """
+    Обработчик кнопки удаления всех сообщений пользователя.
+
+    Удаляет все отслеживаемые сообщения пользователя в группе.
+    Callback data формат: delmsg_user_{user_id}_{group_id}
+    """
+    try:
+        # Извлекаем user_id и group_id из callback_data
+        parts = callback.data.split("_")
+        user_id = int(parts[2])
+        group_id = int(parts[3])
+
+        # Импортируем функцию удаления сообщений
+        from bot.services.profile_monitor import delete_user_messages
+
+        # Удаляем сообщения пользователя
+        deleted_count = await delete_user_messages(
+            bot=callback.bot,
+            chat_id=group_id,
+            user_id=user_id,
+            limit=100
+        )
+
+        if deleted_count > 0:
+            await callback.answer(
+                f"🗑️ Удалено {deleted_count} сообщений",
+                show_alert=True
+            )
+            logger.info(
+                f"✅ Удалено {deleted_count} сообщений пользователя {user_id} "
+                f"в группе {group_id}"
+            )
+
+            # Обновляем текст сообщения
+            try:
+                current_text = callback.message.text or callback.message.caption or ""
+                new_text = current_text + f"\n\n🗑️ <b>УДАЛЕНО {deleted_count} СООБЩЕНИЙ</b>"
+                await callback.message.edit_text(
+                    text=new_text,
+                    parse_mode="HTML",
+                    reply_markup=callback.message.reply_markup  # Оставляем кнопки
+                )
+            except Exception as edit_err:
+                logger.warning(f"Не удалось обновить сообщение: {edit_err}")
+        else:
+            await callback.answer(
+                "📭 Нет отслеживаемых сообщений для удаления",
+                show_alert=True
+            )
+
+    except Exception as e:
+        logger.error(f"Ошибка при удалении сообщений пользователя: {e}")
+        await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
+
+
 def _format_user_link(entity) -> str:
     username = getattr(entity, "username", None)
     if username:
