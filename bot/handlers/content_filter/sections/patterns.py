@@ -258,8 +258,8 @@ async def delete_section_pattern(
 
     section_service = get_section_service()
 
-    # Удаляем паттерн
-    success = await section_service.delete_pattern(pattern_id, session)
+    # Удаляем паттерн раздела
+    success = await section_service.delete_section_pattern(pattern_id, session)
 
     if success:
         await callback.answer("Паттерн удалён")
@@ -539,11 +539,12 @@ async def confirm_section_import_patterns(
     added_patterns = []
     skipped_patterns = []
 
-    for phrase, weight in extracted:
+    for phrase, phrase_weight in extracted:
         success, _, error = await section_service.add_section_pattern(
             section_id=section_id,
             pattern=phrase,
             session=session,
+            weight=phrase_weight,
             created_by=callback.from_user.id
         )
         if success:
