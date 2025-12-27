@@ -37,6 +37,7 @@ from bot.handlers.content_filter.shared import filter_manager, logger
 from bot.handlers.content_filter.common import (
     DurationInputStates,
     ScamTextStates,
+    ScamDelayStates,
     parse_duration
 )
 
@@ -122,11 +123,11 @@ async def scam_action_menu(
     )
 
     # Клавиатура
-    # Используем default_mute_duration - это правильное имя поля в модели
+    # Используем scam_action и scam_mute_duration для антискама
     keyboard = create_scam_action_menu(
         chat_id,
-        current_action=settings.default_action or 'delete',
-        current_duration=settings.default_mute_duration
+        current_action=settings.scam_action or 'delete',
+        current_duration=settings.scam_mute_duration
     )
 
     try:
@@ -162,13 +163,13 @@ async def set_scam_action(
     # Получаем настройки
     settings = await filter_manager.get_or_create_settings(chat_id, session)
 
-    # Устанавливаем действие
-    settings.default_action = action
+    # Устанавливаем действие для антискама (scam_action, НЕ default_action!)
+    settings.scam_action = action
 
     # Если выбрали delete или ban - сбрасываем длительность мута
-    # Используем default_mute_duration - правильное имя поля
+    # Используем scam_mute_duration для антискама
     if action != 'mute':
-        settings.default_mute_duration = None
+        settings.scam_mute_duration = None
 
     await session.commit()
 
@@ -186,11 +187,11 @@ async def set_scam_action(
         f"Выберите что делать при обнаружении скама."
     )
 
-    # Используем default_mute_duration - правильное имя поля
+    # Используем scam_mute_duration для антискама
     keyboard = create_scam_action_menu(
         chat_id,
         current_action=action,
-        current_duration=settings.default_mute_duration
+        current_duration=settings.scam_mute_duration
     )
 
     try:
@@ -316,10 +317,10 @@ async def process_scam_mute_duration(
     await state.clear()
 
     # Получаем настройки и устанавливаем значения
-    # Используем default_mute_duration - правильное имя поля в модели
+    # Используем scam_action и scam_mute_duration для антискама
     settings = await filter_manager.get_or_create_settings(chat_id, session)
-    settings.default_action = 'mute'
-    settings.default_mute_duration = duration
+    settings.scam_action = 'mute'
+    settings.scam_mute_duration = duration
     await session.commit()
 
     # Форматируем текст длительности для отображения
@@ -666,3 +667,109 @@ async def set_scam_notification_delay(
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     except TelegramAPIError:
         pass
+
+
+# ============================================================
+# РУЧНОЙ ВВОД ЗАДЕРЖКИ АВТОУДАЛЕНИЯ (Правило 22 — без хардкода)
+# ============================================================
+
+@settings_router.callback_query(F.data.regexp(r"^cf:scndc:-?\d+$"))
+async def start_custom_notification_delay(
+    callback: CallbackQuery,
+    state: FSMContext
+) -> None:
+    """
+    Начинает процесс ручного ввода задержки автоудаления.
+
+    Callback: cf:scndc:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        state: FSMContext
+    """
+    # Парсим chat_id
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Сохраняем в FSM
+    await state.update_data(chat_id=chat_id)
+    await state.set_state(ScamDelayStates.waiting_for_notification_delay)
+
+    text = (
+        f"✏️ <b>Ручной ввод задержки</b>\n\n"
+        f"Введите количество секунд для автоудаления уведомления.\n\n"
+        f"Примеры: <code>0</code> (не удалять), <code>30</code>, <code>120</code>"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Отмена", callback_data=f"cf:scnd:{chat_id}")]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@settings_router.message(ScamDelayStates.waiting_for_notification_delay)
+async def process_custom_notification_delay(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ввод кастомной задержки автоудаления.
+
+    Args:
+        message: Сообщение с задержкой
+        state: FSMContext
+        session: Сессия БД
+    """
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    # Парсим задержку
+    try:
+        delay = int(message.text.strip())
+        if delay < 0:
+            raise ValueError("Задержка должна быть >= 0")
+        if delay > 3600:
+            delay = 3600  # Максимум 1 час
+    except ValueError:
+        await message.answer("❌ Введите положительное число (0-3600 секунд).")
+        return
+
+    # Получаем chat_id из FSM
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+
+    if not chat_id:
+        await message.answer("❌ Ошибка: не найден chat_id.")
+        await state.clear()
+        return
+
+    # Обновляем настройки
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+    settings.scam_notification_delete_delay = delay if delay > 0 else None
+    await session.commit()
+
+    await state.clear()
+
+    # Формируем ответ
+    delay_text = f"{delay} сек" if delay else "Не удалять"
+
+    text = (
+        f"✅ Задержка установлена: <b>{delay_text}</b>\n\n"
+        f"🗑️ <b>Автоудаление уведомления</b>\n\n"
+        f"Через сколько секунд удалять уведомление о нарушении.\n\n"
+        f"Текущее значение: <b>{delay} сек</b>"
+    )
+
+    keyboard = create_scam_notification_delay_menu(chat_id, delay)
+
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")

@@ -1282,3 +1282,274 @@ class TestScamSettingsComprehensive:
         assert await verify_message_contains(admin_userbot, bot_chat_id, "порог"), \
             "FAIL: Did not return to thresholds menu"
         print("[TEST] OK: Threshold cancel/back works")
+
+
+# ============================================================
+# ТЕСТЫ РЕАЛЬНОГО ПРИМЕНЕНИЯ НАСТРОЕК (НЕ ТОЛЬКО UI)
+# ============================================================
+# Эти тесты проверяют что настройки РЕАЛЬНО применяются при срабатывании антискама.
+# Setup делается через БД, действие — через юзербота, проверка — через бота.
+# ============================================================
+
+async def get_test_session():
+    """Изолированная сессия БД для E2E тестов."""
+    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+    from sqlalchemy.pool import NullPool
+
+    database_url = os.getenv("DATABASE_URL_TEST", "postgresql+asyncpg://postgres:postgres@127.0.0.1:5433/bot_test")
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    session_maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    session = session_maker()
+    try:
+        yield session
+    finally:
+        await session.close()
+        await engine.dispose()
+
+
+async def setup_scam_settings_for_test(
+    chat_id: int,
+    action: str = "mute",
+    mute_duration: int = 5,  # 5 минут для теста
+    mute_text: str = None,
+    ban_text: str = None,
+    notification_delay: int = None
+):
+    """
+    Настраивает антискам через БД для теста.
+
+    Args:
+        chat_id: ID группы
+        action: Действие (delete, mute, ban)
+        mute_duration: Длительность мута в минутах
+        mute_text: Кастомный текст при муте
+        ban_text: Кастомный текст при бане
+        notification_delay: Задержка автоудаления уведомления
+    """
+    async for session in get_test_session():
+        from sqlalchemy import select
+        from bot.database.models_content_filter import ContentFilterSettings
+
+        result = await session.execute(
+            select(ContentFilterSettings).where(ContentFilterSettings.chat_id == chat_id)
+        )
+        settings = result.scalar_one_or_none()
+
+        if not settings:
+            settings = ContentFilterSettings(chat_id=chat_id)
+            session.add(settings)
+
+        # Включаем модуль и антискам
+        settings.enabled = True
+        settings.scam_detection_enabled = True
+
+        # Устанавливаем действие и параметры для антискама
+        settings.scam_action = action
+        settings.scam_mute_duration = mute_duration
+        settings.scam_mute_text = mute_text
+        settings.scam_ban_text = ban_text
+        settings.scam_notification_delete_delay = notification_delay
+
+        await session.commit()
+
+
+async def cleanup_scam_settings(chat_id: int):
+    """Сбрасывает настройки антискама после теста."""
+    async for session in get_test_session():
+        from sqlalchemy import select
+        from bot.database.models_content_filter import ContentFilterSettings
+
+        result = await session.execute(
+            select(ContentFilterSettings).where(ContentFilterSettings.chat_id == chat_id)
+        )
+        settings = result.scalar_one_or_none()
+
+        if settings:
+            settings.scam_action = None
+            settings.scam_mute_duration = None
+            settings.scam_mute_text = None
+            settings.scam_ban_text = None
+            settings.scam_notification_delete_delay = None
+            await session.commit()
+
+
+async def unmute_user(bot: Bot, chat_id: int, user_id: int):
+    """Разбанивает/размучивает пользователя после теста."""
+    try:
+        from aiogram.types import ChatPermissions
+        await bot.restrict_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            permissions=ChatPermissions(
+                can_send_messages=True,
+                can_send_media_messages=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True
+            )
+        )
+    except Exception:
+        pass
+
+
+class TestScamSettingsApplied:
+    """
+    Тесты проверяющие что настройки антискама РЕАЛЬНО применяются.
+
+    НЕ тестирует UI! Тестирует логику применения настроек.
+    Setup через БД, проверка через реальное срабатывание.
+    """
+
+    @pytest.mark.asyncio
+    async def test_custom_mute_text_applied(
+        self, admin_userbot: Client, bot: Bot, chat_id: int, invite_link: str
+    ):
+        """
+        Тест: кастомный текст при муте РЕАЛЬНО применяется.
+
+        1. Устанавливаем кастомный текст через БД
+        2. Отправляем скам-сообщение (срабатывает антискам)
+        3. Проверяем что бот использует кастомный текст
+        """
+        await ensure_user_in_chat(admin_userbot, chat_id, invite_link=invite_link)
+        me = await admin_userbot.get_me()
+        user_id = me.id
+
+        custom_text = "ТЕСТ МУТА: %user% замучен за скам!"
+
+        try:
+            # SETUP: настраиваем антискам через БД
+            await setup_scam_settings_for_test(
+                chat_id=chat_id,
+                action="mute",
+                mute_duration=1,  # 1 минута
+                mute_text=custom_text,
+                notification_delay=60  # Не удалять сразу
+            )
+
+            # ACTION: отправляем скам-сообщение
+            scam_msg = await admin_userbot.send_message(
+                chat_id,
+                "Зарабатывай 5000$ в неделю! Гарантированный доход! Пиши в ЛС @scammer123"
+            )
+            await asyncio.sleep(5)  # Ждём обработки
+
+            # VERIFY: проверяем что бот отправил уведомление с кастомным текстом
+            found_custom_text = False
+            async for msg in admin_userbot.get_chat_history(chat_id, limit=5):
+                if msg.from_user and msg.from_user.is_bot and msg.text:
+                    if "ТЕСТ МУТА" in msg.text and "замучен за скам" in msg.text:
+                        found_custom_text = True
+                        break
+
+            assert found_custom_text, \
+                "FAIL: Кастомный текст мута НЕ применился! Бот использовал стандартный текст."
+            print("[TEST] OK: Custom mute text applied correctly!")
+
+        finally:
+            # CLEANUP
+            await cleanup_scam_settings(chat_id)
+            await unmute_user(bot, chat_id, user_id)
+
+    @pytest.mark.asyncio
+    async def test_custom_mute_duration_applied(
+        self, admin_userbot: Client, bot: Bot, chat_id: int, invite_link: str
+    ):
+        """
+        Тест: кастомное время мута РЕАЛЬНО применяется.
+
+        1. Устанавливаем время мута 2 минуты через БД
+        2. Отправляем скам-сообщение
+        3. Проверяем что в уведомлении указано правильное время
+        """
+        await ensure_user_in_chat(admin_userbot, chat_id, invite_link=invite_link)
+        me = await admin_userbot.get_me()
+        user_id = me.id
+
+        try:
+            # SETUP: мут на 2 минуты
+            await setup_scam_settings_for_test(
+                chat_id=chat_id,
+                action="mute",
+                mute_duration=2,  # 2 минуты
+                notification_delay=60
+            )
+
+            # ACTION
+            scam_msg = await admin_userbot.send_message(
+                chat_id,
+                "Инвестиции в крипту! 1000 USDT в день без риска! @crypto_scam"
+            )
+            await asyncio.sleep(5)
+
+            # VERIFY: ищем уведомление с "2мин" или "2 мин"
+            found_correct_duration = False
+            async for msg in admin_userbot.get_chat_history(chat_id, limit=5):
+                if msg.from_user and msg.from_user.is_bot and msg.text:
+                    if "2мин" in msg.text or "2 мин" in msg.text:
+                        found_correct_duration = True
+                        break
+
+            assert found_correct_duration, \
+                "FAIL: Время мута НЕ применилось! Ожидалось 2мин, бот использовал другое время."
+            print("[TEST] OK: Custom mute duration (2min) applied correctly!")
+
+        finally:
+            await cleanup_scam_settings(chat_id)
+            await unmute_user(bot, chat_id, user_id)
+
+    @pytest.mark.asyncio
+    async def test_scam_action_delete_only(
+        self, admin_userbot: Client, bot: Bot, chat_id: int, invite_link: str
+    ):
+        """
+        Тест: action=delete только удаляет сообщение, без мута.
+
+        1. Устанавливаем action=delete
+        2. Отправляем скам
+        3. Проверяем что сообщение удалено, но мута нет
+        """
+        await ensure_user_in_chat(admin_userbot, chat_id, invite_link=invite_link)
+        me = await admin_userbot.get_me()
+        user_id = me.id
+
+        try:
+            # SETUP: только удаление
+            await setup_scam_settings_for_test(
+                chat_id=chat_id,
+                action="delete"
+            )
+
+            # ACTION
+            scam_msg = await admin_userbot.send_message(
+                chat_id,
+                "Быстрый заработок! Работа на дому! 3000$ в неделю! @money_scam"
+            )
+            msg_id = scam_msg.id
+            await asyncio.sleep(5)
+
+            # VERIFY 1: сообщение удалено
+            try:
+                deleted_msg = await admin_userbot.get_messages(chat_id, msg_id)
+                message_exists = deleted_msg and not deleted_msg.empty
+            except Exception:
+                message_exists = False
+
+            assert not message_exists, "FAIL: Скам-сообщение НЕ было удалено!"
+
+            # VERIFY 2: можем отправить сообщение (нет мута)
+            test_msg = await admin_userbot.send_message(chat_id, "Тест - я не замучен")
+            await asyncio.sleep(2)
+            assert test_msg, "FAIL: Пользователь замучен, хотя action=delete!"
+
+            # Cleanup test message
+            try:
+                await test_msg.delete()
+            except Exception:
+                pass
+
+            print("[TEST] OK: action=delete works - message deleted, no mute!")
+
+        finally:
+            await cleanup_scam_settings(chat_id)
+            await unmute_user(bot, chat_id, user_id)

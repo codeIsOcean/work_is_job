@@ -273,6 +273,17 @@ async def _apply_action(
         # Кастомный текст при предупреждении за флуд
         custom_warn_text = getattr(settings, 'flood_warn_text', None)
 
+    # Если это scam - получаем настройки антискама из ContentFilterSettings
+    elif result.detector_type == 'scam':
+        # Задержка удаления сообщения нарушителя (в секундах)
+        delete_delay = getattr(settings, 'scam_delete_delay', None)
+        # Задержка автоудаления уведомления бота (в секундах)
+        notification_delay = getattr(settings, 'scam_notification_delete_delay', None)
+        # Кастомный текст при муте за скам
+        custom_mute_text = getattr(settings, 'scam_mute_text', None)
+        # Кастомный текст при бане за скам
+        custom_ban_text = getattr(settings, 'scam_ban_text', None)
+
     # Если это custom_section - получаем настройки из result (переданы из FilterResult)
     elif result.detector_type == 'custom_section':
         # Задержка удаления сообщения нарушителя (в секундах)

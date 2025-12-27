@@ -32,8 +32,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 # Импортируем общие объекты
 from bot.handlers.content_filter.shared import filter_manager, logger
-# Импортируем FSM states
-from bot.handlers.content_filter.common import AddThresholdStates
+# Импортируем FSM states и утилиты парсинга
+from bot.handlers.content_filter.common import AddThresholdStates, parse_duration
 # Импортируем сервис порогов
 from bot.services.content_filter.scam_pattern_service import get_threshold_service
 
@@ -330,6 +330,91 @@ async def process_threshold_action(
     await scam_thresholds_menu(callback, session)
 
     await callback.answer("✅ Порог добавлен")
+
+
+@thresholds_router.message(AddThresholdStates.waiting_mute_duration)
+async def process_mute_duration(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ввод длительности мута для порога.
+
+    Args:
+        message: Сообщение с длительностью
+        state: FSMContext
+        session: Сессия БД
+    """
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    # Парсим длительность (поддерживает форматы: 30, 1h, 1d и т.д.)
+    duration = parse_duration(message.text.strip())
+
+    if duration is None or duration <= 0:
+        await message.answer("❌ Неверный формат. Введите число минут или формат вида 1h, 1d.")
+        return
+
+    # Получаем данные из FSM
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    min_score = data.get('min_score')
+    max_score = data.get('max_score')
+    action = data.get('action')
+
+    # Создаём порог с длительностью мута
+    threshold_service = get_threshold_service()
+
+    await threshold_service.add_threshold(
+        chat_id=chat_id,
+        min_score=min_score,
+        max_score=max_score,
+        action=action,
+        mute_duration=duration,
+        session=session
+    )
+
+    await state.clear()
+
+    # Показываем меню порогов — создаём фейковый callback
+    # для вызова scam_thresholds_menu
+    from aiogram.types import CallbackQuery as CQ
+    message.data = f"cf:scthr:{chat_id}"
+
+    # Формируем текст и клавиатуру напрямую
+    thresholds = await threshold_service.get_thresholds(chat_id, session)
+
+    text = (
+        f"✅ Порог добавлен!\n\n"
+        f"📊 <b>Пороги баллов антискама</b>\n\n"
+    )
+
+    if thresholds:
+        text += "<b>Текущие пороги:</b>\n"
+        for t in thresholds:
+            status = "✅" if t.enabled else "❌"
+            max_text = str(t.max_score) if t.max_score else "∞"
+            action_text = t.action
+            if t.action == 'mute' and t.mute_duration:
+                action_text = f"mute {t.mute_duration}м"
+            text += f"{status} {t.min_score}-{max_text}: {action_text}\n"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="➕ Добавить порог",
+            callback_data=f"cf:scthra:{chat_id}"
+        )],
+        [InlineKeyboardButton(
+            text="◀️ Назад",
+            callback_data=f"cf:scs:{chat_id}"
+        )]
+    ])
+
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 @thresholds_router.callback_query(F.data.regexp(r"^cf:scthrx:-?\d+$"))

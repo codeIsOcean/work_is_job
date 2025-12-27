@@ -834,6 +834,16 @@ def create_scam_notification_delay_menu(
             )
         ])
 
+    # ─────────────────────────────────────────────────────
+    # Кнопка ручного ввода (чтобы избежать хардкода, Правило 22)
+    # ─────────────────────────────────────────────────────
+    rows.append([
+        InlineKeyboardButton(
+            text="✏️ Ввести своё значение",
+            callback_data=f"cf:scndc:{chat_id}"
+        )
+    ])
+
     rows.append([
         InlineKeyboardButton(
             text=f"{EMOJI_BACK} Назад",
@@ -1936,15 +1946,15 @@ def create_patterns_list_menu(
 # ============================================================
 
 def create_pattern_delete_confirm_menu(
-    chat_id: int,
-    pattern_id: int
+    pattern_id: int,
+    chat_id: int
 ) -> InlineKeyboardMarkup:
     """
     Создаёт меню подтверждения удаления паттерна.
 
     Args:
-        chat_id: ID группы
         pattern_id: ID паттерна для удаления
+        chat_id: ID группы
 
     Returns:
         InlineKeyboardMarkup: Клавиатура подтверждения
