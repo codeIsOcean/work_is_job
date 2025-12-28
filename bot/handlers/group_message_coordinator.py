@@ -69,6 +69,11 @@ from bot.services.profile_monitor import track_user_message
 # UserStats - импортируем функцию инкремента счётчика сообщений
 from bot.services.user_stats_service import increment_message_count
 
+# ScamMedia - импортируем функции фильтрации скам-изображений
+from bot.handlers.scam_media import check_message_for_scam_media
+# Импортируем вспомогательную функцию проверки наличия медиа
+from bot.handlers.scam_media.filter_handler import has_media
+
 # Импорт для ограничения прав (мут)
 from aiogram.types import ChatPermissions
 # Импорт для работы со временем
@@ -299,14 +304,25 @@ async def group_message_handler(
     # Проверяем сообщение через ContentFilter
     content_filter_triggered = await _process_content_filter(message, session)
 
-    # Если ContentFilter сработал - Antispam пропускаем
+    # Если ContentFilter сработал - остальные фильтры пропускаем
     # Сообщение уже обработано (удалено/наказан)
     if content_filter_triggered:
-        logger.info(f"[COORDINATOR] ContentFilter сработал, пропускаем Antispam")
+        logger.info(f"[COORDINATOR] ContentFilter сработал, пропускаем остальные фильтры")
         return
 
     # ─────────────────────────────────────────────────────────
-    # ШАГ 2: ANTISPAM (ссылки, пересылки, цитаты)
+    # ШАГ 2: SCAM MEDIA FILTER (скам-изображения по pHash)
+    # ─────────────────────────────────────────────────────────
+    # Проверяем сообщение через ScamMediaFilter если есть медиа
+    if await has_media(message):
+        scam_media_triggered = await _process_scam_media(message, session)
+        # Если ScamMedia сработал - Antispam пропускаем
+        if scam_media_triggered:
+            logger.info(f"[COORDINATOR] ScamMedia сработал, пропускаем Antispam")
+            return
+
+    # ─────────────────────────────────────────────────────────
+    # ШАГ 3: ANTISPAM (ссылки, пересылки, цитаты)
     # ─────────────────────────────────────────────────────────
     # ContentFilter не сработал - проверяем Antispam
     antispam_triggered = await _process_antispam(message, session)
@@ -317,7 +333,7 @@ async def group_message_handler(
         return
 
     # ─────────────────────────────────────────────────────────
-    # ШАГ 3: PROFILE MONITOR (отслеживание изменений профиля)
+    # ШАГ 4: PROFILE MONITOR (отслеживание изменений профиля)
     # ─────────────────────────────────────────────────────────
     # ContentFilter и Antispam не сработали - проверяем Profile Monitor
     # Этот модуль отслеживает изменения профиля и применяет автомут
@@ -391,6 +407,65 @@ async def _process_content_filter(
         # Логируем ошибку, но не падаем
         logger.exception(
             f"[COORDINATOR/CF] Ошибка обработки: {e}, "
+            f"chat={chat_id}, user={user_id}"
+        )
+        # При ошибке считаем что фильтр не сработал
+        return False
+
+
+# ============================================================
+# ОБРАБОТКА SCAM MEDIA
+# ============================================================
+
+async def _process_scam_media(
+    message: Message,
+    session: AsyncSession
+) -> bool:
+    """
+    Обрабатывает сообщение через ScamMediaFilter.
+
+    Проверяет изображения на совпадение с базой скам-хешей
+    используя perceptual hashing (pHash + dHash).
+
+    Args:
+        message: Входящее сообщение
+        session: Сессия БД
+
+    Returns:
+        bool: True если фильтр сработал, False если пропущен
+    """
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+
+    try:
+        # Проверяем сообщение через ScamMediaFilter
+        result = await check_message_for_scam_media(
+            message=message,
+            bot=message.bot,
+            session=session
+        )
+
+        # Если фильтр не сработал - возвращаем False
+        if not result.filtered:
+            return False
+
+        # ─────────────────────────────────────────────────────
+        # ФИЛЬТР СРАБОТАЛ - логируем результат
+        # ─────────────────────────────────────────────────────
+        logger.warning(
+            f"[COORDINATOR/SM] ⚡ Скам-изображение обнаружено: chat={chat_id}, "
+            f"user={user_id}, action={result.action}, distance={result.distance}, "
+            f"hash_id={result.hash_id}"
+        )
+
+        # Действие уже применено в filter_manager.py
+        # (удаление, мут, бан и журналирование)
+        return True
+
+    except Exception as e:
+        # Логируем ошибку, но не падаем
+        logger.exception(
+            f"[COORDINATOR/SM] Ошибка обработки: {e}, "
             f"chat={chat_id}, user={user_id}"
         )
         # При ошибке считаем что фильтр не сработал

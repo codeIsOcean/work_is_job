@@ -1938,4 +1938,193 @@ class TestScamSettingsApplied:
 
 ---
 
-*Последнее обновление: 2025-12-27* (добавлены правила 27-34: assert vs print, без MagicMock, SRP, helper-функции, setup через БД, cleanup, тесты применения настроек)
+---
+
+## ⛔ КРИТИЧЕСКИЕ ПРАВИЛА ИЗ SCAM MEDIA ТЕСТОВ (2025-12-28)
+
+> **УРОК:** При написании E2E тестов для ScamMedia модуля было допущено несколько критических ошибок.
+> Эти правила предотвращают повторение подобных проблем.
+
+### 35. ALEMBIC МИГРАЦИИ — УНИКАЛЬНЫЕ REVISION ID!
+
+**Проблема:** Два файла миграций имели одинаковый `revision = "a1b2c3d4e5f6"`. Alembic создал цикл ревизий, бот не запускался.
+
+**Решение:**
+
+```python
+# ❌ ПЛОХО — копипаста revision из другого файла
+# alembic/versions/a1b2c3d4e5f6_add_antispam_tables.py
+revision = "a1b2c3d4e5f6"
+
+# alembic/versions/a1b2c3d4e5f6_add_scam_media_tables.py  # ДРУГОЙ ФАЙЛ!
+revision = "a1b2c3d4e5f6"  # ТОТ ЖЕ ID! → ЦИКЛ!
+
+# ✅ ХОРОШО — уникальный ID для каждой миграции
+# alembic/versions/a1b2c3d4e5f6_add_antispam_tables.py
+revision = "a1b2c3d4e5f6"
+
+# alembic/versions/sm01a2b3c4d5_add_scam_media_tables.py
+revision = "sm01a2b3c4d5"  # Уникальный ID с префиксом модуля
+```
+
+**Рекомендация:** Использовать префикс модуля в revision ID: `sm01...` для scam_media, `as01...` для antispam, и т.д.
+
+### 36. DATABASE URL ДЛЯ E2E — ВСЕГДА 127.0.0.1 + ПОРТ!
+
+**Проблема:** E2E тесты запускаются на хост-машине, но используют Docker-internal hostname `postgres_test:5432`.
+
+```python
+# ❌ ПЛОХО — Docker hostname недоступен с хоста
+database_url = os.getenv("DATABASE_URL")
+# → "postgresql+asyncpg://...@postgres_test:5432/..."
+# → socket.gaierror: Name or service not known
+
+# ✅ ХОРОШО — хардкодим проброшенный порт
+host = os.getenv("POSTGRES_HOST", "127.0.0.1")
+port = os.getenv("POSTGRES_PORT", "5433")  # Проброшен из Docker!
+database_url = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{db_name}"
+```
+
+**Правило:** В E2E тестах ВСЕГДА использовать `127.0.0.1` + проброшенный порт (5433), а НЕ переменную DATABASE_URL.
+
+### 37. FLOODWAIT — ЖДАТЬ, НЕ ПРОПУСКАТЬ!
+
+**Проблема:** При FloodWait тест делал `pytest.skip()`, пропуская важные проверки.
+
+```python
+# ❌ ПЛОХО — тест пропускается, баги не найдены
+except FloodWait as e:
+    pytest.skip(f"FloodWait: {e.value}s")
+
+# ✅ ХОРОШО — ждём и повторяем попытку
+except FloodWait as e:
+    wait_time = e.value + 5  # +5 секунд запаса
+    print(f"[FloodWait] Waiting {wait_time} seconds...")
+    await asyncio.sleep(wait_time)
+    # Повторяем попытку
+    try:
+        await userbot.join_chat(invite_link)
+    except UserAlreadyParticipant:
+        pass
+```
+
+**Правило:** `pytest.skip()` только если FloodWait > 60 секунд. Иначе — ждать и повторять.
+
+### 38. API СЕРВИСОВ — ПРОВЕРЯТЬ СИГНАТУРУ МЕТОДА!
+
+**Проблема:** Тест вызывал несуществующий статический метод `HashService.compute_phash()`.
+
+```python
+# ❌ ПЛОХО — метод не существует!
+phash = HashService.compute_phash(image_bytes)
+# → AttributeError: type object 'HashService' has no attribute 'compute_phash'
+
+# ✅ ХОРОШО — проверить реальный API сервиса
+from bot.services.scam_media import HashService
+service = HashService()  # Создаём экземпляр
+result = service.compute_hash(image_bytes)  # Вызываем метод экземпляра
+phash, dhash = result.phash, result.dhash  # Получаем результат
+```
+
+**Правило:** ПЕРЕД написанием теста открыть файл сервиса и проверить:
+1. Это статический метод или метод экземпляра?
+2. Какие аргументы принимает?
+3. Что возвращает?
+
+### 39. ТЕСТОВЫЕ ДАННЫЕ — ИСПОЛЬЗОВАТЬ РЕАЛЬНЫЕ!
+
+**Проблема:** Тесты генерировали синтетические изображения вместо реальных скам-фото.
+
+```python
+# ❌ ПЛОХО — синтетические данные
+from PIL import Image
+test_image = Image.new('RGB', (100, 100), color='red')
+
+# ✅ ХОРОШО — реальные скам-изображения из docs/
+SCAM_IMAGES_DIR = Path(__file__).parent.parent.parent / "docs" / "image_filter"
+SCAM_IMAGES = {
+    "vip_kazashki": SCAM_IMAGES_DIR / "scam_vip_kazashki.jpg",
+    "narcotics": SCAM_IMAGES_DIR / "scam_narcotics.jpg",
+    "tiktok": SCAM_IMAGES_DIR / "scam_tiktok.jpg",
+}
+
+# В тесте
+scam_image_path = SCAM_IMAGES["vip_kazashki"]
+assert scam_image_path.exists(), f"Scam image not found: {scam_image_path}"
+```
+
+**Правило:** Для тестов детекции (спам, скам-фото, запрещённые слова) ВСЕГДА использовать реальные примеры из production.
+
+### 40. TELEGRAM API — ПРОВЕРКА МУТА ЧЕРЕЗ can_send_messages!
+
+**Проблема:** Проверка `member.status == "restricted"` возвращает `True` даже после unmute!
+
+```python
+# ❌ ПЛОХО — status "restricted" сохраняется после unmute!
+member = await bot.get_chat_member(chat_id, user_id)
+is_muted = member.status == "restricted"
+# → Всегда True если пользователь хоть раз был ограничен!
+
+# ✅ ХОРОШО — проверяем реальную возможность писать
+member = await bot.get_chat_member(chat_id, user_id)
+can_send = True
+if hasattr(member, 'can_send_messages'):
+    can_send = member.can_send_messages if member.can_send_messages is not None else True
+
+is_muted = not can_send  # True только если НЕ МОЖЕТ писать
+```
+
+**Объяснение:** Telegram сохраняет `status = "restricted"` даже когда все права выданы. Это особенность API. Проверять нужно конкретные права (`can_send_messages`), а не статус.
+
+### 41. ИЗОЛЯЦИЯ ТЕСТОВ — ДВОЙНОЙ UNMUTE + ПРОВЕРКА!
+
+**Проблема:** Жертва оставалась замученной от предыдущего теста, следующий тест падал.
+
+```python
+# ❌ ПЛОХО — один unmute может не сработать
+await unmute_user(bot, chat_id, victim.id)
+# → Пользователь всё ещё замучен!
+
+# ✅ ХОРОШО — двойной unmute с задержками + проверка
+await unmute_user(bot, chat_id, victim.id)
+await asyncio.sleep(2)
+await unmute_user(bot, chat_id, victim.id)  # Второй раз для надёжности
+await asyncio.sleep(2)
+
+# ОБЯЗАТЕЛЬНО: проверка перед тестом
+initial_state = await get_user_restrictions(bot, chat_id, victim.id)
+assert not initial_state.get("is_restricted"), \
+    f"SETUP FAIL: Victim still muted! State: {initial_state}"
+```
+
+**Правило:** В тестах где проверяется мут/unmute:
+1. Двойной unmute с задержками
+2. Assert перед тестом что пользователь НЕ замучен
+3. Cleanup в finally блоке
+
+---
+
+## Обновлённый Checklist (2025-12-28)
+
+### Для E2E теста:
+- [ ] `.env.test` загружается ПЕРВЫМ
+- [ ] Fixtures определены в тестовом файле
+- [ ] Файл добавлен в `allowed_on_windows`
+- [ ] **Database URL хардкодит 127.0.0.1:5433** (правило 36)
+- [ ] `ensure_user_in_chat` использует `invite_link`
+- [ ] Print без эмодзи (ASCII only)
+- [ ] **FloodWait — ждать, не skip** (правило 37)
+- [ ] **API сервисов проверен перед использованием** (правило 38)
+- [ ] **Реальные тестовые данные** (правило 39)
+- [ ] **Проверка мута через can_send_messages** (правило 40)
+- [ ] **Двойной unmute + assert перед тестом** (правило 41)
+- [ ] Cleanup в finally блоке
+
+### Для Alembic миграций:
+- [ ] **Revision ID уникален** (правило 35)
+- [ ] Revision ID имеет префикс модуля (sm01, as01, cf01)
+- [ ] down_revision указывает на правильную предыдущую миграцию
+
+---
+
+*Последнее обновление: 2025-12-28* (добавлены правила 35-41: Alembic ID, database URL, FloodWait, API сигнатуры, реальные данные, проверка мута, изоляция тестов)

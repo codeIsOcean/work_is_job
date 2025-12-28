@@ -120,6 +120,10 @@ async def flood_advanced_menu(
     notification_delay = settings.flood_notification_delete_delay or 0
     notification_delay_text = f"{notification_delay} сек" if notification_delay else "Не удалять"
 
+    # Статус удаления флуд-сообщений
+    flood_delete_messages = getattr(settings, 'flood_delete_messages', True)
+    delete_messages_status = "✅ Вкл" if flood_delete_messages else "❌ Выкл"
+
     # Формируем текст меню
     text = (
         f"⚙️ <b>Дополнительные настройки антифлуда</b>\n\n"
@@ -134,6 +138,7 @@ async def flood_advanced_menu(
         f"При муте: {mute_text}\n"
         f"При бане: {ban_text}\n\n"
         f"<b>━━━ Удаление ━━━</b>\n"
+        f"<b>Удалять сообщения:</b> {delete_messages_status}\n"
         f"<b>Задержка удаления:</b> {delete_delay_text}\n"
         f"<b>Автоудаление уведомления:</b> {notification_delay_text}"
     )
@@ -259,8 +264,14 @@ async def flood_advanced_menu(
                 )
             ],
             # ─────────────────────────────────────────────────────
-            # Задержки
+            # Удаление сообщений
             # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text=f"🗑️ Удалять сообщения: {delete_messages_status}",
+                    callback_data=f"cf:t:fldel:{chat_id}"
+                )
+            ],
             [
                 InlineKeyboardButton(
                     text=f"⏱️ Задержка удаления: {delete_delay_text}",

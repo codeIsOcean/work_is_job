@@ -129,12 +129,9 @@ async def set_flood_max_repeats(
     # Показываем уведомление
     await callback.answer(f"✅ Макс. повторов: {value}")
 
-    # Создаём фейковый callback для вызова flood_advanced_menu
-    # Меняем data на cf:fladv:{chat_id}
-    callback.data = f"cf:fladv:{chat_id}"
-
-    # Вызываем меню "Дополнительно"
-    await flood_advanced_menu(callback, session)
+    # Возвращаемся в меню "Дополнительно" через копию callback (pydantic frozen)
+    fake_callback = callback.model_copy(update={"data": f"cf:fladv:{chat_id}"})
+    await flood_advanced_menu(fake_callback, session)
 
 
 @settings_router.callback_query(F.data.regexp(r"^cf:flw:\d+:-?\d+$"))
@@ -167,11 +164,9 @@ async def set_flood_time_window(
     # Показываем уведомление
     await callback.answer(f"✅ Временное окно: {value} сек.")
 
-    # Создаём фейковый callback для вызова flood_advanced_menu
-    callback.data = f"cf:fladv:{chat_id}"
-
-    # Вызываем меню "Дополнительно"
-    await flood_advanced_menu(callback, session)
+    # Возвращаемся в меню "Дополнительно" через копию callback (pydantic frozen)
+    fake_callback = callback.model_copy(update={"data": f"cf:fladv:{chat_id}"})
+    await flood_advanced_menu(fake_callback, session)
 
 
 # ============================================================
@@ -310,3 +305,58 @@ async def toggle_flood_media(
 
     status_text = "включена" if new_value else "выключена"
     await callback.answer(f"Детекция медиа-флуда {status_text}")
+
+
+# ============================================================
+# ПЕРЕКЛЮЧАТЕЛЬ УДАЛЕНИЯ ФЛУД-СООБЩЕНИЙ
+# ============================================================
+
+@settings_router.callback_query(F.data.regexp(r"^cf:t:fldel:-?\d+$"))
+async def toggle_flood_delete_messages(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Переключает настройку удаления флуд-сообщений.
+
+    Callback: cf:t:fldel:{chat_id}
+
+    Когда включено (по умолчанию) - флуд-сообщения удаляются.
+    Когда выключено - применяется только действие (мут/бан/warn),
+    сообщения остаются в чате.
+
+    Args:
+        callback: CallbackQuery
+        session: Сессия БД
+    """
+    # Импортируем flood_advanced_menu для возврата
+    from bot.handlers.content_filter.flood.advanced import flood_advanced_menu
+
+    # Парсим chat_id
+    parts = callback.data.split(":")
+    chat_id = int(parts[3])
+
+    # Получаем настройки
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+
+    # Переключаем значение (по умолчанию True если не задано)
+    current_value = getattr(settings, 'flood_delete_messages', True)
+    new_value = not current_value
+
+    # Сохраняем в БД
+    await filter_manager.update_settings(chat_id, session, flood_delete_messages=new_value)
+
+    # Логируем изменение
+    logger.info(
+        f"[FloodSettings] flood_delete_messages изменено: "
+        f"chat_id={chat_id}, {current_value} -> {new_value}"
+    )
+
+    # Показываем уведомление
+    status_text = "включено" if new_value else "выключено"
+    await callback.answer(f"Удаление флуд-сообщений {status_text}")
+
+    # Возвращаемся в меню "Дополнительно" через симуляцию callback
+    # Создаём копию callback с новым data (pydantic frozen workaround)
+    fake_callback = callback.model_copy(update={"data": f"cf:fladv:{chat_id}"})
+    await flood_advanced_menu(fake_callback, session)

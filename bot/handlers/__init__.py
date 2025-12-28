@@ -31,6 +31,10 @@ from .profile_monitor import router as profile_monitor_router
 # Импортируем координатор сообщений в группах
 # Это единая точка входа для ContentFilter, Antispam, ProfileMonitor
 from .group_message_coordinator import group_message_coordinator_router
+# Импортируем роутер команд ScamMedia (/mutein, /banin, /scamrm, /scamlogo)
+from .scam_media.commands_handler import router as scam_media_commands_router
+# Импортируем роутер callbacks ScamMedia (обработка кнопок настроек)
+from .scam_media.callbacks_handler import router as scam_media_callbacks_router
 # Импортируем роутер команды /stat (статистика пользователя)
 from .user_stats_handler import router as user_stats_router
 # Импортируем роутер экспорта/импорта настроек
@@ -68,6 +72,11 @@ handlers_router.include_router(profile_monitor_router)        # Profile monitor 
 # Команда /stat - статистика пользователя в группе
 # ВАЖНО: должен быть ДО group_message_coordinator, иначе команда будет удалена
 handlers_router.include_router(user_stats_router)
+# ScamMedia команды (/mutein, /banin, /scamrm, /scamlogo)
+# ВАЖНО: должен быть ДО group_message_coordinator
+handlers_router.include_router(scam_media_commands_router)
+# ScamMedia callbacks (обработка кнопок настроек)
+handlers_router.include_router(scam_media_callbacks_router)
 # Экспорт/импорт настроек групп (работает в ЛС бота)
 handlers_router.include_router(settings_export_router)
 # ============================================================
@@ -106,6 +115,10 @@ def create_fresh_handlers_router():
     fresh_router.include_router(profile_monitor_router)
     # Команда /stat - статистика пользователя (ДО coordinator!)
     fresh_router.include_router(user_stats_router)
+    # ScamMedia команды (/mutein, /banin, /scamrm, /scamlogo)
+    fresh_router.include_router(scam_media_commands_router)
+    # ScamMedia callbacks (обработка кнопок настроек)
+    fresh_router.include_router(scam_media_callbacks_router)
     # Экспорт/импорт настроек групп (работает в ЛС бота)
     fresh_router.include_router(settings_export_router)
     # Group Message Coordinator - единый хендлер для групповых сообщений
