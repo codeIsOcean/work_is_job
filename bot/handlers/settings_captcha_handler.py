@@ -27,6 +27,9 @@ from bot.services.groups_settings_in_private_logic import (
     set_captcha_flood_window,
     set_captcha_flood_action,
     set_system_mute_announcements_enabled,
+    # Сеттер для действия при провале капчи (decline/keep)
+    set_captcha_failure_action,
+    get_captcha_failure_action,
     check_granular_permissions,
 )
 from bot.services.visual_captcha_logic import get_visual_captcha_status
@@ -89,14 +92,20 @@ def _format_duration(seconds: int) -> str:
     return " ".join(parts)
 
 
-async def _render_settings_text(chat, settings, *, visual_enabled: bool) -> str:
+async def _render_settings_text(chat, settings, *, visual_enabled: bool, failure_action: str = "decline") -> str:
     header = build_group_header(chat)
     lines = [header, "", "⚙️ <b>Настройки капчи</b>"]
+
+    # Человекопонятное отображение failure_action
+    # "decline" = отклонить заявку, "keep" = оставить висеть
+    failure_action_display = "🚫 Отклонить" if failure_action == "decline" else "📌 Оставить"
+
     lines.extend(
         [
             f"Визуальная капча: {'🟢 включена' if visual_enabled else '🔴 выключена'}",
             f"Капча при вступлении: {'🟢' if settings.captcha_join_enabled else '🔴'}",
             f"Капча для инвайтов: {'🟢' if settings.captcha_invite_enabled else '🔴'}",
+            f"При провале капчи: {failure_action_display}",
             f"Время на решение: {_format_duration(settings.captcha_timeout_seconds)}",
             f"Удаление сообщения: {_format_duration(settings.captcha_message_ttl_seconds)}",
             f"Анти-флуд порог: {settings.captcha_flood_threshold}",
@@ -114,6 +123,7 @@ def _build_keyboard(chat_id: int, settings) -> list[list[tuple[str, str]]]:
 
     Кнопки:
     - Переключатели режимов капчи (Visual, Join, Invite)
+    - Настройка действия при провале капчи
     - Настройки времени и TTL
     - Настройки анти-флуда
     """
@@ -121,6 +131,8 @@ def _build_keyboard(chat_id: int, settings) -> list[list[tuple[str, str]]]:
         # Переключатели режимов капчи
         [("Визуальная капча", f"captcha_toggle:visual:{chat_id}"), ("Капча при вступлении", f"captcha_toggle:join:{chat_id}")],
         [("Капча для инвайтов", f"captcha_toggle:invite:{chat_id}"), ("Системные сообщения", f"captcha_toggle:announce:{chat_id}")],
+        # Действие при провале капчи (decline/keep)
+        [("🚫 При провале капчи", f"captcha_cycle:failure_action:{chat_id}")],
         # Общее время на решение и legacy TTL
         [("⏳ Время на решение", f"captcha_input:timeout:{chat_id}"), ("🗑 TTL сообщения", f"captcha_input:ttl:{chat_id}")],
         # TTL автоудаления сообщений в группе для Join и Invite капчи
@@ -147,10 +159,15 @@ async def _send_or_edit(callback: CallbackQuery, text: str, keyboard, *, parse_m
 
 
 async def _refresh_view(callback: CallbackQuery, session: AsyncSession, chat_id: int) -> None:
+    # Получаем информацию о группе и настройки капчи
     group = await get_group_by_chat_id(session, chat_id)
     settings = await get_captcha_settings(session, chat_id)
+    # Получаем статус визуальной капчи из Redis
     visual_enabled = await get_visual_captcha_status(chat_id)
-    text = await _render_settings_text(group, settings, visual_enabled=visual_enabled)
+    # Получаем действие при провале капчи (decline/keep)
+    failure_action = await get_captcha_failure_action(session, chat_id)
+    # Рендерим текст с настройками и клавиатуру
+    text = await _render_settings_text(group, settings, visual_enabled=visual_enabled, failure_action=failure_action)
     keyboard = _build_keyboard(chat_id, settings)
     await _send_or_edit(callback, text, keyboard)
 
@@ -285,36 +302,87 @@ async def toggle_captcha_setting(callback: CallbackQuery, session: AsyncSession)
     await callback.answer("✅ Настройка обновлена", show_alert=True)
 
 
+# Варианты действий при провале капчи для циклического переключения
+# "decline" = отклонить заявку (заявка удаляется из Telegram)
+# "keep" = оставить заявку висеть (админ может одобрить вручную)
+_FAILURE_ACTIONS = ["decline", "keep"]
+
+# Человекопонятные названия для действий при провале
+_FAILURE_ACTION_NAMES = {
+    "decline": "Отклонить заявку",
+    "keep": "Оставить заявку",
+}
+
+
 @captcha_settings_router.callback_query(F.data.startswith("captcha_cycle:"))
 async def cycle_captcha_setting(callback: CallbackQuery, session: AsyncSession):
+    """
+    Циклически переключает настройку капчи.
+
+    Поддерживает:
+    - flood_action: warn → mute → ban → warn...
+    - failure_action: decline → keep → decline...
+    """
     _, param, chat_id_str = callback.data.split(":")
     chat_id = int(chat_id_str)
 
+    # Проверяем права пользователя на изменение настроек
     has_permissions = await check_granular_permissions(callback.bot, callback.from_user.id, chat_id, "change_info", session)
     if not has_permissions:
         await callback.answer("❌ Недостаточно прав", show_alert=True)
         return
 
-    settings = await get_captcha_settings(session, chat_id)
-    current = settings.captcha_flood_action
-    try:
-        index = _FLOOD_ACTIONS.index(current)
-    except ValueError:
-        index = 0
-    new_action = _FLOOD_ACTIONS[(index + 1) % len(_FLOOD_ACTIONS)]
+    # Обрабатываем разные параметры
+    if param == "flood_action":
+        # Циклическое переключение действия анти-флуда: warn → mute → ban
+        settings = await get_captcha_settings(session, chat_id)
+        current = settings.captcha_flood_action
+        try:
+            index = _FLOOD_ACTIONS.index(current)
+        except ValueError:
+            index = 0
+        new_action = _FLOOD_ACTIONS[(index + 1) % len(_FLOOD_ACTIONS)]
 
-    await set_captcha_flood_action(session, chat_id, new_action)
-    await log_captcha_setting_change(
-        bot=callback.bot,
-        user=callback.from_user,
-        chat=await callback.bot.get_chat(chat_id),
-        setting="captcha_flood_action",
-        value=new_action,
-        session=session,
-    )
+        await set_captcha_flood_action(session, chat_id, new_action)
+        await log_captcha_setting_change(
+            bot=callback.bot,
+            user=callback.from_user,
+            chat=await callback.bot.get_chat(chat_id),
+            setting="captcha_flood_action",
+            value=new_action,
+            session=session,
+        )
+        notification = "✅ Действие анти-флуда обновлено"
+
+    elif param == "failure_action":
+        # Циклическое переключение действия при провале капчи: decline → keep
+        current = await get_captcha_failure_action(session, chat_id)
+        try:
+            index = _FAILURE_ACTIONS.index(current)
+        except ValueError:
+            index = 0
+        new_action = _FAILURE_ACTIONS[(index + 1) % len(_FAILURE_ACTIONS)]
+
+        await set_captcha_failure_action(session, chat_id, new_action)
+        await log_captcha_setting_change(
+            bot=callback.bot,
+            user=callback.from_user,
+            chat=await callback.bot.get_chat(chat_id),
+            setting="captcha_failure_action",
+            value=new_action,
+            session=session,
+        )
+        # Показываем человекопонятное название
+        action_name = _FAILURE_ACTION_NAMES.get(new_action, new_action)
+        notification = f"✅ При провале: {action_name}"
+
+    else:
+        # Неизвестный параметр
+        await callback.answer("❌ Неизвестный параметр", show_alert=True)
+        return
 
     await _refresh_view(callback, session, chat_id)
-    await callback.answer("✅ Действие обновлено", show_alert=True)
+    await callback.answer(notification, show_alert=True)
 
 
 @captcha_settings_router.callback_query(F.data.startswith("captcha_input:"))

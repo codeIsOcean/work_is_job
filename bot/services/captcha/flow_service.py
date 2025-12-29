@@ -429,12 +429,16 @@ async def _send_visual_dm_deep_link(
     # ═══════════════════════════════════════════════════════════════════════
     timeout = settings.get_timeout_for_mode(CaptchaMode.VISUAL_DM)
 
+    # Запускаем фоновую задачу для таймаута
+    # Передаём failure_action из настроек группы для определения
+    # что делать при провале: "decline" = отклонить, "keep" = оставить висеть
     asyncio.create_task(
         _decline_join_request_after_timeout(
             bot=bot,
             chat_id=chat.id,
             user_id=user.id,
             timeout=timeout,
+            failure_action=settings.failure_action,
         )
     )
 
@@ -442,6 +446,32 @@ async def _send_visual_dm_deep_link(
         f"⏰ [VISUAL_DM] Таймаут запланирован: "
         f"user_id={user.id}, через {timeout}с"
     )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # ШАГ 5: Планируем напоминания (если пользователь не нажмёт кнопку)
+    # ═══════════════════════════════════════════════════════════════════════
+    from bot.services.captcha.reminder_service import (
+        schedule_reminder,
+        mark_captcha_active,
+    )
+
+    # Отмечаем капчу как активную (нужно для работы напоминаний и таймаута)
+    await mark_captcha_active(user.id, chat.id)
+
+    # Планируем напоминания если они включены
+    if settings.reminder_seconds > 0:
+        await schedule_reminder(
+            bot=bot,
+            user_id=user.id,
+            chat_id=chat.id,
+            reminder_seconds=settings.reminder_seconds,
+            timeout_seconds=timeout,
+            max_reminders=settings.reminder_count,
+        )
+        logger.info(
+            f"🔔 [VISUAL_DM] Напоминания запланированы: user_id={user.id}, "
+            f"интервал={settings.reminder_seconds}с, макс={settings.reminder_count}"
+        )
 
     return True
 
@@ -451,18 +481,24 @@ async def _decline_join_request_after_timeout(
     chat_id: int,
     user_id: int,
     timeout: int,
+    failure_action: str = "decline",
 ) -> None:
     """
-    Отклоняет join request после таймаута если пользователь не прошёл капчу.
+    Обрабатывает join request после таймаута если пользователь не прошёл капчу.
 
     Проверяет есть ли ещё active join request в Redis.
     Если есть - значит пользователь не нажал кнопку или не прошёл капчу.
+
+    Действие зависит от failure_action:
+    - "decline" = отклонить заявку (удаляется из Telegram)
+    - "keep" = оставить заявку висеть (админ может одобрить вручную)
 
     Args:
         bot: Экземпляр бота
         chat_id: ID группы
         user_id: ID пользователя
         timeout: Таймаут в секундах
+        failure_action: Действие при провале ("decline" или "keep")
     """
     from bot.services.captcha.dm_flow_service import (
         get_join_request,
@@ -471,30 +507,56 @@ async def _decline_join_request_after_timeout(
         delete_captcha_message_ids,
     )
     from bot.handlers.captcha.captcha_messages import send_failure_message
+    from bot.services.captcha.reminder_service import (
+        is_captcha_active,
+        mark_captcha_inactive,
+    )
 
     # Ждём таймаут
     await asyncio.sleep(timeout)
+
+    # Проверяем активна ли ещё капча (другой таймаут мог уже обработать)
+    if not await is_captcha_active(user_id, chat_id):
+        logger.debug(
+            f"🔍 [VISUAL_DM_TIMEOUT] Капча уже неактивна: "
+            f"user_id={user_id}, chat_id={chat_id}"
+        )
+        return
 
     # Проверяем есть ли ещё join request
     join_request = await get_join_request(user_id, chat_id)
 
     if join_request:
+        # Отмечаем капчу как неактивную (это остановит другие таймауты)
+        await mark_captcha_inactive(user_id, chat_id)
+
         # Join request ещё активен - значит капча не пройдена
         logger.info(
-            f"⏰ [VISUAL_DM_TIMEOUT] Время вышло: user_id={user_id}, chat_id={chat_id}"
+            f"⏰ [VISUAL_DM_TIMEOUT] Время вышло: user_id={user_id}, chat_id={chat_id}, "
+            f"failure_action={failure_action}"
         )
 
-        # Отклоняем join request
-        try:
-            await bot.decline_chat_join_request(chat_id=chat_id, user_id=user_id)
+        # Проверяем настройку failure_action
+        # "decline" = отклонить заявку (текущее поведение)
+        # "keep" = оставить заявку висеть (старое поведение)
+        if failure_action == "decline":
+            # Отклоняем join request
+            try:
+                await bot.decline_chat_join_request(chat_id=chat_id, user_id=user_id)
+                logger.info(
+                    f"🚫 [VISUAL_DM_TIMEOUT] Join request отклонён: "
+                    f"user_id={user_id}, chat_id={chat_id}"
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ [VISUAL_DM_TIMEOUT] Ошибка отклонения: {e}")
+        else:
+            # failure_action == "keep" - оставляем заявку висеть
             logger.info(
-                f"🚫 [VISUAL_DM_TIMEOUT] Join request отклонён: "
+                f"📌 [VISUAL_DM_TIMEOUT] Join request оставлен (failure_action=keep): "
                 f"user_id={user_id}, chat_id={chat_id}"
             )
-        except Exception as e:
-            logger.warning(f"⚠️ [VISUAL_DM_TIMEOUT] Ошибка отклонения: {e}")
 
-        # Удаляем join request из Redis
+        # Удаляем join request из Redis (в обоих случаях очищаем кэш)
         await delete_join_request(user_id, chat_id)
 
         # Удаляем все сообщения капчи
@@ -507,8 +569,52 @@ async def _decline_join_request_after_timeout(
 
         await delete_captcha_message_ids(user_id)
 
+        # Получаем информацию о группе для сообщения о провале
+        group_name = None
+        group_link = None
+        try:
+            chat_info = await bot.get_chat(chat_id)
+            group_name = chat_info.title
+            if chat_info.username:
+                group_link = f"https://t.me/{chat_info.username}"
+        except Exception as e:
+            logger.debug(f"Не удалось получить информацию о группе: {e}")
+
         # Отправляем сообщение о провале
-        await send_failure_message(bot, user_id, reason="timeout")
+        failure_msg = await send_failure_message(
+            bot, user_id, reason="timeout",
+            group_name=group_name, group_link=group_link
+        )
+
+        # Планируем удаление сообщения о провале
+        if failure_msg:
+            from bot.services.captcha.dm_flow_service import save_captcha_message_id
+            from bot.services.captcha.reminder_service import schedule_dialog_cleanup
+
+            # Сохраняем ID для чистки
+            await save_captcha_message_id(user_id, failure_msg.message_id)
+
+            # Получаем cleanup_delay из настроек
+            cleanup_delay = 120  # дефолт
+            try:
+                from bot.database.session import get_session
+                from bot.services.captcha.settings_service import get_captcha_settings
+                async with get_session() as session:
+                    settings = await get_captcha_settings(session, chat_id)
+                    cleanup_delay = settings.dialog_cleanup_seconds
+            except Exception as e:
+                logger.debug(f"Используем дефолт cleanup_delay=120: {e}")
+
+            # Планируем чистку
+            if cleanup_delay > 0:
+                await schedule_dialog_cleanup(
+                    bot=bot,
+                    user_id=user_id,
+                    cleanup_seconds=cleanup_delay,
+                )
+                logger.info(
+                    f"🧹 [VISUAL_DM_TIMEOUT] Чистка запланирована через {cleanup_delay}с"
+                )
 
     else:
         # Join request уже обработан (капча пройдена или отклонена)
@@ -832,44 +938,78 @@ async def _delete_captcha_after_timeout(
         f"user_id={user_id}, chat_id={chat_id}"
     )
 
-    # Для VISUAL_DM: отклоняем join request и планируем чистку диалога
+    # Для VISUAL_DM: обрабатываем join request и планируем чистку диалога
     if target_chat_id == user_id:
-        # Отклоняем join request
-        try:
-            await bot.decline_chat_join_request(chat_id=chat_id, user_id=user_id)
-            logger.info(
-                f"🚫 [CAPTCHA_TIMEOUT] Join request отклонён: "
-                f"user_id={user_id}, chat_id={chat_id}"
-            )
-        except Exception as e:
-            logger.warning(f"⚠️ [CAPTCHA_TIMEOUT] Не удалось отклонить: {e}")
-
-        # Отправляем сообщение о провале
+        # Импортируем нужные модули
         from bot.handlers.captcha.captcha_messages import send_failure_message
         from bot.services.captcha.dm_flow_service import save_captcha_message_id
+        from bot.database.session import get_session
 
-        failure_msg = await send_failure_message(bot, user_id, reason="timeout")
+        # Получаем настройки для определения failure_action
+        try:
+            async with get_session() as session:
+                settings = await get_captcha_settings(session, chat_id)
+                failure_action = settings.failure_action
+                cleanup_delay = settings.dialog_cleanup_seconds
+        except Exception as e:
+            logger.error(f"❌ [CAPTCHA_TIMEOUT] Ошибка получения настроек: {e}")
+            # Дефолтные значения если не удалось получить настройки
+            # По умолчанию оставляем заявку висеть (старое поведение)
+            failure_action = "keep"
+            cleanup_delay = 120
+
+        # Проверяем настройку failure_action
+        # "decline" = отклонить заявку (текущее поведение)
+        # "keep" = оставить заявку висеть (старое поведение)
+        if failure_action == "decline":
+            # Отклоняем join request
+            try:
+                await bot.decline_chat_join_request(chat_id=chat_id, user_id=user_id)
+                logger.info(
+                    f"🚫 [CAPTCHA_TIMEOUT] Join request отклонён: "
+                    f"user_id={user_id}, chat_id={chat_id}"
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ [CAPTCHA_TIMEOUT] Не удалось отклонить: {e}")
+        else:
+            # failure_action == "keep" - оставляем заявку висеть
+            logger.info(
+                f"📌 [CAPTCHA_TIMEOUT] Join request оставлен (failure_action=keep): "
+                f"user_id={user_id}, chat_id={chat_id}"
+            )
+
+        # Получаем информацию о группе для сообщения о провале
+        group_name = None
+        group_link = None
+        try:
+            chat_info = await bot.get_chat(chat_id)
+            group_name = chat_info.title
+            if chat_info.username:
+                group_link = f"https://t.me/{chat_info.username}"
+        except Exception as e:
+            logger.debug(f"Не удалось получить информацию о группе: {e}")
+
+        # Отправляем сообщение о провале
+        failure_msg = await send_failure_message(
+            bot, user_id, reason="timeout",
+            group_name=group_name, group_link=group_link
+        )
         if failure_msg:
             await save_captcha_message_id(user_id, failure_msg.message_id)
 
-        # Планируем чистку диалога (берём из настроек)
-        try:
-            from bot.database.session import get_session
-            async with get_session() as session:
-                settings = await get_captcha_settings(session, chat_id)
-                cleanup_delay = settings.dialog_cleanup_seconds
-
-                if cleanup_delay > 0:
-                    await schedule_dialog_cleanup(
-                        bot=bot,
-                        user_id=user_id,
-                        cleanup_seconds=cleanup_delay,
-                    )
-                    logger.info(
-                        f"🧹 [CAPTCHA_TIMEOUT] Чистка запланирована через {cleanup_delay}с"
-                    )
-        except Exception as e:
-            logger.error(f"❌ [CAPTCHA_TIMEOUT] Ошибка планирования чистки: {e}")
+        # Планируем чистку диалога
+        if cleanup_delay > 0:
+            try:
+                await schedule_dialog_cleanup(
+                    bot=bot,
+                    user_id=user_id,
+                    cleanup_seconds=cleanup_delay,
+                )
+                logger.info(
+                    f"🧹 [CAPTCHA_TIMEOUT] Чистка запланирована через {cleanup_delay}с"
+                )
+            except Exception as e:
+                logger.error(f"❌ [CAPTCHA_TIMEOUT] Ошибка планирования чистки: {e}")
 
 
 async def process_captcha_success(
@@ -1111,18 +1251,31 @@ async def process_captcha_failure(
     )
 
     # ═══════════════════════════════════════════════════════════════════════
-    # ШАГ 2: Для Visual Captcha - отклоняем join request
+    # ШАГ 2: Для Visual Captcha - обрабатываем join request
     # ═══════════════════════════════════════════════════════════════════════
     if mode == CaptchaMode.VISUAL_DM:
-        try:
-            await bot.decline_chat_join_request(chat_id, user_id)
+        # Получаем настройки для определения failure_action
+        settings = await get_captcha_settings(session, chat_id)
+
+        # Проверяем настройку failure_action
+        # "decline" = отклонить заявку (текущее поведение)
+        # "keep" = оставить заявку висеть (старое поведение)
+        if settings.failure_action == "decline":
+            try:
+                await bot.decline_chat_join_request(chat_id, user_id)
+                logger.info(
+                    f"❌ [CAPTCHA_FAILURE] Join request отклонён: "
+                    f"user_id={user_id}, chat_id={chat_id}, reason={reason}"
+                )
+            except TelegramAPIError as e:
+                logger.debug(
+                    f"Не удалось отклонить join request: {e}"
+                )
+        else:
+            # failure_action == "keep" - оставляем заявку висеть
             logger.info(
-                f"❌ [CAPTCHA_FAILURE] Join request отклонён: "
+                f"📌 [CAPTCHA_FAILURE] Join request оставлен (failure_action=keep): "
                 f"user_id={user_id}, chat_id={chat_id}, reason={reason}"
-            )
-        except TelegramAPIError as e:
-            logger.debug(
-                f"Не удалось отклонить join request: {e}"
             )
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -1141,10 +1294,10 @@ async def process_captcha_failure(
 
     # ═══════════════════════════════════════════════════════════════════════
     # ШАГ 4: Планируем чистку диалога (только для VISUAL_DM)
+    # settings уже получены в ШАГ 2, используем их
     # ═══════════════════════════════════════════════════════════════════════
     if mode == CaptchaMode.VISUAL_DM:
-        # Получаем настройки для dialog_cleanup_seconds
-        settings = await get_captcha_settings(session, chat_id)
+        # settings уже получены в ШАГ 2 - используем dialog_cleanup_seconds
         if settings.dialog_cleanup_seconds > 0:
             await schedule_dialog_cleanup(
                 bot=bot,

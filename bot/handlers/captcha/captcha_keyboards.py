@@ -202,6 +202,13 @@ def build_captcha_settings_keyboard(
     overflow_text = overflow_map.get(settings.overflow_action, "не задано")
     overflow_btn_text = f"⚡ При переполнении: {overflow_text}"
 
+    # Действие при провале капчи (decline/keep)
+    failure_action_map = {
+        "decline": "Отклонить",
+        "keep": "Оставить",
+    }
+    failure_action_text = failure_action_map.get(settings.failure_action, "Оставить")
+
     # ═══════════════════════════════════════════════════════════════════════
     # Собираем клавиатуру
     # ═══════════════════════════════════════════════════════════════════════
@@ -247,6 +254,12 @@ def build_captcha_settings_keyboard(
         [InlineKeyboardButton(
             text=overflow_btn_text,
             callback_data=f"captcha:overflow:{chat_id}",
+        )],
+
+        # Действие при провале капчи (decline/keep)
+        [InlineKeyboardButton(
+            text=f"🚫 При провале: {failure_action_text}",
+            callback_data=f"captcha_cycle:failure_action:{chat_id}",
         )],
 
         # Разделитель

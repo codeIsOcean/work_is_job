@@ -622,6 +622,47 @@ async def set_system_mute_announcements_enabled(session: AsyncSession, chat_id: 
     return settings.system_mute_announcements_enabled
 
 
+async def set_captcha_failure_action(session: AsyncSession, chat_id: int, action: str) -> str:
+    """
+    Устанавливает действие при провале капчи для Visual DM режима.
+
+    Args:
+        session: Асинхронная сессия SQLAlchemy
+        chat_id: ID группы
+        action: Действие ("decline" или "keep")
+            - "decline" = отклонить заявку (заявка удаляется из Telegram)
+            - "keep" = оставить заявку висеть (админ может одобрить вручную)
+
+    Returns:
+        Установленное значение action
+    """
+    # Получаем или создаём настройки для группы
+    settings = await _ensure_chat_settings(session, chat_id)
+    # Устанавливаем действие при провале капчи
+    settings.captcha_failure_action = action
+    # Сохраняем изменения в БД
+    await session.commit()
+    return settings.captcha_failure_action
+
+
+async def get_captcha_failure_action(session: AsyncSession, chat_id: int) -> str:
+    """
+    Получает текущее действие при провале капчи для группы.
+
+    Args:
+        session: Асинхронная сессия SQLAlchemy
+        chat_id: ID группы
+
+    Returns:
+        Текущее значение action ("decline" или "keep")
+        По умолчанию возвращает "keep" (оставить заявку висеть)
+    """
+    # Получаем настройки группы
+    settings = await _ensure_chat_settings(session, chat_id)
+    # Возвращаем действие при провале или дефолт "keep" (старое поведение)
+    return settings.captcha_failure_action or "keep"
+
+
 async def toggle_visual_captcha(session: AsyncSession, chat_id: int) -> bool:
     """Переключает визуальную капчу и возвращает новый статус.
 

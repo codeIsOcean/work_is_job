@@ -414,57 +414,14 @@ async def handle_captcha_deep_link(
         if chat_id:
             await mark_captcha_active(user_id, chat_id)
 
-        # Планируем периодические напоминания
-        # Отправляются каждые reminder_seconds секунд (по умолчанию 60)
-        # Максимум reminder_count напоминаний (по умолчанию 3)
-        if chat_id and settings.reminder_seconds > 0:
-            await schedule_reminder(
-                bot=bot,
-                user_id=user_id,
-                chat_id=chat_id,
-                # Интервал между напоминаниями (60 сек по умолчанию)
-                reminder_seconds=settings.reminder_seconds,
-                # Общий таймаут капчи для расчёта оставшегося времени
-                timeout_seconds=timeout_seconds,
-                # Максимум напоминаний (3 по умолчанию)
-                max_reminders=settings.reminder_count,
-            )
-
-            logger.info(
-                f"🔔 [FSM] Напоминания запланированы: user_id={user_id}, "
-                f"интервал={settings.reminder_seconds}с, макс={settings.reminder_count}, "
-                f"таймаут={timeout_seconds}с"
-            )
-
-        # Планируем таймаут капчи
-        # После timeout_seconds капча будет автоматически провалена
-        if chat_id:
-            # Создаём callback для обработки таймаута
-            async def on_timeout(bot_instance, uid, cid):
-                """Callback при истечении времени капчи."""
-                # Отклоняем join request
-                try:
-                    await bot_instance.decline_chat_join_request(cid, uid)
-                    logger.info(
-                        f"🚫 [FSM_TIMEOUT] Join request отклонён: user_id={uid}"
-                    )
-                except Exception as e:
-                    logger.warning(f"⚠️ [FSM_TIMEOUT] Ошибка отклонения: {e}")
-
-            await schedule_timeout(
-                bot=bot,
-                user_id=user_id,
-                chat_id=chat_id,
-                # Таймаут капчи из настроек
-                timeout_seconds=timeout_seconds,
-                # Callback при таймауте
-                on_timeout_callback=on_timeout,
-            )
-
-            logger.info(
-                f"⏰ [FSM] Таймаут запланирован: user_id={user_id}, "
-                f"через {timeout_seconds}с"
-            )
+        # ПРИМЕЧАНИЕ: Напоминания и таймаут уже запланированы в flow_service.py
+        # при отправке deep link invite. Здесь НЕ планируем повторно,
+        # чтобы избежать дублирования.
+        #
+        # VISUAL_DM_TIMEOUT (flow_service.py) обрабатывает:
+        # - Таймаут (decline/keep в зависимости от настроек)
+        # - Отправку сообщения о провале
+        # - Планирование чистки диалога
 
     except Exception as e:
         # Логируем ошибку

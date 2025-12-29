@@ -422,37 +422,62 @@ async def _timeout_task(
         # Удаляем последнее напоминание перед отправкой сообщения о таймауте
         await _delete_previous_reminder(bot, user_id)
 
-        # Отправляем сообщение о таймауте
-        from bot.handlers.captcha.captcha_messages import send_failure_message
-        # Сохраняем сообщение чтобы потом удалить при чистке диалога
-        failure_msg = await send_failure_message(bot, user_id, reason="timeout")
-        if failure_msg:
-            # Сохраняем ID для чистки диалога
-            await save_captcha_message_id(user_id, failure_msg.message_id)
-
-        # Отклоняем join request
-        try:
-            await bot.decline_chat_join_request(chat_id=chat_id, user_id=user_id)
-            logger.info(
-                f"🚫 [TIMEOUT] Join request отклонён: "
-                f"user_id={user_id}, chat_id={chat_id}"
-            )
-        except Exception as e:
-            logger.warning(
-                f"⚠️ [TIMEOUT] Не удалось отклонить: {e}"
-            )
-
-        # Планируем чистку диалога (удаление всех сообщений капчи)
-        # Используем дефолт 120 секунд если не получится получить из настроек
+        # Получаем настройки для определения failure_action и cleanup_delay
+        # Используем дефолты если не получится получить из настроек
+        failure_action = "keep"  # По умолчанию оставляем заявку висеть
         cleanup_delay = 120
         try:
             from bot.database.session import get_session
             from bot.services.captcha.settings_service import get_captcha_settings
             async with get_session() as session:
                 settings = await get_captcha_settings(session, chat_id)
+                failure_action = settings.failure_action
                 cleanup_delay = settings.dialog_cleanup_seconds
         except Exception as e:
-            logger.debug(f"Используем дефолт cleanup_delay=120: {e}")
+            logger.debug(f"Используем дефолты (failure_action=keep, cleanup_delay=120): {e}")
+
+        # Получаем информацию о группе для сообщения о провале
+        group_name = None
+        group_link = None
+        try:
+            chat_info = await bot.get_chat(chat_id)
+            group_name = chat_info.title
+            if chat_info.username:
+                group_link = f"https://t.me/{chat_info.username}"
+        except Exception as e:
+            logger.debug(f"Не удалось получить информацию о группе: {e}")
+
+        # Отправляем сообщение о таймауте
+        from bot.handlers.captcha.captcha_messages import send_failure_message
+        # Сохраняем сообщение чтобы потом удалить при чистке диалога
+        failure_msg = await send_failure_message(
+            bot, user_id, reason="timeout",
+            group_name=group_name, group_link=group_link
+        )
+        if failure_msg:
+            # Сохраняем ID для чистки диалога
+            await save_captcha_message_id(user_id, failure_msg.message_id)
+
+        # Проверяем настройку failure_action
+        # "decline" = отклонить заявку, "keep" = оставить висеть
+        if failure_action == "decline":
+            # Отклоняем join request
+            try:
+                await bot.decline_chat_join_request(chat_id=chat_id, user_id=user_id)
+                logger.info(
+                    f"🚫 [TIMEOUT] Join request отклонён: "
+                    f"user_id={user_id}, chat_id={chat_id}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"⚠️ [TIMEOUT] Не удалось отклонить: {e}"
+                )
+        else:
+            # failure_action == "keep" - оставляем заявку висеть
+            logger.info(
+                f"📌 [TIMEOUT] Join request оставлен (failure_action=keep): "
+                f"user_id={user_id}, chat_id={chat_id}"
+            )
 
         # Планируем чистку если задержка > 0
         if cleanup_delay > 0:

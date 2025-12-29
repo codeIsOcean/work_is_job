@@ -111,6 +111,16 @@ class CaptchaSettings:
     # Через сколько секунд чистить диалог = таймаут капчи в ЛС (дефолт 240)
     dialog_cleanup_seconds: int
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ДЕЙСТВИЕ ПРИ ПРОВАЛЕ КАПЧИ
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # Действие при провале/таймауте капчи для Visual DM режима:
+    # "decline" = отклонить заявку (заявка удаляется из Telegram)
+    # "keep" = оставить заявку висеть (админ может одобрить вручную)
+    # Дефолт: "decline" (текущее поведение)
+    failure_action: str
+
     def get_timeout_for_mode(self, mode: CaptchaMode) -> int:
         """
         Возвращает таймаут для конкретного режима капчи.
@@ -319,6 +329,14 @@ async def get_captcha_settings(
         # Чистка диалога = таймаут капчи в ЛС: NULL → 240 сек (4 минуты)
         # Время достаточное для 3 напоминаний по 60 сек + запас
         dialog_cleanup_seconds=settings.captcha_dialog_cleanup_seconds if settings.captcha_dialog_cleanup_seconds is not None else 240,
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # Действие при провале капчи (Visual DM)
+        # ═══════════════════════════════════════════════════════════════════════
+
+        # failure_action: NULL → "keep" (оставить заявку висеть - старое поведение)
+        # "decline" = отклонить заявку (заявка удаляется из Telegram)
+        failure_action=getattr(settings, 'captcha_failure_action', None) or "keep",
     )
 
 
@@ -378,6 +396,9 @@ async def update_captcha_setting(
         "reminder_seconds": "captcha_reminder_seconds",
         "reminder_count": "captcha_reminder_count",
         "dialog_cleanup_seconds": "captcha_dialog_cleanup_seconds",
+
+        # Действие при провале капчи (Visual DM)
+        "failure_action": "captcha_failure_action",
     }
 
     # Проверяем что поле существует в маппинге

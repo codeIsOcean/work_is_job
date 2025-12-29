@@ -131,10 +131,13 @@ CAPTCHA_NO_ATTEMPTS = """
 """
 
 # Время вышло
+# {group_name} - название группы (ссылка)
 CAPTCHA_TIMEOUT = """
 ⏰ <b>Время вышло</b>
 
 Капча не пройдена. Вы не можете войти в группу.
+
+Если хотите зайти в {group_name} — перейдите в неё и подайте заявку заново.
 """
 
 
@@ -241,6 +244,8 @@ async def send_failure_message(
     bot: Bot,
     user_id: int,
     reason: str = "timeout",
+    group_name: Optional[str] = None,
+    group_link: Optional[str] = None,
 ) -> Optional[Message]:
     """
     Отправляет сообщение о провале капчи.
@@ -249,6 +254,8 @@ async def send_failure_message(
         bot: Экземпляр бота для отправки
         user_id: ID пользователя
         reason: Причина провала ("timeout" или "no_attempts")
+        group_name: Название группы (для timeout сообщения)
+        group_link: Ссылка на группу (опционально)
 
     Returns:
         Message если отправлено успешно, None при ошибке
@@ -256,7 +263,14 @@ async def send_failure_message(
     try:
         # Выбираем текст в зависимости от причины
         if reason == "timeout":
-            text = CAPTCHA_TIMEOUT
+            # Формируем ссылку на группу
+            if group_link and group_name:
+                group_display = f"<a href='{group_link}'>{group_name}</a>"
+            elif group_name:
+                group_display = f"<b>{group_name}</b>"
+            else:
+                group_display = "группу"
+            text = CAPTCHA_TIMEOUT.format(group_name=group_display)
         else:
             text = CAPTCHA_NO_ATTEMPTS
 
@@ -265,6 +279,7 @@ async def send_failure_message(
             chat_id=user_id,
             text=text,
             parse_mode="HTML",
+            disable_web_page_preview=True,
         )
 
         # Логируем отправку
