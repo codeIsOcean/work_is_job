@@ -36,11 +36,11 @@ CAPTCHA_DM_TITLE = """
 """
 
 # Приглашение пройти капчу через deep link (отправляется в ЛС при join request)
-# {group_name} - название группы
+# {group_display} - название группы (может быть ссылкой)
 CAPTCHA_DEEP_LINK_INVITE = """
 🔐 <b>Проверка для входа в группу</b>
 
-Для входа в «<b>{group_name}</b>» нужно пройти капчу.
+Для входа в «{group_display}» нужно пройти капчу.
 
 Нажмите кнопку ниже чтобы начать.
 """
@@ -421,6 +421,7 @@ async def send_deep_link_invite(
     user_id: int,
     group_name: str,
     deep_link: str,
+    group_link: Optional[str] = None,
 ) -> Optional[Message]:
     """
     Отправляет приглашение пройти капчу через deep link.
@@ -433,13 +434,20 @@ async def send_deep_link_invite(
         user_id: ID пользователя
         group_name: Название группы
         deep_link: URL deep link для запуска капчи
+        group_link: Ссылка на группу (опционально)
 
     Returns:
         Message если отправлено успешно, None при ошибке
     """
     try:
+        # Формируем отображение группы (ссылка или просто название)
+        if group_link:
+            group_display = f"<a href='{group_link}'>{group_name}</a>"
+        else:
+            group_display = f"<b>{group_name}</b>"
+
         # Формируем текст приглашения
-        text = CAPTCHA_DEEP_LINK_INVITE.format(group_name=group_name)
+        text = CAPTCHA_DEEP_LINK_INVITE.format(group_display=group_display)
 
         # Создаём клавиатуру с кнопкой deep link
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -455,6 +463,7 @@ async def send_deep_link_invite(
             text=text,
             reply_markup=keyboard,
             parse_mode="HTML",
+            disable_web_page_preview=True,
         )
 
         logger.info(

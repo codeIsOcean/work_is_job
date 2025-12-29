@@ -383,11 +383,15 @@ async def _send_visual_dm_deep_link(
     # ШАГ 3: Отправляем deep link invitation в ЛС
     # ═══════════════════════════════════════════════════════════════════════
     try:
+        # Формируем ссылку на группу если есть username
+        group_link = f"https://t.me/{chat.username}" if chat.username else None
+
         msg = await send_deep_link_invite(
             bot=bot,
             user_id=user.id,
             group_name=chat.title or "группу",
             deep_link=deep_link,
+            group_link=group_link,
         )
 
         if not msg:
