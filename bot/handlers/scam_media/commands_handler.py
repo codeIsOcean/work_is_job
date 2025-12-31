@@ -22,10 +22,12 @@ import asyncio
 from typing import Optional
 # Импорт для работы с байтами изображения
 from io import BytesIO
+# Импорт для работы с датой/временем (расчёт времени мута/бана)
+from datetime import datetime, timezone, timedelta
 
 # Импорт aiogram
 from aiogram import Router, Bot, F
-from aiogram.types import Message
+from aiogram.types import Message, ChatPermissions
 from aiogram.filters import Command
 from aiogram.exceptions import TelegramAPIError
 
@@ -192,7 +194,8 @@ async def cmd_mutein(
         message=message,
         session=session,
         command_name="mutein",
-        description="Добавлено через /mutein (действие: мут)"
+        description="Добавлено через /mutein (действие: мут)",
+        apply_action="mute"  # Применить мут к автору реплая
     )
 
 
@@ -220,7 +223,8 @@ async def cmd_banin(
         message=message,
         session=session,
         command_name="banin",
-        description="Добавлено через /banin (действие: бан)"
+        description="Добавлено через /banin (действие: бан)",
+        apply_action="ban"  # Применить бан к автору реплая
     )
 
 
@@ -232,16 +236,22 @@ async def _process_add_command(
     message: Message,
     session: AsyncSession,
     command_name: str,
-    description: str
+    description: str,
+    apply_action: Optional[str] = None
 ) -> None:
     """
     Обрабатывает команду добавления фото в базу.
+
+    После добавления хеша применяет действие к автору реплая:
+    - Удаляет сообщение-реплай (скам-фото)
+    - Применяет mute/ban к автору
 
     Args:
         message: Сообщение с командой
         session: Сессия БД
         command_name: Имя команды для логов
         description: Описание для записи в БД
+        apply_action: Действие к автору: "mute" или "ban" (None = только добавить)
     """
     bot = message.bot
     chat_id = message.chat.id
@@ -304,7 +314,27 @@ async def _process_add_command(
         )
         return
 
-    # Добавляем хеш в базу
+    # Проверяем есть ли уже такой хеш в базе (защита от дубликатов)
+    existing_hash = await BannedHashService.find_by_phash(
+        session=session,
+        phash=image_hashes.phash,
+        chat_id=chat_id
+    )
+    # Если хеш уже существует — сообщаем и выходим
+    if existing_hash is not None:
+        sent = await message.reply(
+            f"⚠️ Такое фото уже в базе (ID: {existing_hash.id})"
+        )
+        # Удаляем уведомление и команду через задержку
+        asyncio.create_task(
+            _delete_after_delay(bot, chat_id, sent.message_id, NOTIFICATION_DELETE_DELAY)
+        )
+        asyncio.create_task(
+            _delete_after_delay(bot, chat_id, message.message_id, NOTIFICATION_DELETE_DELAY)
+        )
+        return
+
+    # Добавляем хеш в базу (дубликата нет)
     try:
         hash_entry = await BannedHashService.add_hash(
             session=session,
@@ -320,19 +350,107 @@ async def _process_add_command(
         # Убеждаемся что модуль включён
         await SettingsService.get_or_create_settings(session, chat_id)
 
-        # Отправляем подтверждение
-        sent = await message.reply(
-            f"✅ Фото добавлено в базу скам-изображений.\n"
-            f"📝 ID: <code>{hash_entry.id}</code>\n"
-            f"🔢 pHash: <code>{image_hashes.phash}</code>\n"
-            f"🔢 dHash: <code>{image_hashes.dhash or 'N/A'}</code>",
-            parse_mode="HTML"
+        # В группе отправляем короткое подтверждение (безопасность)
+        sent = await message.reply("✅ Готово")
+        # Удаляем подтверждение и команду через задержку
+        asyncio.create_task(
+            _delete_after_delay(bot, chat_id, sent.message_id, NOTIFICATION_DELETE_DELAY)
         )
-
-        # Удаляем команду (опционально оставляем подтверждение)
         asyncio.create_task(
             _delete_after_delay(bot, chat_id, message.message_id, NOTIFICATION_DELETE_DELAY)
         )
+
+        # В ЛС админа отправляем подробную информацию
+        try:
+            await bot.send_message(
+                chat_id=user.id,
+                text=(
+                    f"✅ Фото добавлено в базу скам-изображений.\n\n"
+                    f"📝 ID: <code>{hash_entry.id}</code>\n"
+                    f"🔢 pHash: <code>{image_hashes.phash}</code>\n"
+                    f"🔢 dHash: <code>{image_hashes.dhash or 'N/A'}</code>\n\n"
+                    f"📌 Команда: /{command_name}\n"
+                    f"👥 Группа: {message.chat.title}"
+                ),
+                parse_mode="HTML"
+            )
+        except TelegramAPIError as e:
+            # Если не удалось отправить в ЛС — логируем, не падаем
+            logger.warning(f"Не удалось отправить подробности в ЛС админа {user.id}: {e}")
+
+        # ─────────────────────────────────────────────────────────
+        # ПРИМЕНЯЕМ ДЕЙСТВИЕ К АВТОРУ РЕПЛАЯ (если указано)
+        # ─────────────────────────────────────────────────────────
+        if apply_action is not None:
+            # Получаем сообщение-реплай и его автора
+            reply_msg = message.reply_to_message
+            violator = reply_msg.from_user if reply_msg else None
+
+            # Проверяем что есть автор (не анонимный канал и т.п.)
+            if violator and not violator.is_bot:
+                # Получаем настройки группы для времени мута/бана
+                settings = await SettingsService.get_or_create_settings(session, chat_id)
+
+                # Удаляем сообщение со скам-фото
+                try:
+                    await reply_msg.delete()
+                    logger.info(f"[{command_name.upper()}] Удалено скам-фото: msg_id={reply_msg.message_id}")
+                except TelegramAPIError as e:
+                    logger.warning(f"Не удалось удалить скам-фото: {e}")
+
+                # Применяем мут
+                if apply_action == "mute":
+                    try:
+                        # Время мута из настроек группы
+                        mute_seconds = settings.mute_duration
+                        # Вычисляем дату окончания мута
+                        if mute_seconds == 0:
+                            # Перманентный мут — далёкая дата
+                            until_date = datetime.now(timezone.utc) + timedelta(days=366)
+                        else:
+                            until_date = datetime.now(timezone.utc) + timedelta(seconds=mute_seconds)
+                        # Ограничиваем права пользователя
+                        await bot.restrict_chat_member(
+                            chat_id=chat_id,
+                            user_id=violator.id,
+                            permissions=ChatPermissions(
+                                can_send_messages=False,
+                                can_send_media_messages=False,
+                                can_send_other_messages=False,
+                                can_add_web_page_previews=False,
+                            ),
+                            until_date=until_date
+                        )
+                        logger.info(
+                            f"[{command_name.upper()}] Замучен: user_id={violator.id}, "
+                            f"duration={mute_seconds}s"
+                        )
+                    except TelegramAPIError as e:
+                        logger.warning(f"Не удалось замутить пользователя {violator.id}: {e}")
+
+                # Применяем бан
+                elif apply_action == "ban":
+                    try:
+                        # Время бана из настроек группы
+                        ban_seconds = settings.ban_duration
+                        # Вычисляем дату окончания бана
+                        if ban_seconds == 0:
+                            # Перманентный бан
+                            until_date = None
+                        else:
+                            until_date = datetime.now(timezone.utc) + timedelta(seconds=ban_seconds)
+                        # Баним пользователя
+                        await bot.ban_chat_member(
+                            chat_id=chat_id,
+                            user_id=violator.id,
+                            until_date=until_date
+                        )
+                        logger.info(
+                            f"[{command_name.upper()}] Забанен: user_id={violator.id}, "
+                            f"duration={ban_seconds}s (0=навсегда)"
+                        )
+                    except TelegramAPIError as e:
+                        logger.warning(f"Не удалось забанить пользователя {violator.id}: {e}")
 
         logger.info(
             f"[{command_name.upper()}] Добавлен хеш: id={hash_entry.id}, "

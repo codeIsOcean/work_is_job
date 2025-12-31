@@ -50,8 +50,20 @@ CB_GLOBAL = f"{PREFIX}:global:{{chat_id}}"
 CB_JOURNAL = f"{PREFIX}:journal:{{chat_id}}"
 CB_SCAMMER_DB = f"{PREFIX}:scammer_db:{{chat_id}}"
 CB_NOTIFICATION = f"{PREFIX}:notification:{{chat_id}}"
+CB_NOTIFICATION_SET = f"{PREFIX}:notification_set:{{chat_id}}:{{value}}"
+CB_NOTIFICATION_CUSTOM = f"{PREFIX}:notification_custom:{{chat_id}}"
+CB_MUTE_TEXT = f"{PREFIX}:mute_text:{{chat_id}}"
+CB_BAN_TEXT = f"{PREFIX}:ban_text:{{chat_id}}"
+CB_WARN_TEXT = f"{PREFIX}:warn_text:{{chat_id}}"
 CB_BACK = f"{PREFIX}:back:{{chat_id}}"
 CB_CLOSE = f"{PREFIX}:close:{{chat_id}}"
+
+# UI управления базой фото
+CB_ADD_PHOTO = f"{PREFIX}:add_photo:{{chat_id}}"
+CB_LIST_PHOTOS = f"{PREFIX}:list_photos:{{chat_id}}:{{page}}"
+CB_DELETE_PHOTO = f"{PREFIX}:delete_photo:{{chat_id}}"
+CB_PHOTO_PREVIEW = f"{PREFIX}:photo_preview:{{chat_id}}:{{hash_id}}"
+CB_DELETE_PHOTO_CONFIRM = f"{PREFIX}:delete_confirm:{{chat_id}}:{{hash_id}}"
 
 
 # ============================================================
@@ -90,6 +102,15 @@ THRESHOLD_VALUES = [
     (10, "10 (стандарт)"),
     (12, "12 (мягкий)"),
     (15, "15 (свободный)"),
+]
+
+# Время авто-удаления уведомлений (в секундах)
+NOTIFICATION_DELAYS = [
+    (0, "Не удалять"),
+    (5, "5 сек"),
+    (10, "10 сек"),
+    (30, "30 сек"),
+    (60, "1 мин"),
 ]
 
 
@@ -249,11 +270,56 @@ def build_settings_keyboard(
         )
     ])
 
-    # Кнопка закрытия
+    # Кнопка настройки текста уведомлений (только для mute/ban/warn)
+    if settings.action in ("delete_mute", "delete_ban", "delete_warn"):
+        # Определяем какой текст настраивать в зависимости от действия
+        if settings.action == "delete_mute":
+            text_label = "📝 Текст мута"
+            text_callback = CB_MUTE_TEXT.format(chat_id=chat_id)
+        elif settings.action == "delete_ban":
+            text_label = "📝 Текст бана"
+            text_callback = CB_BAN_TEXT.format(chat_id=chat_id)
+        else:
+            text_label = "📝 Текст предупреждения"
+            text_callback = CB_WARN_TEXT.format(chat_id=chat_id)
+
+        buttons.append([
+            InlineKeyboardButton(
+                text=text_label,
+                callback_data=text_callback
+            )
+        ])
+
+    # Авто-удаление уведомлений
+    delay = settings.notification_delete_delay
+    if delay is None or delay == 0:
+        delay_text = "выкл"
+    else:
+        delay_text = f"{delay} сек"
     buttons.append([
         InlineKeyboardButton(
-            text="✖️ Закрыть",
-            callback_data=CB_CLOSE.format(chat_id=chat_id)
+            text=f"🗑️ Авто-удаление: {delay_text}",
+            callback_data=CB_NOTIFICATION.format(chat_id=chat_id)
+        )
+    ])
+
+    # Разделитель — управление базой фото
+    buttons.append([
+        InlineKeyboardButton(
+            text="➕ Добавить фото",
+            callback_data=CB_ADD_PHOTO.format(chat_id=chat_id)
+        ),
+        InlineKeyboardButton(
+            text="📋 Список фото",
+            callback_data=CB_LIST_PHOTOS.format(chat_id=chat_id, page=0)
+        )
+    ])
+
+    # Кнопка возврата в родительское меню (Фильтр контента)
+    buttons.append([
+        InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=f"cf:m:{chat_id}"  # Возврат в меню Фильтр контента
         )
     ])
 
@@ -461,3 +527,216 @@ def build_ban_time_keyboard(
     ])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+# ============================================================
+# МЕНЮ ВЫБОРА ВРЕМЕНИ АВТО-УДАЛЕНИЯ
+# ============================================================
+
+def build_notification_keyboard(
+    chat_id: int,
+    current_delay: int | None
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню выбора времени авто-удаления уведомлений.
+
+    Args:
+        chat_id: ID группы
+        current_delay: Текущая задержка в секундах (None = выкл)
+
+    Returns:
+        InlineKeyboardMarkup с вариантами задержки
+    """
+    buttons = []
+
+    # Группируем по 3 кнопки в ряд
+    row = []
+    for value, label in NOTIFICATION_DELAYS:
+        # Отмечаем текущее значение
+        # 0 и None оба означают "выключено"
+        is_current = (value == 0 and (current_delay is None or current_delay == 0)) or (value == current_delay)
+        icon = "✅ " if is_current else ""
+        row.append(
+            InlineKeyboardButton(
+                text=f"{icon}{label}",
+                callback_data=CB_NOTIFICATION_SET.format(chat_id=chat_id, value=value)
+            )
+        )
+        if len(row) == 3:
+            buttons.append(row)
+            row = []
+
+    # Добавляем оставшиеся кнопки
+    if row:
+        buttons.append(row)
+
+    # Кнопка ручного ввода
+    buttons.append([
+        InlineKeyboardButton(
+            text="✏️ Ввести вручную",
+            callback_data=CB_NOTIFICATION_CUSTOM.format(chat_id=chat_id)
+        )
+    ])
+
+    # Кнопка назад
+    buttons.append([
+        InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=CB_BACK.format(chat_id=chat_id)
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+# ============================================================
+# МЕНЮ СПИСКА ФОТО С ПАГИНАЦИЕЙ
+# ============================================================
+
+# Количество фото на странице
+PHOTOS_PER_PAGE = 5
+
+
+def build_photo_list_keyboard(
+    chat_id: int,
+    hashes: list,
+    page: int = 0,
+    total_count: int = 0
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню списка фото с пагинацией.
+
+    Args:
+        chat_id: ID группы
+        hashes: Список BannedImageHash для текущей страницы
+        page: Текущая страница (0-индексированная)
+        total_count: Общее количество хешей
+
+    Returns:
+        InlineKeyboardMarkup со списком фото и пагинацией
+    """
+    buttons = []
+
+    # Показываем каждый хеш как кнопку для предпросмотра
+    for h in hashes:
+        # Формируем текст кнопки
+        text = f"🖼️ ID:{h.id} | {h.phash[:8]}..."
+        buttons.append([
+            InlineKeyboardButton(
+                text=text,
+                callback_data=CB_PHOTO_PREVIEW.format(chat_id=chat_id, hash_id=h.id)
+            )
+        ])
+
+    # Пагинация
+    total_pages = (total_count + PHOTOS_PER_PAGE - 1) // PHOTOS_PER_PAGE if total_count > 0 else 1
+    pagination_row = []
+
+    # Кнопка "Назад" (предыдущая страница)
+    if page > 0:
+        pagination_row.append(
+            InlineKeyboardButton(
+                text="◀️",
+                callback_data=CB_LIST_PHOTOS.format(chat_id=chat_id, page=page - 1)
+            )
+        )
+
+    # Номер страницы
+    pagination_row.append(
+        InlineKeyboardButton(
+            text=f"{page + 1}/{total_pages}",
+            callback_data="noop"  # Не делает ничего
+        )
+    )
+
+    # Кнопка "Вперёд" (следующая страница)
+    if page < total_pages - 1:
+        pagination_row.append(
+            InlineKeyboardButton(
+                text="▶️",
+                callback_data=CB_LIST_PHOTOS.format(chat_id=chat_id, page=page + 1)
+            )
+        )
+
+    if pagination_row:
+        buttons.append(pagination_row)
+
+    # Кнопка удаления по ID
+    buttons.append([
+        InlineKeyboardButton(
+            text="🗑️ Удалить по ID",
+            callback_data=CB_DELETE_PHOTO.format(chat_id=chat_id)
+        )
+    ])
+
+    # Кнопка назад в настройки
+    buttons.append([
+        InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data=CB_BACK.format(chat_id=chat_id)
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+# ============================================================
+# КЛАВИАТУРА ПРЕДПРОСМОТРА ФОТО
+# ============================================================
+
+def build_photo_preview_keyboard(
+    chat_id: int,
+    hash_id: int
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт клавиатуру для предпросмотра фото.
+
+    Args:
+        chat_id: ID группы
+        hash_id: ID хеша
+
+    Returns:
+        InlineKeyboardMarkup с кнопками удаления и назад
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🗑️ Удалить",
+                    callback_data=CB_DELETE_PHOTO_CONFIRM.format(chat_id=chat_id, hash_id=hash_id)
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад к списку",
+                    callback_data=CB_LIST_PHOTOS.format(chat_id=chat_id, page=0)
+                )
+            ]
+        ]
+    )
+
+
+# ============================================================
+# КЛАВИАТУРА ОТМЕНЫ FSM
+# ============================================================
+
+def build_fsm_cancel_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    """
+    Создаёт клавиатуру с кнопкой отмены для FSM.
+
+    Args:
+        chat_id: ID группы
+
+    Returns:
+        InlineKeyboardMarkup с кнопкой "⬅️ Назад"
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=f"{PREFIX}:fsm_cancel:{chat_id}"
+                )
+            ]
+        ]
+    )

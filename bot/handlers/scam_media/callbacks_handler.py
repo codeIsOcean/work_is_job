@@ -30,6 +30,8 @@ from .keyboards import (
     build_threshold_keyboard,
     build_mute_time_keyboard,
     build_ban_time_keyboard,
+    build_notification_keyboard,
+    build_fsm_cancel_keyboard,
     PREFIX,
 )
 
@@ -55,12 +57,20 @@ router.name = "scam_media_callbacks_router"
 # ============================================================
 class ScamMediaFSM(StatesGroup):
     """
-    Состояния FSM для ручного ввода времени.
+    Состояния FSM для ручного ввода настроек.
     """
     # Ожидание ввода времени мута
     waiting_mute_time = State()
     # Ожидание ввода времени бана
     waiting_ban_time = State()
+    # Ожидание ввода времени авто-удаления
+    waiting_notification_delay = State()
+    # Ожидание ввода текста мута
+    waiting_mute_text = State()
+    # Ожидание ввода текста бана
+    waiting_ban_text = State()
+    # Ожидание ввода текста предупреждения
+    waiting_warn_text = State()
 
 
 # ============================================================
@@ -850,3 +860,382 @@ async def cb_open_settings(
 
     await show_scam_media_settings(callback, session, chat_id)
     await callback.answer()
+
+
+# ============================================================
+# NOTIFICATION - МЕНЮ АВТО-УДАЛЕНИЯ УВЕДОМЛЕНИЙ
+# ============================================================
+
+@router.callback_query(F.data.startswith(f"{PREFIX}:notification:"))
+async def cb_notification_menu(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает меню выбора времени авто-удаления.
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    if not await _check_admin(callback, chat_id):
+        await callback.answer("⛔ Только администраторы", show_alert=True)
+        return
+
+    settings = await SettingsService.get_settings(session, chat_id)
+
+    await callback.message.edit_text(
+        text=(
+            "<b>🗑️ Авто-удаление уведомлений</b>\n\n"
+            "Через сколько секунд удалять уведомления бота о срабатывании?"
+        ),
+        reply_markup=build_notification_keyboard(chat_id, settings.notification_delete_delay),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+# ============================================================
+# NOTIFICATION_SET - УСТАНОВКА ВРЕМЕНИ АВТО-УДАЛЕНИЯ
+# ============================================================
+
+@router.callback_query(F.data.startswith(f"{PREFIX}:notification_set:"))
+async def cb_notification_set(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Устанавливает время авто-удаления уведомлений.
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+    delay = int(parts[3])
+
+    if not await _check_admin(callback, chat_id):
+        await callback.answer("⛔ Только администраторы", show_alert=True)
+        return
+
+    # 0 означает "не удалять" — сохраняем как None
+    delay_value = None if delay == 0 else delay
+    await SettingsService.update_settings(session, chat_id, notification_delete_delay=delay_value)
+
+    settings = await SettingsService.get_settings(session, chat_id)
+    await callback.message.edit_text(
+        text=_build_settings_text(settings),
+        reply_markup=build_settings_keyboard(chat_id, settings),
+        parse_mode="HTML"
+    )
+
+    await callback.answer("✅ Время авто-удаления обновлено")
+
+
+# ============================================================
+# NOTIFICATION_CUSTOM - FSM РУЧНОЙ ВВОД ВРЕМЕНИ АВТО-УДАЛЕНИЯ
+# ============================================================
+
+@router.callback_query(F.data.startswith(f"{PREFIX}:notification_custom:"))
+async def cb_notification_custom(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Запускает FSM для ручного ввода времени авто-удаления.
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    if not await _check_admin(callback, chat_id):
+        await callback.answer("⛔ Только администраторы", show_alert=True)
+        return
+
+    await state.update_data(chat_id=chat_id)
+    await state.set_state(ScamMediaFSM.waiting_notification_delay)
+
+    await callback.message.edit_text(
+        text=(
+            "<b>✏️ Ввод времени авто-удаления</b>\n\n"
+            "Введите время в секундах (например: 10, 30, 60).\n"
+            "Или 0 чтобы отключить авто-удаление."
+        ),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.message(ScamMediaFSM.waiting_notification_delay)
+async def fsm_notification_delay_input(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ручной ввод времени авто-удаления.
+    """
+    data = await state.get_data()
+    chat_id = data.get("chat_id")
+
+    if not chat_id:
+        await state.clear()
+        return
+
+    # Парсим число
+    try:
+        delay = int(message.text.strip())
+        if delay < 0:
+            raise ValueError("Отрицательное значение")
+    except ValueError:
+        await message.reply("❌ Введите целое положительное число секунд.")
+        return
+
+    # 0 означает "не удалять"
+    delay_value = None if delay == 0 else delay
+    await SettingsService.update_settings(session, chat_id, notification_delete_delay=delay_value)
+
+    await state.clear()
+
+    settings = await SettingsService.get_settings(session, chat_id)
+    await message.answer(
+        text=_build_settings_text(settings),
+        reply_markup=build_settings_keyboard(chat_id, settings),
+        parse_mode="HTML"
+    )
+
+
+# ============================================================
+# MUTE_TEXT - FSM ВВОД ТЕКСТА МУТА
+# ============================================================
+
+@router.callback_query(F.data.startswith(f"{PREFIX}:mute_text:"))
+async def cb_mute_text(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Запускает FSM для ввода текста мута.
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    if not await _check_admin(callback, chat_id):
+        await callback.answer("⛔ Только администраторы", show_alert=True)
+        return
+
+    settings = await SettingsService.get_settings(session, chat_id)
+    current_text = settings.mute_text or "🔇 %user% замучен на %duration% за скам-контент."
+
+    await state.update_data(chat_id=chat_id)
+    await state.set_state(ScamMediaFSM.waiting_mute_text)
+
+    await callback.message.edit_text(
+        text=(
+            "<b>📝 Текст мута</b>\n\n"
+            f"Текущий текст:\n<code>{current_text}</code>\n\n"
+            "Введите новый текст.\n"
+            "Плейсхолдеры: <code>%user%</code> <code>%duration%</code>\n\n"
+            "Или отправьте <code>default</code> для сброса."
+        ),
+        reply_markup=build_fsm_cancel_keyboard(chat_id),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.message(ScamMediaFSM.waiting_mute_text)
+async def fsm_mute_text_input(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ввод текста мута.
+    """
+    data = await state.get_data()
+    chat_id = data.get("chat_id")
+
+    if not chat_id:
+        await state.clear()
+        return
+
+    text = message.text.strip()
+    # Если "default" — сбрасываем на NULL (используется дефолт)
+    new_text = None if text.lower() == "default" else text
+
+    await SettingsService.update_settings(session, chat_id, mute_text=new_text)
+    await state.clear()
+
+    settings = await SettingsService.get_settings(session, chat_id)
+    await message.answer(
+        text=_build_settings_text(settings),
+        reply_markup=build_settings_keyboard(chat_id, settings),
+        parse_mode="HTML"
+    )
+
+
+# ============================================================
+# BAN_TEXT - FSM ВВОД ТЕКСТА БАНА
+# ============================================================
+
+@router.callback_query(F.data.startswith(f"{PREFIX}:ban_text:"))
+async def cb_ban_text(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Запускает FSM для ввода текста бана.
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    if not await _check_admin(callback, chat_id):
+        await callback.answer("⛔ Только администраторы", show_alert=True)
+        return
+
+    settings = await SettingsService.get_settings(session, chat_id)
+    current_text = settings.ban_text or "🚫 %user% забанен на %duration% за скам-контент."
+
+    await state.update_data(chat_id=chat_id)
+    await state.set_state(ScamMediaFSM.waiting_ban_text)
+
+    await callback.message.edit_text(
+        text=(
+            "<b>📝 Текст бана</b>\n\n"
+            f"Текущий текст:\n<code>{current_text}</code>\n\n"
+            "Введите новый текст.\n"
+            "Плейсхолдеры: <code>%user%</code> <code>%duration%</code>\n\n"
+            "Или отправьте <code>default</code> для сброса."
+        ),
+        reply_markup=build_fsm_cancel_keyboard(chat_id),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.message(ScamMediaFSM.waiting_ban_text)
+async def fsm_ban_text_input(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ввод текста бана.
+    """
+    data = await state.get_data()
+    chat_id = data.get("chat_id")
+
+    if not chat_id:
+        await state.clear()
+        return
+
+    text = message.text.strip()
+    new_text = None if text.lower() == "default" else text
+
+    await SettingsService.update_settings(session, chat_id, ban_text=new_text)
+    await state.clear()
+
+    settings = await SettingsService.get_settings(session, chat_id)
+    await message.answer(
+        text=_build_settings_text(settings),
+        reply_markup=build_settings_keyboard(chat_id, settings),
+        parse_mode="HTML"
+    )
+
+
+# ============================================================
+# WARN_TEXT - FSM ВВОД ТЕКСТА ПРЕДУПРЕЖДЕНИЯ
+# ============================================================
+
+@router.callback_query(F.data.startswith(f"{PREFIX}:warn_text:"))
+async def cb_warn_text(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Запускает FSM для ввода текста предупреждения.
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    if not await _check_admin(callback, chat_id):
+        await callback.answer("⛔ Только администраторы", show_alert=True)
+        return
+
+    settings = await SettingsService.get_settings(session, chat_id)
+    current_text = settings.warn_text or "⚠️ %user%, ваше сообщение удалено за скам-контент."
+
+    await state.update_data(chat_id=chat_id)
+    await state.set_state(ScamMediaFSM.waiting_warn_text)
+
+    await callback.message.edit_text(
+        text=(
+            "<b>📝 Текст предупреждения</b>\n\n"
+            f"Текущий текст:\n<code>{current_text}</code>\n\n"
+            "Введите новый текст.\n"
+            "Плейсхолдер: <code>%user%</code>\n\n"
+            "Или отправьте <code>default</code> для сброса."
+        ),
+        reply_markup=build_fsm_cancel_keyboard(chat_id),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.message(ScamMediaFSM.waiting_warn_text)
+async def fsm_warn_text_input(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ввод текста предупреждения.
+    """
+    data = await state.get_data()
+    chat_id = data.get("chat_id")
+
+    if not chat_id:
+        await state.clear()
+        return
+
+    text = message.text.strip()
+    new_text = None if text.lower() == "default" else text
+
+    await SettingsService.update_settings(session, chat_id, warn_text=new_text)
+    await state.clear()
+
+    settings = await SettingsService.get_settings(session, chat_id)
+    await message.answer(
+        text=_build_settings_text(settings),
+        reply_markup=build_settings_keyboard(chat_id, settings),
+        parse_mode="HTML"
+    )
+
+
+# ============================================================
+# FSM_CANCEL - ОТМЕНА FSM (КНОПКА НАЗАД)
+# ============================================================
+
+@router.callback_query(F.data.startswith(f"{PREFIX}:fsm_cancel:"))
+async def cb_fsm_cancel(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Отменяет текущее FSM состояние и возвращает в настройки.
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Очищаем FSM
+    await state.clear()
+
+    # Возвращаем в настройки
+    settings = await SettingsService.get_settings(session, chat_id)
+    await callback.message.edit_text(
+        text=_build_settings_text(settings),
+        reply_markup=build_settings_keyboard(chat_id, settings),
+        parse_mode="HTML"
+    )
+    await callback.answer("Отменено")

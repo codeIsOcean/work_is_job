@@ -200,6 +200,36 @@ class BannedHashService:
         return hash_entry
 
     @staticmethod
+    async def find_by_phash(
+        session: AsyncSession,
+        phash: str,
+        chat_id: Optional[int] = None
+    ) -> Optional[BannedImageHash]:
+        """
+        Ищет существующий хеш по значению pHash.
+
+        Используется для проверки дубликатов перед добавлением.
+        Ищет точное совпадение pHash для данной группы.
+
+        Args:
+            session: Сессия SQLAlchemy
+            phash: Значение pHash для поиска
+            chat_id: ID группы (если None — ищет глобальные)
+
+        Returns:
+            BannedImageHash если найден, иначе None
+        """
+        # Строим запрос на поиск по pHash
+        query = select(BannedImageHash).where(BannedImageHash.phash == phash)
+        # Если указан chat_id — ищем только в этой группе
+        if chat_id is not None:
+            query = query.where(BannedImageHash.chat_id == chat_id)
+        # Выполняем запрос
+        result = await session.execute(query)
+        # Возвращаем первую найденную запись или None
+        return result.scalar_one_or_none()
+
+    @staticmethod
     async def get_hash_by_id(
         session: AsyncSession,
         hash_id: int
@@ -373,6 +403,35 @@ class BannedHashService:
             query = query.where(BannedImageHash.is_global == is_global)
         result = await session.execute(query)
         return result.scalar() or 0
+
+    @staticmethod
+    async def get_hashes_paginated(
+        session: AsyncSession,
+        chat_id: int,
+        limit: int = 10,
+        offset: int = 0
+    ) -> List[BannedImageHash]:
+        """
+        Получает хеши с пагинацией для UI списка.
+
+        Args:
+            session: Сессия SQLAlchemy
+            chat_id: ID группы
+            limit: Количество записей на странице
+            offset: Смещение от начала
+
+        Returns:
+            Список BannedImageHash для текущей страницы
+        """
+        query = (
+            select(BannedImageHash)
+            .where(BannedImageHash.chat_id == chat_id)
+            .order_by(BannedImageHash.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await session.execute(query)
+        return list(result.scalars().all())
 
 
 # ============================================================

@@ -35,6 +35,8 @@ from .group_message_coordinator import group_message_coordinator_router
 from .scam_media.commands_handler import router as scam_media_commands_router
 # Импортируем роутер callbacks ScamMedia (обработка кнопок настроек)
 from .scam_media.callbacks_handler import router as scam_media_callbacks_router
+# Импортируем роутер FSM ScamMedia (загрузка/удаление фото через UI)
+from .scam_media.fsm_handler import router as scam_media_fsm_router
 # Импортируем роутер команды /stat (статистика пользователя)
 from .user_stats_handler import router as user_stats_router
 # Импортируем роутер экспорта/импорта настроек
@@ -77,6 +79,8 @@ handlers_router.include_router(user_stats_router)
 handlers_router.include_router(scam_media_commands_router)
 # ScamMedia callbacks (обработка кнопок настроек)
 handlers_router.include_router(scam_media_callbacks_router)
+# ScamMedia FSM (загрузка/удаление фото через UI)
+handlers_router.include_router(scam_media_fsm_router)
 # Экспорт/импорт настроек групп (работает в ЛС бота)
 handlers_router.include_router(settings_export_router)
 # ============================================================
@@ -119,6 +123,8 @@ def create_fresh_handlers_router():
     fresh_router.include_router(scam_media_commands_router)
     # ScamMedia callbacks (обработка кнопок настроек)
     fresh_router.include_router(scam_media_callbacks_router)
+    # ScamMedia FSM (загрузка/удаление фото через UI)
+    fresh_router.include_router(scam_media_fsm_router)
     # Экспорт/импорт настроек групп (работает в ЛС бота)
     fresh_router.include_router(settings_export_router)
     # Group Message Coordinator - единый хендлер для групповых сообщений
