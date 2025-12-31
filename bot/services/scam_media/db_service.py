@@ -340,12 +340,13 @@ class BannedHashService:
             hash_id: ID хеша
         """
         # Обновляем счётчик и время последнего срабатывания
+        # Используем utcnow() без timezone для совместимости с колонкой DateTime
         await session.execute(
             update(BannedImageHash)
             .where(BannedImageHash.id == hash_id)
             .values(
                 matches_count=BannedImageHash.matches_count + 1,
-                last_match_at=datetime.now(timezone.utc)
+                last_match_at=datetime.utcnow()
             )
         )
         await session.commit()
@@ -365,8 +366,8 @@ class BannedHashService:
         Returns:
             Список неактивных хешей
         """
-        # Вычисляем дату отсечки
-        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
+        # Вычисляем дату отсечки (naive datetime для совместимости)
+        cutoff_date = datetime.utcnow() - timedelta(days=days)
         # Ищем хеши которые либо никогда не срабатывали,
         # либо не срабатывали давно
         query = select(BannedImageHash).where(

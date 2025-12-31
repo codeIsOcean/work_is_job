@@ -424,20 +424,46 @@ async def format_activity_message(
         initiator_name = f"{initiator_data.get('first_name', '')} {initiator_data.get('last_name', '')}".strip()
         initiator_username = initiator_data.get('username', '') or ''
         initiator_id = initiator_data.get('user_id', 'N/A')
-        
+
         initiator_display = initiator_name or 'Система'
         if initiator_username:
             initiator_display += f" [@{initiator_username}]"
         if initiator_id != 'N/A':
             initiator_display += f" [{initiator_id}]"
-        
+
         message = f"✅ <b>#ПОЛЬЗОВАТЕЛЬ_РАЗБАНЕН</b> {status_emoji}\n\n"
         message += f"👤 <b>Пользователь:</b> {user_display}\n"
         message += f"👮 <b>Инициатор:</b> {initiator_display}\n"
         message += f"🏢 <b>Группа:</b> {group_display}\n"
         message += f"⏰ <b>Когда:</b> {current_time}\n"
         message += f"#unban #user{user_id}"
-    
+
+    elif event_type == "SCAM_MEDIA_DETECTED":
+        # Скам-изображение обнаружено
+        action = additional_info.get('action', 'delete') if additional_info else 'delete'
+        hash_id = additional_info.get('hash_id') if additional_info else None
+        distance = additional_info.get('distance') if additional_info else None
+
+        # Форматируем действие
+        action_map = {
+            'delete': '🗑️ Удалено',
+            'delete_warn': '⚠️ Удалено + предупреждение',
+            'delete_mute': '🔇 Удалено + мут',
+            'delete_ban': '🚫 Удалено + бан',
+        }
+        action_text = action_map.get(action, action)
+
+        message = f"🖼️ <b>#СКАМ_ИЗОБРАЖЕНИЕ</b> {status_emoji}\n\n"
+        message += f"👤 <b>Пользователь:</b> {user_display}\n"
+        message += f"🏢 <b>Группа:</b> {group_display}\n"
+        message += f"⚙️ <b>Действие:</b> {action_text}\n"
+        if hash_id:
+            message += f"🔢 <b>ID хеша:</b> {hash_id}\n"
+        if distance is not None:
+            message += f"📊 <b>Расстояние:</b> {distance}\n"
+        message += f"⏰ <b>Когда:</b> {current_time}\n"
+        message += f"#scam_media #filtered #user{user_id}"
+
     else:
         # Общий формат для неизвестных событий
         message = f"📝 <b>#{event_type}</b> {status_emoji}\n\n"

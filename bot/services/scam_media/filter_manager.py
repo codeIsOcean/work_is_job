@@ -441,14 +441,42 @@ class ScamMediaFilterManager:
             match_result: Результат проверки
             settings: Настройки модуля
         """
-        # TODO: Интеграция с журналом группы
-        # Пока просто логируем
-        logger.info(
-            f"Журнал: chat_id={message.chat.id}, "
-            f"user_id={message.from_user.id}, "
-            f"hash_id={match_result.hash_entry.id}, "
-            f"distance={match_result.distance}"
-        )
+        from bot.handlers.bot_activity_journal.bot_activity_journal import send_activity_log
+
+        user = message.from_user
+        chat = message.chat
+
+        user_data = {
+            "user_id": user.id,
+            "username": user.username,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+        }
+
+        group_data = {
+            "chat_id": chat.id,
+            "title": chat.title,
+            "username": chat.username,
+        }
+
+        additional_info = {
+            "action": settings.action,
+            "hash_id": match_result.hash_entry.id,
+            "distance": match_result.distance,
+        }
+
+        try:
+            await send_activity_log(
+                bot=self._bot,
+                event_type="SCAM_MEDIA_DETECTED",
+                user_data=user_data,
+                group_data=group_data,
+                additional_info=additional_info,
+                status="success",
+                session=session,
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при отправке в журнал: {e}")
 
     async def _schedule_message_deletion(
         self,
