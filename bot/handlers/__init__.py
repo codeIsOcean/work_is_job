@@ -18,7 +18,8 @@ from .journal_link_handler import journal_link_router
 from .unscam_handler import unscam_router
 # Импортируем только antispam_router (настройки UI)
 # antispam_filter_router перенесён в group_message_coordinator
-from .antispam_handlers import antispam_router
+# antispam_journal_actions_router - обработка кнопок действий в журнале
+from .antispam_handlers import antispam_router, antispam_journal_actions_router
 # Импортируем роутер модуля content_filter (только UI настроек)
 # filter_handler перенесён в group_message_coordinator
 from .content_filter import content_filter_router
@@ -68,6 +69,7 @@ handlers_router.include_router(reaction_mute_settings_router)  # UI настро
 handlers_router.include_router(captcha_settings_router)
 handlers_router.include_router(unscam_router)                 # Команда /unscam в ЛС
 handlers_router.include_router(antispam_router)               # Антиспам настройки UI
+handlers_router.include_router(antispam_journal_actions_router)  # Кнопки действий в журнале антиспам
 handlers_router.include_router(content_filter_router)         # Content filter настройки UI
 handlers_router.include_router(message_management_router)     # Message management UI + команды
 handlers_router.include_router(profile_monitor_router)        # Profile monitor callbacks + settings
@@ -114,6 +116,7 @@ def create_fresh_handlers_router():
     fresh_router.include_router(captcha_settings_router)
     fresh_router.include_router(unscam_router)
     fresh_router.include_router(antispam_router)
+    fresh_router.include_router(antispam_journal_actions_router)  # Кнопки действий в журнале антиспам
     fresh_router.include_router(content_filter_router)
     fresh_router.include_router(message_management_router)
     fresh_router.include_router(profile_monitor_router)

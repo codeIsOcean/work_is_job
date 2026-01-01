@@ -9,13 +9,15 @@
 """
 
 # Импорт типов для аннотаций
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 # Импорт dataclass для создания класса данных
 from dataclasses import dataclass
 # Импорт регулярных выражений для поиска ссылок
 import re
 # Импорт логгера для отладки
 import logging
+# Импорт urllib.parse для извлечения домена из URL
+from urllib.parse import urlparse
 
 # Импорт типов aiogram для работы с сообщениями
 from aiogram import types
@@ -85,6 +87,217 @@ TELEGRAM_LINK_PATTERN = re.compile(
     # Флаг IGNORECASE для поиска независимо от регистра
     re.IGNORECASE
 )
+
+
+# ============================================================
+# ФУНКЦИИ ДЛЯ РАБОТЫ С URL И ДОМЕНАМИ
+# ============================================================
+
+def normalize_url_for_comparison(url: str) -> str:
+    """
+    Нормализует URL для сравнения в whitelist.
+
+    Убирает:
+    - http:// и https://
+    - www.
+    - trailing slash
+    - приводит к нижнему регистру
+
+    Примеры:
+        https://www.youtube.com/watch?v=123 → youtube.com/watch?v=123
+        https://t.me/beauty_indubai/ → t.me/beauty_indubai
+        t.me/channel → t.me/channel
+
+    Args:
+        url: URL для нормализации
+
+    Returns:
+        Нормализованный URL
+    """
+    normalized = url.strip().lower()
+    # Убираем протокол
+    if normalized.startswith('https://'):
+        normalized = normalized[8:]
+    elif normalized.startswith('http://'):
+        normalized = normalized[7:]
+    # Убираем www.
+    if normalized.startswith('www.'):
+        normalized = normalized[4:]
+    # Убираем trailing slash
+    normalized = normalized.rstrip('/')
+    return normalized
+
+
+def extract_path_from_url(url: str) -> Optional[str]:
+    """
+    Извлечь путь из URL (без домена).
+
+    Примеры:
+        https://t.me/beauty_indubai → /beauty_indubai
+        https://youtube.com/watch?v=123 → /watch?v=123
+        https://youtube.com/ → None (пустой путь)
+        https://youtube.com → None
+
+    Args:
+        url: URL для извлечения пути
+
+    Returns:
+        Путь или None если путь пустой
+    """
+    # Нормализуем URL
+    if not url.startswith(('http://', 'https://')):
+        if '.' in url and ' ' not in url:
+            url = 'https://' + url
+        else:
+            return None
+
+    try:
+        parsed = urlparse(url)
+        path = parsed.path
+        # Пустой путь или только /
+        if not path or path == '/':
+            return None
+        # Добавляем query string если есть
+        if parsed.query:
+            path = path + '?' + parsed.query
+        return path
+    except Exception:
+        return None
+
+
+def is_domain_only_pattern(pattern: str) -> bool:
+    """
+    Проверить является ли паттерн только доменом (без пути).
+
+    Примеры:
+        youtube.com → True
+        youtube.com/ → True
+        t.me → True
+        t.me/channel → False
+        youtube.com/watch?v=123 → False
+
+    Args:
+        pattern: Паттерн для проверки
+
+    Returns:
+        True если паттерн - только домен
+    """
+    # Нормализуем паттерн
+    normalized = normalize_url_for_comparison(pattern)
+
+    # Если нет слеша - это домен
+    if '/' not in normalized:
+        return True
+
+    # Если единственный слеш в конце - это домен
+    if normalized.endswith('/') and normalized.count('/') == 1:
+        return True
+
+    return False
+
+
+def extract_domain_from_url(url: str) -> Optional[str]:
+    """
+    Извлечь домен из URL.
+
+    Примеры:
+        https://maps.app.goo.gl/WazdAuvRaY2JV38j9 → maps.app.goo.gl
+        https://www.youtube.com/watch?v=xyz → youtube.com (без www)
+        https://t.me/mygroup → t.me
+        простой_текст → None
+
+    Args:
+        url: URL для извлечения домена
+
+    Returns:
+        Домен в нижнем регистре или None если не удалось извлечь
+    """
+    # Если URL не начинается с http:// или https://, пробуем добавить
+    if not url.startswith(('http://', 'https://')):
+        # Проверяем есть ли похожая структура домена (содержит точку)
+        if '.' in url and ' ' not in url:
+            # Добавляем https:// для парсинга
+            url = 'https://' + url
+        else:
+            # Это не URL - возвращаем None
+            return None
+
+    try:
+        # Парсим URL с помощью urlparse
+        parsed = urlparse(url)
+        # Получаем netloc (домен с портом)
+        domain = parsed.netloc
+        # Если домен пустой - возвращаем None
+        if not domain:
+            return None
+        # Убираем www. в начале для унификации
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        # Убираем порт если есть (например :8080)
+        if ':' in domain:
+            domain = domain.split(':')[0]
+        # Приводим к нижнему регистру
+        return domain.lower()
+    except Exception:
+        # При ошибке парсинга возвращаем None
+        return None
+
+
+def is_url(text: str) -> bool:
+    """
+    Проверить является ли текст URL (начинается с http:// или https://).
+
+    Args:
+        text: Текст для проверки
+
+    Returns:
+        True если это URL, False иначе
+    """
+    # Нормализуем текст - убираем пробелы
+    text = text.strip().lower()
+    # Проверяем начинается ли с http:// или https://
+    return text.startswith(('http://', 'https://'))
+
+
+def extract_username_from_telegram_link(text: str) -> Optional[str]:
+    """
+    Извлечь username из Telegram ссылки.
+
+    Поддерживаемые форматы:
+        https://t.me/channel_name → @channel_name
+        t.me/channel_name → @channel_name
+        @channel_name → @channel_name
+        channel_name → None (не ссылка и не username)
+
+    Args:
+        text: Текст для извлечения (ссылка или username)
+
+    Returns:
+        Username в формате @channel_name или None
+    """
+    if not text:
+        return None
+
+    # Убираем пробелы
+    text = text.strip().lower()
+
+    # Если уже в формате @username - возвращаем как есть
+    if text.startswith('@'):
+        return text
+
+    # Паттерн для извлечения username из t.me ссылки
+    # Поддерживает: https://t.me/name, http://t.me/name, t.me/name, telegram.me/name
+    tg_pattern = re.compile(
+        r'(?:https?://)?(?:t\.me|telegram\.me)/([a-zA-Z][a-zA-Z0-9_]{3,30})(?:/.*)?$',
+        re.IGNORECASE
+    )
+
+    match = tg_pattern.match(text)
+    if match:
+        username = match.group(1)
+        return f"@{username.lower()}"
+
+    return None
 
 
 # ============================================================
@@ -421,7 +634,14 @@ async def check_whitelist(
     """
     Проверить находится ли строка в белом списке.
 
-    Проверяет есть ли хотя бы один паттерн из белого списка в check_string.
+    УМНАЯ ЛОГИКА:
+    1. Если паттерн - только домен (youtube.com) → разрешает весь домен
+    2. Если паттерн содержит путь (t.me/channel) → разрешает только этот путь и подпути
+
+    Примеры:
+        Паттерн "youtube.com" → разрешает youtube.com/anything
+        Паттерн "t.me/beauty_indubai" → разрешает только t.me/beauty_indubai и t.me/beauty_indubai/123
+        Паттерн "t.me" → НЕ РЕКОМЕНДУЕТСЯ (слишком широко)
 
     Args:
         session: Асинхронная сессия БД
@@ -435,20 +655,78 @@ async def check_whitelist(
     # Нормализуем проверяемую строку к нижнему регистру
     normalized_string = check_string.lower()
 
+    # Извлекаем домен из проверяемой строки (если это URL)
+    check_domain = extract_domain_from_url(check_string)
+
+    # Нормализуем URL для сравнения (без протокола, без www, без trailing slash)
+    normalized_check_url = normalize_url_for_comparison(check_string)
+
     # Получаем все паттерны белого списка для данного scope
     whitelist_patterns = await list_whitelist_patterns(session, chat_id, scope)
 
+    # Извлекаем username из проверяемой строки (если это @username)
+    # Для проверки forwards/quotes по username
+    check_username = None
+    if normalized_string.startswith('@'):
+        check_username = normalized_string
+
     # Проходим по каждому паттерну из белого списка
     for entry in whitelist_patterns:
-        # Проверяем содержится ли паттерн в проверяемой строке
-        if entry.pattern in normalized_string:
-            # Логируем срабатывание белого списка
-            logger.info(
-                f"Whitelist match: chat_id={chat_id}, scope={scope}, "
-                f"pattern='{entry.pattern}' found in '{check_string}'"
-            )
-            # Возвращаем True - строка в белом списке
-            return True
+        # Нормализуем паттерн
+        normalized_pattern = normalize_url_for_comparison(entry.pattern)
+        pattern_domain = extract_domain_from_url(entry.pattern)
+
+        # ============================================================
+        # ПРОВЕРКА 1: Паттерн - только домен (без пути)
+        # Пример: "youtube.com" или "youtube.com/" → разрешает весь домен
+        # ============================================================
+        if is_domain_only_pattern(entry.pattern):
+            if check_domain and pattern_domain and check_domain == pattern_domain:
+                logger.info(
+                    f"Whitelist match (domain): chat_id={chat_id}, scope={scope}, "
+                    f"pattern='{entry.pattern}' (domain={pattern_domain}) matches '{check_string}'"
+                )
+                return True
+            # Также проверяем если паттерн - это просто домен (без http://)
+            if check_domain and entry.pattern.lower() == check_domain:
+                logger.info(
+                    f"Whitelist match (domain direct): chat_id={chat_id}, scope={scope}, "
+                    f"pattern='{entry.pattern}' equals domain='{check_domain}'"
+                )
+                return True
+
+        # ============================================================
+        # ПРОВЕРКА 2: Паттерн содержит путь
+        # Пример: "t.me/channel" → разрешает только t.me/channel и t.me/channel/123
+        # ============================================================
+        else:
+            # Проверяем что нормализованный URL начинается с нормализованного паттерна
+            # Это позволяет: t.me/channel матчит t.me/channel и t.me/channel/123
+            if normalized_check_url.startswith(normalized_pattern):
+                # Дополнительная проверка: после паттерна должен быть конец, / или ?
+                # Это предотвращает: t.me/chan НЕ матчит t.me/channel
+                rest = normalized_check_url[len(normalized_pattern):]
+                if not rest or rest.startswith('/') or rest.startswith('?'):
+                    logger.info(
+                        f"Whitelist match (path prefix): chat_id={chat_id}, scope={scope}, "
+                        f"pattern='{entry.pattern}' is prefix of '{check_string}'"
+                    )
+                    return True
+
+        # ============================================================
+        # ПРОВЕРКА 3: Совпадение username (для forwards/quotes)
+        # Пример: паттерн "https://t.me/channel" или "t.me/channel" или "@channel"
+        # должен матчить проверку по "@channel"
+        # ============================================================
+        if check_username:
+            # Извлекаем username из паттерна (если это t.me ссылка или @username)
+            pattern_username = extract_username_from_telegram_link(entry.pattern)
+            if pattern_username and check_username == pattern_username:
+                logger.info(
+                    f"Whitelist match (username from link): chat_id={chat_id}, scope={scope}, "
+                    f"pattern='{entry.pattern}' → username='{pattern_username}' matches '{check_username}'"
+                )
+                return True
 
     # Если ни один паттерн не подошел - возвращаем False
     return False
@@ -480,6 +758,63 @@ def extract_links(
     links = URL_PATTERN.findall(text)
     # Возвращаем список ссылок
     return links
+
+
+def extract_links_from_entities(
+    # Объект сообщения aiogram
+    message: types.Message
+) -> List[str]:
+    """
+    Извлечь все URL из entities сообщения.
+
+    Telegram хранит ссылки в entities двух типов:
+    - url: видимая ссылка (https://example.com в тексте)
+    - text_link: скрытая ссылка (текст "нажми сюда" со скрытым URL)
+
+    НЕ извлекаем:
+    - mention: обычные @username (не являются ссылками)
+    - text_mention: упоминания по user_id
+
+    Args:
+        message: Объект сообщения aiogram
+
+    Returns:
+        Список найденных URL из entities
+    """
+    # Инициализируем список для найденных URL
+    urls = []
+
+    # Получаем entities из сообщения (или caption_entities для медиа)
+    entities = message.entities or message.caption_entities or []
+
+    # Получаем текст сообщения для извлечения URL из entity типа 'url'
+    text = message.text or message.caption or ""
+
+    # Перебираем все entities
+    for entity in entities:
+        # Проверяем тип entity - text_link (скрытая ссылка)
+        if entity.type == "text_link":
+            # URL хранится в атрибуте url у text_link entity
+            if entity.url:
+                # Добавляем URL в список
+                urls.append(entity.url)
+                # Логируем найденную скрытую ссылку
+                logger.debug(f"[ANTISPAM] Найден text_link URL: {entity.url}")
+
+        # Проверяем тип entity - url (видимая ссылка в тексте)
+        elif entity.type == "url":
+            # Извлекаем URL из текста по offset и length
+            url_text = text[entity.offset:entity.offset + entity.length]
+            # Добавляем URL в список
+            urls.append(url_text)
+            # Логируем найденную видимую ссылку
+            logger.debug(f"[ANTISPAM] Найден url entity: {url_text}")
+
+        # ИГНОРИРУЕМ mention (@username) и text_mention (упоминание по user_id)
+        # Это НЕ ссылки, это упоминания пользователей
+
+    # Возвращаем список найденных URL
+    return urls
 
 
 def is_telegram_link(
@@ -692,14 +1027,31 @@ async def check_message_for_spam(
         if rule and rule.action != ActionType.OFF:
             # Формируем строку для проверки белого списка (ID чата источника)
             # Для пересылок проверяем по ID чата источника
-            check_string = str(message.forward_origin.chat.id) if hasattr(message.forward_origin, 'chat') and message.forward_origin.chat else ""
-            # Проверяем белый список для пересылок
-            is_whitelisted = await check_whitelist(
-                session,
-                chat_id,
-                WhitelistScope.FORWARD,
-                check_string
-            )
+            is_whitelisted = False
+            source_chat = None
+
+            if hasattr(message.forward_origin, 'chat') and message.forward_origin.chat:
+                source_chat = message.forward_origin.chat
+                # Проверяем по ID чата
+                check_string = str(source_chat.id)
+                is_whitelisted = await check_whitelist(
+                    session,
+                    chat_id,
+                    WhitelistScope.FORWARD,
+                    check_string
+                )
+                # Если не в whitelist по ID, проверяем по username
+                if not is_whitelisted and source_chat.username:
+                    username_check = f"@{source_chat.username}"
+                    is_whitelisted = await check_whitelist(
+                        session,
+                        chat_id,
+                        WhitelistScope.FORWARD,
+                        username_check
+                    )
+                    if is_whitelisted:
+                        logger.info(f"Whitelist match by username: {username_check}")
+
             # Если НЕ в белом списке - применяем правило
             if not is_whitelisted:
                 # Это спам
@@ -742,24 +1094,79 @@ async def check_message_for_spam(
         # Если правило существует и активно
         if rule and rule.action != ActionType.OFF:
             # Для цитат также проверяем белый список
-            # Формируем строку для проверки (ID автора или источника)
-            check_string = ""
+            is_whitelisted = False
+            source_chat = None
+            source_user = None
+
             # Если есть пересылка в цитируемом сообщении
             if message.reply_to_message.forward_origin:
-                # Используем ID чата источника
-                if hasattr(message.reply_to_message.forward_origin, 'chat'):
-                    check_string = str(message.reply_to_message.forward_origin.chat.id)
-            # Иначе используем ID автора
+                # Получаем объект forward_origin
+                fwd_origin = message.reply_to_message.forward_origin
+                # Проверяем наличие chat (для каналов/групп)
+                if hasattr(fwd_origin, 'chat') and fwd_origin.chat:
+                    source_chat = fwd_origin.chat
+                    # Проверяем по ID чата
+                    check_string = str(source_chat.id)
+                    is_whitelisted = await check_whitelist(
+                        session,
+                        chat_id,
+                        WhitelistScope.QUOTE,
+                        check_string
+                    )
+                    # Если не в whitelist по ID, проверяем по username
+                    if not is_whitelisted and source_chat.username:
+                        username_check = f"@{source_chat.username}"
+                        is_whitelisted = await check_whitelist(
+                            session,
+                            chat_id,
+                            WhitelistScope.QUOTE,
+                            username_check
+                        )
+                        if is_whitelisted:
+                            logger.info(f"Quote whitelist match by username: {username_check}")
+                # Проверяем наличие sender_user (для пользователей/ботов)
+                elif hasattr(fwd_origin, 'sender_user') and fwd_origin.sender_user:
+                    source_user = fwd_origin.sender_user
+                    check_string = str(source_user.id)
+                    is_whitelisted = await check_whitelist(
+                        session,
+                        chat_id,
+                        WhitelistScope.QUOTE,
+                        check_string
+                    )
+                    # Если не в whitelist по ID, проверяем по username
+                    if not is_whitelisted and source_user.username:
+                        username_check = f"@{source_user.username}"
+                        is_whitelisted = await check_whitelist(
+                            session,
+                            chat_id,
+                            WhitelistScope.QUOTE,
+                            username_check
+                        )
+                        if is_whitelisted:
+                            logger.info(f"Quote whitelist match by username: {username_check}")
+            # Иначе используем автора сообщения
             elif message.reply_to_message.from_user:
-                check_string = str(message.reply_to_message.from_user.id)
+                source_user = message.reply_to_message.from_user
+                check_string = str(source_user.id)
+                is_whitelisted = await check_whitelist(
+                    session,
+                    chat_id,
+                    WhitelistScope.QUOTE,
+                    check_string
+                )
+                # Если не в whitelist по ID, проверяем по username
+                if not is_whitelisted and source_user.username:
+                    username_check = f"@{source_user.username}"
+                    is_whitelisted = await check_whitelist(
+                        session,
+                        chat_id,
+                        WhitelistScope.QUOTE,
+                        username_check
+                    )
+                    if is_whitelisted:
+                        logger.info(f"Quote whitelist match by username: {username_check}")
 
-            # Проверяем белый список для цитат
-            is_whitelisted = await check_whitelist(
-                session,
-                chat_id,
-                WhitelistScope.QUOTE,
-                check_string
-            )
             # Если НЕ в белом списке - применяем правило
             if not is_whitelisted:
                 # Это спам
@@ -795,8 +1202,14 @@ async def check_message_for_spam(
 
     # Получаем текст сообщения (включая caption для медиа)
     message_text = message.text or message.caption or ""
-    # Извлекаем все ссылки из текста
-    links = extract_links(message_text)
+    # Извлекаем ссылки из текста (regex поиск)
+    links_from_text = extract_links(message_text)
+    # Извлекаем ссылки из entities (text_link и url)
+    # Это ловит скрытые ссылки типа "нажми сюда" → https://spam.com
+    links_from_entities = extract_links_from_entities(message)
+    # Объединяем ссылки и убираем дубликаты
+    # Используем dict.fromkeys для сохранения порядка
+    links = list(dict.fromkeys(links_from_text + links_from_entities))
 
     # Если есть ссылки в сообщении
     if links:

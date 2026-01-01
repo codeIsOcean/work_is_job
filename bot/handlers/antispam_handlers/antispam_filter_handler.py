@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 # Импорт Router для создания отдельного роутера антиспам фильтра
 from aiogram import Router, F
 # Импорт типов aiogram для работы с сообщениями и чатами
-from aiogram.types import Message, ChatPermissions
+from aiogram.types import Message, ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton
 # Импорт исключений aiogram для обработки ошибок API
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 # Импорт AsyncSession для работы с базой данных
@@ -28,6 +28,10 @@ from bot.services.restriction_service import save_restriction
 
 # Создаем логгер для этого модуля
 logger = logging.getLogger(__name__)
+
+# ID бота Telegram для анонимных администраторов группы
+# Когда админ пишет анонимно, сообщение приходит от этого бота
+GROUP_ANONYMOUS_BOT_ID = 1087968824
 
 # Создаем отдельный роутер для фильтрации сообщений
 antispam_filter_router = Router()
@@ -112,6 +116,63 @@ async def is_user_admin(bot, chat_id: int, user_id: int) -> bool:
         return False
 
 
+def create_journal_action_keyboard(
+    user_id: int,
+    chat_id: int,
+    restrict_minutes: int = None
+) -> InlineKeyboardMarkup:
+    """
+    Создает клавиатуру с кнопками действий для журнала антиспам.
+
+    Кнопки:
+    - Мут (с временем из настроек правила)
+    - Бан (навсегда)
+    - Анмут (снять ограничения)
+
+    Args:
+        user_id: ID пользователя для действия
+        chat_id: ID чата (группы)
+        restrict_minutes: Длительность мута в минутах из настроек (None = навсегда)
+
+    Returns:
+        InlineKeyboardMarkup с кнопками действий
+    """
+    # Формируем текст кнопки мута с временем
+    if restrict_minutes and restrict_minutes > 0:
+        # Если есть настроенное время мута
+        mute_text = f"🔇 Мут ({restrict_minutes} мин)"
+    else:
+        # Если мут навсегда
+        mute_text = "🔇 Мут (навсегда)"
+
+    # Создаём кнопки действий
+    # Формат callback_data: aslog:{action}:{user_id}:{chat_id}:{restrict_minutes}
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                # Кнопка мута
+                InlineKeyboardButton(
+                    text=mute_text,
+                    callback_data=f"aslog:mute:{user_id}:{chat_id}:{restrict_minutes or 0}"
+                ),
+                # Кнопка бана
+                InlineKeyboardButton(
+                    text="🚫 Бан",
+                    callback_data=f"aslog:ban:{user_id}:{chat_id}"
+                ),
+            ],
+            [
+                # Кнопка снятия ограничений
+                InlineKeyboardButton(
+                    text="🔊 Снять ограничения",
+                    callback_data=f"aslog:unmute:{user_id}:{chat_id}"
+                ),
+            ],
+        ]
+    )
+    return keyboard
+
+
 # Основной обработчик сообщений в группах для антиспам фильтрации
 @antispam_filter_router.message(
     # Фильтр: обрабатываем только сообщения в группах и супергруппах
@@ -143,7 +204,33 @@ async def filter_message_for_spam(message: Message, session: AsyncSession):
         # Получаем ID пользователя
         user_id = message.from_user.id
 
-        # Проверяем является ли отправитель администратором
+        # ============================================================
+        # ПРОВЕРКА: Анонимный администратор группы
+        # Когда админ пишет анонимно, from_user.id = GROUP_ANONYMOUS_BOT_ID
+        # ============================================================
+        if user_id == GROUP_ANONYMOUS_BOT_ID:
+            # Анонимные админы не подвергаются проверке на спам
+            logger.debug(
+                f"[ANTISPAM_FILTER] Анонимный администратор (user_id={user_id}), пропускаем"
+            )
+            return
+
+        # ============================================================
+        # ПРОВЕРКА: Сообщение от имени канала (sender_chat)
+        # Когда канал привязан к группе и постит от своего имени
+        # ============================================================
+        if message.sender_chat:
+            # Сообщения от каналов/групп не подвергаются проверке на спам
+            # sender_chat.id - это ID канала который отправил сообщение
+            logger.debug(
+                f"[ANTISPAM_FILTER] Сообщение от канала/группы "
+                f"(sender_chat.id={message.sender_chat.id}), пропускаем"
+            )
+            return
+
+        # ============================================================
+        # ПРОВЕРКА: Обычный администратор или бот-администратор
+        # ============================================================
         if await is_user_admin(message.bot, chat_id, user_id):
             # Администраторы не подвергаются проверке на спам
             logger.debug(
@@ -190,18 +277,23 @@ async def filter_message_for_spam(message: Message, session: AsyncSession):
             # Действие: DELETE - только удалить сообщение, без наказания
             # Сообщение уже удалено выше (всегда для DELETE)
             logger.info(f"[ANTISPAM_FILTER] Действие DELETE для пользователя {user_id}")
-            # Логируем в журнал группы
+            # Логируем в журнал группы с кнопками действий
             await send_journal_event(
                 bot=message.bot,
                 session=session,
                 group_id=chat_id,
                 message_text=(
                     f"🗑️ <b>Антиспам: Удаление</b>\n\n"
-                    f"👤 Пользователь: {message.from_user.mention_html()} "
+                    f"👤 Пользователь: <a href='tg://user?id={user_id}'>{message.from_user.full_name}</a> "
                     f"[<code>{user_id}</code>]\n"
                     f"📋 Правило: {decision.triggered_rule_type.value if decision.triggered_rule_type else 'N/A'}\n"
                     f"💬 Причина: {decision.reason}\n"
                     f"🗑️ Сообщение удалено: Да"
+                ),
+                reply_markup=create_journal_action_keyboard(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    restrict_minutes=decision.restrict_minutes
                 )
             )
 
@@ -222,18 +314,23 @@ async def filter_message_for_spam(message: Message, session: AsyncSession):
                 # Планируем авто-удаление если настроен TTL
                 if warning_ttl > 0:
                     await schedule_message_deletion(sent_msg, warning_ttl)
-                # Логируем в журнал группы
+                # Логируем в журнал группы с кнопками действий
                 await send_journal_event(
                     bot=message.bot,
                     session=session,
                     group_id=chat_id,
                     message_text=(
                         f"⚠️ <b>Антиспам: Предупреждение</b>\n\n"
-                        f"👤 Пользователь: {message.from_user.mention_html()} "
+                        f"👤 Пользователь: <a href='tg://user?id={user_id}'>{message.from_user.full_name}</a> "
                         f"[<code>{user_id}</code>]\n"
                         f"📋 Правило: {decision.triggered_rule_type.value if decision.triggered_rule_type else 'N/A'}\n"
                         f"💬 Причина: {decision.reason}\n"
                         f"🗑️ Сообщение удалено: {'Да' if decision.delete_message else 'Нет'}"
+                    ),
+                    reply_markup=create_journal_action_keyboard(
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        restrict_minutes=decision.restrict_minutes
                     )
                 )
             except Exception as e:
@@ -267,18 +364,23 @@ async def filter_message_for_spam(message: Message, session: AsyncSession):
                     # Игнорируем ошибки отправки уведомления (не критично)
                     pass
 
-                # Логируем в журнал группы
+                # Логируем в журнал группы с кнопками действий
                 await send_journal_event(
                     bot=message.bot,
                     session=session,
                     group_id=chat_id,
                     message_text=(
                         f"👢 <b>Антиспам: Исключение</b>\n\n"
-                        f"👤 Пользователь: {message.from_user.mention_html()} "
+                        f"👤 Пользователь: <a href='tg://user?id={user_id}'>{message.from_user.full_name}</a> "
                         f"[<code>{user_id}</code>]\n"
                         f"📋 Правило: {decision.triggered_rule_type.value if decision.triggered_rule_type else 'N/A'}\n"
                         f"💬 Причина: {decision.reason}\n"
                         f"🗑️ Сообщение удалено: {'Да' if decision.delete_message else 'Нет'}"
+                    ),
+                    reply_markup=create_journal_action_keyboard(
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        restrict_minutes=decision.restrict_minutes
                     )
                 )
 
@@ -382,19 +484,24 @@ async def filter_message_for_spam(message: Message, session: AsyncSession):
 
                 # Формируем строку длительности для журнала
                 duration_str = f"{decision.restrict_minutes} мин." if decision.restrict_minutes else "навсегда"
-                # Логируем в журнал группы
+                # Логируем в журнал группы с кнопками действий
                 await send_journal_event(
                     bot=message.bot,
                     session=session,
                     group_id=chat_id,
                     message_text=(
                         f"🔇 <b>Антиспам: Ограничение (мут)</b>\n\n"
-                        f"👤 Пользователь: {message.from_user.mention_html()} "
+                        f"👤 Пользователь: <a href='tg://user?id={user_id}'>{message.from_user.full_name}</a> "
                         f"[<code>{user_id}</code>]\n"
                         f"⏱️ Длительность: {duration_str}\n"
                         f"📋 Правило: {decision.triggered_rule_type.value if decision.triggered_rule_type else 'N/A'}\n"
                         f"💬 Причина: {decision.reason}\n"
                         f"🗑️ Сообщение удалено: {'Да' if decision.delete_message else 'Нет'}"
+                    ),
+                    reply_markup=create_journal_action_keyboard(
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        restrict_minutes=decision.restrict_minutes
                     )
                 )
 
@@ -443,18 +550,23 @@ async def filter_message_for_spam(message: Message, session: AsyncSession):
                     # Игнорируем ошибки отправки уведомления (не критично)
                     pass
 
-                # Логируем в журнал группы
+                # Логируем в журнал группы с кнопками действий
                 await send_journal_event(
                     bot=message.bot,
                     session=session,
                     group_id=chat_id,
                     message_text=(
                         f"🚫 <b>Антиспам: Бан</b>\n\n"
-                        f"👤 Пользователь: {message.from_user.mention_html()} "
+                        f"👤 Пользователь: <a href='tg://user?id={user_id}'>{message.from_user.full_name}</a> "
                         f"[<code>{user_id}</code>]\n"
                         f"📋 Правило: {decision.triggered_rule_type.value if decision.triggered_rule_type else 'N/A'}\n"
                         f"💬 Причина: {decision.reason}\n"
                         f"🗑️ Сообщение удалено: {'Да' if decision.delete_message else 'Нет'}"
+                    ),
+                    reply_markup=create_journal_action_keyboard(
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        restrict_minutes=decision.restrict_minutes
                     )
                 )
 

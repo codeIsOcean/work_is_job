@@ -21,8 +21,28 @@ from typing import Optional, List, NamedTuple, Dict, Set, TYPE_CHECKING
 import logging
 # Импортируем datetime для обновления времени срабатывания
 from datetime import datetime
-# Импортируем difflib для fuzzy matching
-from difflib import SequenceMatcher
+# Импортируем asyncio для async wrapper
+import asyncio
+# Импортируем ThreadPoolExecutor для выноса CPU-heavy операций из event loop
+from concurrent.futures import ThreadPoolExecutor
+# Импортируем functools для partial
+from functools import partial
+# Импортируем rapidfuzz для быстрого fuzzy matching (C-реализация, ~100x быстрее difflib)
+from rapidfuzz import fuzz
+
+# ============================================================
+# ГЛОБАЛЬНЫЙ THREAD POOL ДЛЯ CPU-HEAVY ОПЕРАЦИЙ
+# ============================================================
+# Используем 2 потока - достаточно для fuzzy matching, не перегружает систему
+_fuzzy_executor: Optional[ThreadPoolExecutor] = None
+
+
+def _get_fuzzy_executor() -> ThreadPoolExecutor:
+    """Lazy-инициализация ThreadPoolExecutor для fuzzy matching."""
+    global _fuzzy_executor
+    if _fuzzy_executor is None:
+        _fuzzy_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="fuzzy_match")
+    return _fuzzy_executor
 
 # Импортируем нормализатор текста
 from bot.services.content_filter.text_normalizer import TextNormalizer, get_normalizer
@@ -228,8 +248,11 @@ def fuzzy_match(text: str, pattern: str, threshold: float = 0.8) -> bool:
     """
     Проверяет нечёткое совпадение текста с паттерном.
 
-    Использует SequenceMatcher для определения сходства строк.
+    Использует rapidfuzz (C-реализация) для быстрого определения сходства строк.
     Полезно для обнаружения текста с опечатками или небольшими изменениями.
+
+    ОПТИМИЗАЦИЯ: rapidfuzz в ~100x быстрее стандартного difflib.SequenceMatcher
+    и уже реализует скользящее окно внутри partial_ratio.
 
     Args:
         text: Текст для проверки (нормализованный)
@@ -239,33 +262,128 @@ def fuzzy_match(text: str, pattern: str, threshold: float = 0.8) -> bool:
     Returns:
         True если найдено совпадение >= threshold
     """
-    # Если паттерн короткий, ищем его как подстроку с fuzzy
     pattern_lower = pattern.lower()
     text_lower = text.lower()
-
-    # Проверяем скользящим окном по тексту
     pattern_len = len(pattern_lower)
 
-    # Минимальная длина для проверки
+    # Минимальная длина для проверки - для коротких паттернов точное совпадение
     if pattern_len < 3:
         return pattern_lower in text_lower
 
-    # Проходим по тексту окном размера pattern_len
-    for i in range(len(text_lower) - pattern_len + 1):
-        window = text_lower[i:i + pattern_len]
-        ratio = SequenceMatcher(None, pattern_lower, window).ratio()
-        if ratio >= threshold:
-            return True
+    # Конвертируем threshold из 0.0-1.0 в 0-100 (rapidfuzz использует 0-100)
+    threshold_100 = threshold * 100
 
-    # Также проверяем слова целиком
+    # rapidfuzz.fuzz.partial_ratio уже реализует скользящее окно внутри
+    # и работает в ~100x быстрее чем SequenceMatcher
+    score = fuzz.partial_ratio(pattern_lower, text_lower)
+    if score >= threshold_100:
+        return True
+
+    # Также проверяем слова целиком (для коротких паттернов = длине слова)
+    # Используем fuzz.ratio для полного сравнения слов
     words = text_lower.split()
     for word in words:
         if len(word) >= 3:
-            ratio = SequenceMatcher(None, pattern_lower, word).ratio()
-            if ratio >= threshold:
+            word_score = fuzz.ratio(pattern_lower, word)
+            if word_score >= threshold_100:
                 return True
 
     return False
+
+
+async def fuzzy_match_async(text: str, pattern: str, threshold: float = 0.8) -> bool:
+    """
+    Асинхронная версия fuzzy_match с выполнением в отдельном потоке.
+
+    Используется для очень длинных текстов (>5000 символов) чтобы не блокировать event loop.
+    Для обычных текстов можно использовать синхронную версию fuzzy_match.
+
+    Args:
+        text: Текст для проверки (нормализованный)
+        pattern: Паттерн для поиска (нормализованный)
+        threshold: Порог сходства (0.0-1.0), по умолчанию 0.8
+
+    Returns:
+        True если найдено совпадение >= threshold
+    """
+    loop = asyncio.get_event_loop()
+    executor = _get_fuzzy_executor()
+    return await loop.run_in_executor(
+        executor,
+        partial(fuzzy_match, text, pattern, threshold)
+    )
+
+
+def fuzzy_match_batch(text: str, patterns: List[str], threshold: float = 0.8) -> List[bool]:
+    """
+    Пакетная проверка нескольких паттернов против одного текста.
+
+    Оптимизирована для случаев когда нужно проверить много паттернов
+    против одного текста - нормализация текста делается один раз.
+
+    Args:
+        text: Текст для проверки (нормализованный)
+        patterns: Список паттернов для поиска
+        threshold: Порог сходства (0.0-1.0), по умолчанию 0.8
+
+    Returns:
+        Список булевых значений - результат для каждого паттерна
+    """
+    text_lower = text.lower()
+    threshold_100 = threshold * 100
+    words = text_lower.split()
+    results = []
+
+    for pattern in patterns:
+        pattern_lower = pattern.lower()
+        pattern_len = len(pattern_lower)
+
+        if pattern_len < 3:
+            results.append(pattern_lower in text_lower)
+            continue
+
+        # Проверяем partial_ratio
+        score = fuzz.partial_ratio(pattern_lower, text_lower)
+        if score >= threshold_100:
+            results.append(True)
+            continue
+
+        # Проверяем слова
+        found = False
+        for word in words:
+            if len(word) >= 3:
+                word_score = fuzz.ratio(pattern_lower, word)
+                if word_score >= threshold_100:
+                    found = True
+                    break
+        results.append(found)
+
+    return results
+
+
+async def fuzzy_match_batch_async(
+    text: str, patterns: List[str], threshold: float = 0.8
+) -> List[bool]:
+    """
+    Асинхронная версия пакетной проверки паттернов.
+
+    Выполняется в отдельном потоке чтобы не блокировать event loop
+    при проверке большого количества паттернов.
+
+    Args:
+        text: Текст для проверки
+        patterns: Список паттернов
+        threshold: Порог сходства
+
+    Returns:
+        Список результатов для каждого паттерна
+    """
+    loop = asyncio.get_event_loop()
+    executor = _get_fuzzy_executor()
+    return await loop.run_in_executor(
+        executor,
+        partial(fuzzy_match_batch, text, patterns, threshold)
+    )
 
 
 def extract_ngrams(text: str, n: int = 2) -> Set[str]:

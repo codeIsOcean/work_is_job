@@ -13,6 +13,8 @@
 from typing import Optional, NamedTuple, List
 # Импортируем логгер
 import logging
+# Импортируем re для работы с регулярными выражениями (word boundaries)
+import re
 # Импортируем datetime для работы со временем
 from datetime import datetime, timedelta
 
@@ -531,22 +533,61 @@ class FilterManager:
                 for pattern in patterns:
                     matched = False
                     match_method = None
+                    match_context = None  # Контекст где найдено совпадение
 
                     # ─────────────────────────────────────────────────────
                     # МЕТОД 1: Точное совпадение подстроки
+                    # Для КОРОТКИХ паттернов (< 5 символов) требуем границы слов
+                    # чтобы избежать ложных срабатываний (weed→вед в "ведущая")
                     # ─────────────────────────────────────────────────────
-                    if pattern.normalized.lower() in normalized_text:
-                        matched = True
-                        match_method = 'phrase'
+                    pattern_norm_lower = pattern.normalized.lower()
+
+                    # Для коротких паттернов используем word boundaries
+                    if len(pattern_norm_lower) < 5:
+                        # Ищем как отдельное слово с границами \b
+                        word_boundary_regex = r'\b' + re.escape(pattern_norm_lower) + r'\b'
+                        match_obj = re.search(word_boundary_regex, normalized_text)
+                        if match_obj:
+                            matched = True
+                            match_method = 'phrase'
+                            pos = match_obj.start()
+                            # Берём контекст: 20 символов до и после
+                            start = max(0, pos - 20)
+                            end = min(len(normalized_text), pos + len(pattern_norm_lower) + 20)
+                            match_context = normalized_text[start:end]
+                            if start > 0:
+                                match_context = "..." + match_context
+                            if end < len(normalized_text):
+                                match_context = match_context + "..."
+                    else:
+                        # Для длинных паттернов - обычный поиск подстроки
+                        if pattern_norm_lower in normalized_text:
+                            matched = True
+                            match_method = 'phrase'
+                            # Находим позицию совпадения для контекста
+                            pos = normalized_text.find(pattern_norm_lower)
+                            if pos >= 0:
+                                # Берём контекст: 20 символов до и после
+                                start = max(0, pos - 20)
+                                end = min(len(normalized_text), pos + len(pattern_norm_lower) + 20)
+                                match_context = normalized_text[start:end]
+                                # Добавляем маркер где именно совпадение
+                                if start > 0:
+                                    match_context = "..." + match_context
+                                if end < len(normalized_text):
+                                    match_context = match_context + "..."
 
                     # ─────────────────────────────────────────────────────
                     # МЕТОД 2: Fuzzy matching (порог 0.8)
                     # Ловит перестановки слов и небольшие изменения
+                    # ВАЖНО: Пропускаем fuzzy для коротких паттернов (< 5 символов)
+                    # т.к. они дают много ложных срабатываний (вед в ведущая)
                     # ─────────────────────────────────────────────────────
-                    if not matched:
+                    if not matched and len(pattern_norm_lower) >= 5:
                         if fuzzy_match(normalized_text, pattern.normalized, threshold=0.8):
                             matched = True
                             match_method = 'fuzzy'
+                            match_context = f"fuzzy match в тексте длиной {len(normalized_text)} символов"
 
                     # ─────────────────────────────────────────────────────
                     # МЕТОД 3: N-gram matching (перекрытие 0.6)
@@ -560,24 +601,33 @@ class FilterManager:
                             if ngram_match(text_bigrams, pattern_bigrams, min_overlap=0.6):
                                 matched = True
                                 match_method = 'ngram'
+                                match_context = f"ngram bigrams match"
                         # Триграммы для паттернов из 3+ слов
                         if not matched and len(pattern_words) >= 3:
                             pattern_trigrams = extract_ngrams(pattern.normalized, n=3)
                             if ngram_match(text_trigrams, pattern_trigrams, min_overlap=0.5):
                                 matched = True
                                 match_method = 'ngram'
+                                match_context = f"ngram trigrams match"
 
                     # Если паттерн сработал - добавляем скор
                     if matched:
                         total_score += pattern.weight
-                        triggered_patterns.append(f"{pattern.pattern} [{match_method}]")
+                        # Формируем строку с контекстом для отображения
+                        trigger_info = f"{pattern.pattern} [{match_method}]"
+                        if match_context:
+                            trigger_info += f" → найдено в: «{match_context}»"
+                        triggered_patterns.append(trigger_info)
 
                         # Увеличиваем счётчик срабатываний
                         await section_service.increment_pattern_trigger(pattern.id, session)
 
-                        logger.debug(
-                            f"[FilterManager] CustomSection паттерн сработал [{match_method}]: "
-                            f"'{pattern.pattern}' +{pattern.weight}"
+                        # ВАЖНО: Детальный лог для отладки
+                        logger.info(
+                            f"[FilterManager] 🔍 MATCH: паттерн='{pattern.pattern}' "
+                            f"(norm='{pattern.normalized}') [{match_method}] +{pattern.weight} баллов\n"
+                            f"    📍 Контекст: {match_context}\n"
+                            f"    📝 Норм.текст (первые 200 симв): {normalized_text[:200]}..."
                         )
 
                 # Проверяем достижен ли порог

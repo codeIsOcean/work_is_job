@@ -939,6 +939,82 @@ async def antispam_quote_source_handler(
 
 
 # ============================================================
+# ХЕНДЛЕР: ВОЗВРАТ К НАСТРОЙКАМ ПРАВИЛА (as:{short_code}:{chat_id})
+# ============================================================
+# Обрабатывает кнопки "Назад" из whitelist и duration меню
+# Коды: fc, fg, fu, fb (forwards), qc, qg, qu, qb (quotes)
+
+@antispam_router.callback_query(
+    F.data.regexp(r"^as:(fc|fg|fu|fb|qc|qg|qu|qb):-?\d+$")
+)
+async def antispam_back_to_rule_settings_handler(
+    callback: types.CallbackQuery,
+    session: AsyncSession,
+):
+    """
+    Обработчик возврата к настройкам правила.
+    Callback формат: as:{short_code}:{chat_id}
+
+    Вызывается при нажатии кнопки "Назад" из:
+    - Меню белого списка (whitelist)
+    - Меню выбора длительности
+
+    short_code: fc, fg, fu, fb, qc, qg, qu, qb
+    """
+    logger.info(f"Back to rule settings for user {callback.from_user.id}: {callback.data}")
+
+    try:
+        parts = callback.data.split(":")
+        short_code = parts[1]  # fc, fg, fu, fb, qc, qg, qu, qb
+        chat_id = int(parts[2])
+        user_id = callback.from_user.id
+
+        # Проверяем права
+        if not await check_granular_permissions(
+            callback.bot, user_id, chat_id, "change_info", session
+        ):
+            await callback.answer("❌ Недостаточно прав!", show_alert=True)
+            return
+
+        # Получаем тип правила из короткого кода
+        rule_type = get_rule_type_from_short_code(short_code)
+        if not rule_type:
+            await callback.answer("❌ Неизвестный тип правила", show_alert=True)
+            return
+
+        # Загружаем правило из БД
+        rule = await get_rule_by_type(session, chat_id, rule_type)
+
+        if rule:
+            current_action = rule.action
+            delete_message = rule.delete_message
+            restrict_minutes = rule.restrict_minutes
+        else:
+            current_action = ActionType.OFF
+            delete_message = False
+            restrict_minutes = 30
+
+        # Формируем клавиатуру настроек
+        keyboard = create_action_settings_keyboard(
+            chat_id=chat_id,
+            rule_type=rule_type,
+            current_action=current_action,
+            delete_message=delete_message,
+            restrict_minutes=restrict_minutes,
+            short_code=short_code,
+        )
+
+        # Формируем текст сообщения
+        text = await format_rule_status_message(session, chat_id, rule_type)
+        await safe_edit_message(callback, text, keyboard)
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"Error in antispam_back_to_rule_settings_handler: {e}")
+        await callback.answer("❌ Произошла ошибка", show_alert=True)
+
+
+# ============================================================
 # ХЕНДЛЕР: БЛОК ВСЕХ ССЫЛОК (as:al:{chat_id})
 # ============================================================
 
@@ -1695,6 +1771,48 @@ async def antispam_whitelist_pattern_received_handler(
                 "Попробуйте еще раз или отправьте /cancel"
             )
             return
+
+        # ============================================================
+        # ВАЛИДАЦИЯ: Проверяем на слишком широкие паттерны
+        # ============================================================
+        # Список запрещённых широких паттернов
+        too_broad_patterns = [
+            "t.me", "telegram.me", "telegram.dog",  # Весь Telegram
+            "http", "https", "://",  # Все URL
+            "youtube.com", "youtu.be",  # Весь YouTube (рекомендуем конкретные ссылки)
+            "instagram.com", "facebook.com", "twitter.com", "x.com",  # Соцсети
+            "vk.com", "ok.ru",  # VK/OK
+            ".", "/", "@",  # Слишком общие символы
+        ]
+
+        pattern_lower = pattern.lower().strip()
+        # Нормализуем для проверки (убираем протокол)
+        normalized_for_check = pattern_lower
+        if normalized_for_check.startswith('https://'):
+            normalized_for_check = normalized_for_check[8:]
+        elif normalized_for_check.startswith('http://'):
+            normalized_for_check = normalized_for_check[7:]
+        if normalized_for_check.startswith('www.'):
+            normalized_for_check = normalized_for_check[4:]
+        normalized_for_check = normalized_for_check.rstrip('/')
+
+        # Проверяем на запрещённые паттерны
+        if normalized_for_check in too_broad_patterns:
+            await message.answer(
+                f"⚠️ <b>Паттерн слишком широкий!</b>\n\n"
+                f"Паттерн <code>{pattern}</code> разрешит ВСЕ ссылки с этого домена.\n\n"
+                f"<b>Рекомендация:</b>\n"
+                f"• Для Telegram: укажите полную ссылку, например <code>t.me/channel_name</code>\n"
+                f"• Для YouTube: укажите конкретное видео или канал\n\n"
+                f"Если вы уверены, отправьте паттерн ещё раз с восклицательным знаком в конце:\n"
+                f"<code>{pattern}!</code>",
+                parse_mode="HTML"
+            )
+            return
+
+        # Если пользователь подтвердил широкий паттерн (добавил !)
+        if pattern.endswith('!'):
+            pattern = pattern[:-1].strip()  # Убираем ! из паттерна
 
         scope = get_whitelist_scope_from_short_code(short_code)
 

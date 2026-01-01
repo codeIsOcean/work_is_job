@@ -45,7 +45,9 @@ from bot.database.models_antispam import ActionType
 from bot.handlers.antispam_handlers.antispam_filter_handler import (
     schedule_message_deletion,
     get_warning_ttl,
-    is_user_admin
+    is_user_admin,
+    # Импортируем функцию создания клавиатуры с кнопками действий для журнала
+    create_journal_action_keyboard
 )
 # Импортируем функцию логирования в журнал группы
 from bot.services.group_journal_service import send_journal_event
@@ -304,22 +306,23 @@ async def group_message_handler(
     # Проверяем сообщение через ContentFilter
     content_filter_triggered = await _process_content_filter(message, session)
 
-    # Если ContentFilter сработал - остальные фильтры пропускаем
-    # Сообщение уже обработано (удалено/наказан)
+    # Логируем результат ContentFilter
+    # НЕ прерываем выполнение - Antispam должен работать независимо
     if content_filter_triggered:
-        logger.info(f"[COORDINATOR] ContentFilter сработал, пропускаем остальные фильтры")
-        return
+        logger.info(f"[COORDINATOR] ContentFilter сработал, продолжаем проверку Antispam")
 
     # ─────────────────────────────────────────────────────────
     # ШАГ 2: SCAM MEDIA FILTER (скам-изображения по pHash)
     # ─────────────────────────────────────────────────────────
     # Проверяем сообщение через ScamMediaFilter если есть медиа
+    # Инициализируем флаг для логирования
+    scam_media_triggered = False
     if await has_media(message):
         scam_media_triggered = await _process_scam_media(message, session)
-        # Если ScamMedia сработал - Antispam пропускаем
+        # Логируем результат ScamMedia
+        # НЕ прерываем выполнение - Antispam должен работать независимо
         if scam_media_triggered:
-            logger.info(f"[COORDINATOR] ScamMedia сработал, пропускаем Antispam")
-            return
+            logger.info(f"[COORDINATOR] ScamMedia сработал, продолжаем проверку Antispam")
 
     # ─────────────────────────────────────────────────────────
     # ШАГ 3: ANTISPAM (ссылки, пересылки, цитаты)
@@ -569,7 +572,7 @@ async def _apply_antispam_action(
     # ─────────────────────────────────────────────────────────
     if decision.action == ActionType.DELETE:
         logger.info(f"[COORDINATOR/AS] Действие DELETE для пользователя {user_id}")
-        # Логируем в журнал группы
+        # Логируем в журнал группы с кнопками действий
         await send_journal_event(
             bot=message.bot,
             session=session,
@@ -581,6 +584,12 @@ async def _apply_antispam_action(
                 f"📋 Правило: {decision.triggered_rule_type.value if decision.triggered_rule_type else 'N/A'}\n"
                 f"💬 Причина: {decision.reason}\n"
                 f"🗑️ Сообщение удалено: Да"
+            ),
+            # Добавляем клавиатуру с кнопками Мут/Бан/Снять ограничения
+            reply_markup=create_journal_action_keyboard(
+                user_id=user_id,
+                chat_id=chat_id,
+                restrict_minutes=decision.restrict_minutes
             )
         )
 
@@ -604,7 +613,7 @@ async def _apply_antispam_action(
             if warning_ttl > 0:
                 await schedule_message_deletion(sent_msg, warning_ttl)
 
-            # Логируем в журнал группы
+            # Логируем в журнал группы с кнопками действий
             await send_journal_event(
                 bot=message.bot,
                 session=session,
@@ -616,6 +625,12 @@ async def _apply_antispam_action(
                     f"📋 Правило: {decision.triggered_rule_type.value if decision.triggered_rule_type else 'N/A'}\n"
                     f"💬 Причина: {decision.reason}\n"
                     f"🗑️ Сообщение удалено: {'Да' if decision.delete_message else 'Нет'}"
+                ),
+                # Добавляем клавиатуру с кнопками Мут/Бан/Снять ограничения
+                reply_markup=create_journal_action_keyboard(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    restrict_minutes=decision.restrict_minutes
                 )
             )
         except Exception as e:
@@ -644,7 +659,7 @@ async def _apply_antispam_action(
             except Exception:
                 pass
 
-            # Логируем в журнал группы
+            # Логируем в журнал группы с кнопками действий
             await send_journal_event(
                 bot=message.bot,
                 session=session,
@@ -656,6 +671,12 @@ async def _apply_antispam_action(
                     f"📋 Правило: {decision.triggered_rule_type.value if decision.triggered_rule_type else 'N/A'}\n"
                     f"💬 Причина: {decision.reason}\n"
                     f"🗑️ Сообщение удалено: {'Да' if decision.delete_message else 'Нет'}"
+                ),
+                # Добавляем клавиатуру с кнопками Мут/Бан/Снять ограничения
+                reply_markup=create_journal_action_keyboard(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    restrict_minutes=decision.restrict_minutes
                 )
             )
 
@@ -719,7 +740,8 @@ async def _apply_antispam_action(
             except Exception:
                 pass
 
-            # Логируем в журнал группы
+            # Логируем в журнал группы с кнопками действий
+            # Формируем строку длительности для отображения
             duration_str = f"{decision.restrict_minutes} мин." if decision.restrict_minutes else "навсегда"
             await send_journal_event(
                 bot=message.bot,
@@ -733,6 +755,12 @@ async def _apply_antispam_action(
                     f"📋 Правило: {decision.triggered_rule_type.value if decision.triggered_rule_type else 'N/A'}\n"
                     f"💬 Причина: {decision.reason}\n"
                     f"🗑️ Сообщение удалено: {'Да' if decision.delete_message else 'Нет'}"
+                ),
+                # Добавляем клавиатуру с кнопками Мут/Бан/Снять ограничения
+                reply_markup=create_journal_action_keyboard(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    restrict_minutes=decision.restrict_minutes
                 )
             )
 
@@ -763,7 +791,7 @@ async def _apply_antispam_action(
             except Exception:
                 pass
 
-            # Логируем в журнал группы
+            # Логируем в журнал группы с кнопками действий
             await send_journal_event(
                 bot=message.bot,
                 session=session,
@@ -775,6 +803,12 @@ async def _apply_antispam_action(
                     f"📋 Правило: {decision.triggered_rule_type.value if decision.triggered_rule_type else 'N/A'}\n"
                     f"💬 Причина: {decision.reason}\n"
                     f"🗑️ Сообщение удалено: {'Да' if decision.delete_message else 'Нет'}"
+                ),
+                # Добавляем клавиатуру с кнопками Мут/Бан/Снять ограничения
+                reply_markup=create_journal_action_keyboard(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    restrict_minutes=decision.restrict_minutes
                 )
             )
 

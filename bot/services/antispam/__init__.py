@@ -20,6 +20,9 @@ from .antispam_service import (
     is_telegram_link,
     detect_forward_source,
     detect_quote_source,
+    # Функции работы с URL и доменами
+    extract_domain_from_url,
+    is_url,
 )
 
 # Определяем список экспортируемых имен
@@ -38,4 +41,6 @@ __all__ = [
     "is_telegram_link",
     "detect_forward_source",
     "detect_quote_source",
+    "extract_domain_from_url",
+    "is_url",
 ]
