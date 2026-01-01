@@ -1757,78 +1757,85 @@ async def antispam_whitelist_pattern_received_handler(
             await message.answer("❌ Добавление отменено")
             return
 
-        pattern = message.text.strip() if message.text else ""
+        raw_text = message.text.strip() if message.text else ""
 
-        if not pattern:
+        if not raw_text:
             await message.answer(
                 "❌ Паттерн не может быть пустым. Попробуйте еще раз или отправьте /cancel"
             )
             return
 
-        if len(pattern) > 200:
+        # ============================================================
+        # BATCH ДОБАВЛЕНИЕ: Парсим многострочный ввод
+        # ============================================================
+        # Разбиваем по строкам, убираем пустые
+        patterns_raw = [p.strip() for p in raw_text.split('\n') if p.strip()]
+
+        if not patterns_raw:
             await message.answer(
-                "❌ Паттерн слишком длинный (макс 200 символов). "
-                "Попробуйте еще раз или отправьте /cancel"
+                "❌ Не найдено ни одного паттерна. Попробуйте еще раз или отправьте /cancel"
             )
             return
 
-        # ============================================================
-        # ВАЛИДАЦИЯ: Проверяем на слишком широкие паттерны
-        # ============================================================
-        # Список запрещённых широких паттернов
+        # Список запрещённых широких паттернов (только для предупреждения)
         too_broad_patterns = [
             "t.me", "telegram.me", "telegram.dog",  # Весь Telegram
             "http", "https", "://",  # Все URL
-            "youtube.com", "youtu.be",  # Весь YouTube (рекомендуем конкретные ссылки)
-            "instagram.com", "facebook.com", "twitter.com", "x.com",  # Соцсети
-            "vk.com", "ok.ru",  # VK/OK
             ".", "/", "@",  # Слишком общие символы
         ]
 
-        pattern_lower = pattern.lower().strip()
-        # Нормализуем для проверки (убираем протокол)
-        normalized_for_check = pattern_lower
-        if normalized_for_check.startswith('https://'):
-            normalized_for_check = normalized_for_check[8:]
-        elif normalized_for_check.startswith('http://'):
-            normalized_for_check = normalized_for_check[7:]
-        if normalized_for_check.startswith('www.'):
-            normalized_for_check = normalized_for_check[4:]
-        normalized_for_check = normalized_for_check.rstrip('/')
-
-        # Проверяем на запрещённые паттерны
-        if normalized_for_check in too_broad_patterns:
-            await message.answer(
-                f"⚠️ <b>Паттерн слишком широкий!</b>\n\n"
-                f"Паттерн <code>{pattern}</code> разрешит ВСЕ ссылки с этого домена.\n\n"
-                f"<b>Рекомендация:</b>\n"
-                f"• Для Telegram: укажите полную ссылку, например <code>t.me/channel_name</code>\n"
-                f"• Для YouTube: укажите конкретное видео или канал\n\n"
-                f"Если вы уверены, отправьте паттерн ещё раз с восклицательным знаком в конце:\n"
-                f"<code>{pattern}!</code>",
-                parse_mode="HTML"
-            )
-            return
-
-        # Если пользователь подтвердил широкий паттерн (добавил !)
-        if pattern.endswith('!'):
-            pattern = pattern[:-1].strip()  # Убираем ! из паттерна
-
         scope = get_whitelist_scope_from_short_code(short_code)
 
-        await add_whitelist_pattern(
-            session=session,
-            chat_id=chat_id,
-            scope=scope,
-            pattern=pattern,
-            added_by=message.from_user.id,
-        )
+        # Счётчики для отчёта
+        added_patterns = []
+        skipped_patterns = []
+        broad_patterns = []
 
+        for pattern in patterns_raw:
+            # Проверка длины
+            if len(pattern) > 200:
+                skipped_patterns.append(f"{pattern[:30]}... (слишком длинный)")
+                continue
+
+            # Нормализуем для проверки
+            pattern_lower = pattern.lower().strip()
+            normalized_for_check = pattern_lower
+            if normalized_for_check.startswith('https://'):
+                normalized_for_check = normalized_for_check[8:]
+            elif normalized_for_check.startswith('http://'):
+                normalized_for_check = normalized_for_check[7:]
+            if normalized_for_check.startswith('www.'):
+                normalized_for_check = normalized_for_check[4:]
+            normalized_for_check = normalized_for_check.rstrip('/')
+
+            # Проверяем на слишком широкие паттерны
+            if normalized_for_check in too_broad_patterns:
+                broad_patterns.append(pattern)
+                continue
+
+            # Если пользователь подтвердил широкий паттерн (добавил !)
+            if pattern.endswith('!'):
+                pattern = pattern[:-1].strip()
+
+            # Добавляем паттерн в БД
+            try:
+                await add_whitelist_pattern(
+                    session=session,
+                    chat_id=chat_id,
+                    scope=scope,
+                    pattern=pattern,
+                    added_by=message.from_user.id,
+                )
+                added_patterns.append(pattern)
+            except Exception as e:
+                skipped_patterns.append(f"{pattern} (ошибка: {str(e)[:20]})")
+
+        # Коммитим все добавленные паттерны
         await session.commit()
 
         logger.info(
-            f"Added whitelist pattern: chat_id={chat_id}, "
-            f"scope={scope}, pattern={pattern}"
+            f"Added whitelist patterns: chat_id={chat_id}, "
+            f"scope={scope}, count={len(added_patterns)}"
         )
 
         await state.clear()
@@ -1839,8 +1846,33 @@ async def antispam_whitelist_pattern_received_handler(
         except Exception:
             pass
 
+        # Формируем отчёт
+        report_lines = []
+
+        if added_patterns:
+            report_lines.append(f"✅ <b>Добавлено: {len(added_patterns)}</b>")
+            # Показываем первые 10 для краткости
+            for i, p in enumerate(added_patterns[:10], 1):
+                report_lines.append(f"  {i}. <code>{p}</code>")
+            if len(added_patterns) > 10:
+                report_lines.append(f"  ... и ещё {len(added_patterns) - 10}")
+
+        if broad_patterns:
+            report_lines.append(f"\n⚠️ <b>Пропущено (слишком широкие): {len(broad_patterns)}</b>")
+            for p in broad_patterns[:5]:
+                report_lines.append(f"  • <code>{p}</code>")
+            report_lines.append("  Добавьте ! в конец чтобы подтвердить")
+
+        if skipped_patterns:
+            report_lines.append(f"\n❌ <b>Ошибки: {len(skipped_patterns)}</b>")
+            for p in skipped_patterns[:5]:
+                report_lines.append(f"  • {p}")
+
+        if not added_patterns and not broad_patterns and not skipped_patterns:
+            report_lines.append("❌ Ничего не добавлено")
+
         success_msg = await message.answer(
-            f"✅ Паттерн добавлен в белый список:\n<code>{pattern}</code>",
+            "\n".join(report_lines),
             parse_mode="HTML"
         )
 
