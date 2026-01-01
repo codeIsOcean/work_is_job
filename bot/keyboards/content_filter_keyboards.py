@@ -2766,6 +2766,13 @@ def create_section_notification_delay_menu(
                     callback_data=f"cf:secnd:300:{section_id}"
                 )
             ],
+            # Ручной ввод
+            [
+                InlineKeyboardButton(
+                    text="✏️ Ввести вручную",
+                    callback_data=f"cf:secndc:{section_id}"
+                )
+            ],
             # Назад
             [
                 InlineKeyboardButton(
@@ -2871,7 +2878,7 @@ def create_section_patterns_menu(
     section_id: int,
     page: int,
     total_pages: int,
-    pattern_ids: List[int]
+    pattern_data: List[tuple]
 ) -> InlineKeyboardMarkup:
     """
     Создаёт меню пагинации для паттернов раздела.
@@ -2880,18 +2887,24 @@ def create_section_patterns_menu(
         section_id: ID раздела
         page: Текущая страница (0-based)
         total_pages: Общее количество страниц
-        pattern_ids: Список ID паттернов на текущей странице
+        pattern_data: Список кортежей (display_num, pattern_id, pattern_text)
 
     Returns:
         InlineKeyboardMarkup: Клавиатура пагинации
     """
     buttons = []
 
-    # Кнопки удаления для каждого паттерна
-    for pattern_id in pattern_ids:
+    # Кнопки для каждого паттерна: изменить вес + удалить
+    for display_num, pattern_id, pattern_text in pattern_data:
+        # Обрезаем паттерн до 15 символов для кнопки
+        short_pattern = pattern_text[:15] + "…" if len(pattern_text) > 15 else pattern_text
         buttons.append([
             InlineKeyboardButton(
-                text=f"❌ #{pattern_id}",
+                text=f"{display_num}. ⚖️ {short_pattern}",
+                callback_data=f"cf:secpw:{pattern_id}:{section_id}"
+            ),
+            InlineKeyboardButton(
+                text=f"❌",
                 callback_data=f"cf:secpd:{pattern_id}:{section_id}"
             )
         ])
@@ -2941,7 +2954,7 @@ def create_section_patterns_menu(
     ])
 
     # Удалить все паттерны (только если есть паттерны)
-    if pattern_ids:
+    if pattern_data:
         buttons.append([
             InlineKeyboardButton(
                 text="🗑️ Удалить все паттерны",

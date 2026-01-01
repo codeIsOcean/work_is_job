@@ -202,6 +202,7 @@ class AddSectionStates(StatesGroup):
 class AddSectionPatternStates(StatesGroup):
     """FSM состояния для добавления паттерна в раздел."""
     waiting_for_pattern = State()
+    waiting_for_weight = State()
 
 
 class SectionMuteDurationStates(StatesGroup):
@@ -224,9 +225,19 @@ class SectionBanTextStates(StatesGroup):
     waiting_for_text = State()
 
 
+class SectionNotificationDelayStates(StatesGroup):
+    """FSM состояния для ручного ввода задержки удаления уведомления."""
+    waiting_for_delay = State()
+
+
 class SectionImportPatternsStates(StatesGroup):
     """FSM состояния для импорта паттернов."""
     waiting_for_patterns = State()
+
+
+class EditPatternWeightStates(StatesGroup):
+    """FSM состояния для редактирования веса паттерна."""
+    waiting_for_weight = State()
 
 
 class AddSectionThresholdStates(StatesGroup):
@@ -302,9 +313,12 @@ def parse_delay_seconds(delay_str: str) -> int:
     - 30s или 30 = 30 секунд
     - 5min = 5 минут = 300 секунд
     - 1h = 1 час = 3600 секунд
+    - 1d = 1 день = 86400 секунд
+    - 1m = 1 месяц = 2592000 секунд (30 дней)
+    - 1y = 1 год = 31536000 секунд (365 дней)
 
     Args:
-        delay_str: Строка вида "30s", "5min", "1h" или просто число (секунды)
+        delay_str: Строка вида "30s", "5min", "1h", "1d", "1m", "1y" или просто число (секунды)
 
     Returns:
         int: Задержка в секундах, или None если формат неверный
@@ -321,7 +335,7 @@ def parse_delay_seconds(delay_str: str) -> int:
         return None
 
     # Пробуем с единицами измерения
-    match = re.match(r'^(\d+)\s*(s|sec|min|h|hour)$', s)
+    match = re.match(r'^(\d+)\s*(s|sec|min|h|hour|d|day|m|month|y|year)$', s)
     if match:
         value = int(match.group(1))
         unit = match.group(2)
@@ -333,6 +347,12 @@ def parse_delay_seconds(delay_str: str) -> int:
             return value * 60
         elif unit in ('h', 'hour'):
             return value * 3600
+        elif unit in ('d', 'day'):
+            return value * 86400
+        elif unit in ('m', 'month'):
+            return value * 2592000  # 30 дней
+        elif unit in ('y', 'year'):
+            return value * 31536000  # 365 дней
 
     # Пробуем как просто число (секунды по умолчанию)
     if re.match(r'^\d+$', s):

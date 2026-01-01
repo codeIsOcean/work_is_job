@@ -30,11 +30,13 @@ from bot.keyboards.content_filter_keyboards import (
 
 # Импортируем общие объекты
 from bot.handlers.content_filter.shared import logger
-# Импортируем FSM states
+# Импортируем FSM states и парсеры
 from bot.handlers.content_filter.common import (
     SectionMuteTextStates,
     SectionBanTextStates,
-    SectionForwardChannelStates
+    SectionForwardChannelStates,
+    SectionNotificationDelayStates,
+    parse_delay_seconds
 )
 # Импортируем сервис разделов
 from bot.services.content_filter.scam_pattern_service import get_section_service
@@ -98,13 +100,17 @@ async def section_advanced_menu(
 @advanced_router.callback_query(F.data.regexp(r"^cf:secnd:\d+$"))
 async def section_notification_delay_menu(
     callback: CallbackQuery,
-    session: AsyncSession
+    session: AsyncSession,
+    state: FSMContext
 ) -> None:
     """
     Показывает меню настройки задержки автоудаления уведомления.
 
     Callback: cf:secnd:{section_id}
     """
+    # Очищаем FSM если пришли из ручного ввода
+    await state.clear()
+
     parts = callback.data.split(":")
     section_id = int(parts[2])
 
@@ -174,6 +180,175 @@ async def set_section_notification_delay(
 
     try:
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+
+# ============================================================
+# РУЧНОЙ ВВОД ЗАДЕРЖКИ УДАЛЕНИЯ УВЕДОМЛЕНИЯ
+# ============================================================
+
+@advanced_router.callback_query(F.data.regexp(r"^cf:secndc:\d+$"))
+async def start_custom_notification_delay_input(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """
+    Начинает FSM для ручного ввода задержки удаления уведомления.
+
+    Callback: cf:secndc:{section_id}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+    section = await section_service.get_section_by_id(section_id, session)
+
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    await state.update_data(
+        section_id=section_id,
+        bot_message_id=callback.message.message_id,
+        bot_chat_id=callback.message.chat.id
+    )
+    await state.set_state(SectionNotificationDelayStates.waiting_for_delay)
+
+    current_delay = section.notification_delete_delay or 0
+
+    text = (
+        f"⏱️ <b>Задержка удаления уведомления</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n"
+        f"Текущее значение: <b>{current_delay} сек</b>\n\n"
+        f"Введите время:\n\n"
+        f"<i>Форматы:\n"
+        f"• 30 или 30s — секунды\n"
+        f"• 5min — минуты\n"
+        f"• 1h — часы\n"
+        f"• 1d — дни\n"
+        f"• 1m — месяцы\n"
+        f"• 1y — годы\n"
+        f"• 0 — не удалять</i>"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="◀️ Назад",
+                callback_data=f"cf:secnd:{section_id}"
+            )
+        ]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@advanced_router.message(SectionNotificationDelayStates.waiting_for_delay)
+async def process_custom_notification_delay(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ввод задержки удаления уведомления.
+    """
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    # Получаем данные FSM
+    data = await state.get_data()
+    section_id = data.get('section_id')
+    bot_message_id = data.get('bot_message_id')
+    bot_chat_id = data.get('bot_chat_id')
+
+    if not section_id:
+        await state.clear()
+        return
+
+    # Парсим значение с помощью универсального парсера
+    delay = parse_delay_seconds(message.text)
+
+    if delay is None:
+        # Сообщаем об ошибке
+        try:
+            await message.bot.edit_message_text(
+                chat_id=bot_chat_id,
+                message_id=bot_message_id,
+                text=(
+                    f"❌ <b>Ошибка</b>\n\n"
+                    f"Неверный формат времени.\n\n"
+                    f"<i>Примеры: 30s, 5min, 1h, 1d, 1m, 1y</i>"
+                ),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="◀️ Назад",
+                            callback_data=f"cf:secnd:{section_id}"
+                        )
+                    ]
+                ]),
+                parse_mode="HTML"
+            )
+        except TelegramAPIError:
+            pass
+        return
+
+    # Обновляем значение
+    section_service = get_section_service()
+    success, error = await section_service.update_section(
+        section_id=section_id,
+        session=session,
+        notification_delete_delay=delay
+    )
+
+    await state.clear()
+
+    if success:
+        if delay == 0:
+            delay_text = "Не удалять"
+        elif delay < 60:
+            delay_text = f"{delay} сек"
+        elif delay < 3600:
+            delay_text = f"{delay // 60} мин"
+        elif delay < 86400:
+            delay_text = f"{delay // 3600} ч"
+        elif delay < 2592000:
+            delay_text = f"{delay // 86400} д"
+        elif delay < 31536000:
+            delay_text = f"{delay // 2592000} мес"
+        else:
+            delay_text = f"{delay // 31536000} г"
+        text = f"✅ Задержка удаления: <b>{delay_text}</b> ({delay} сек)"
+    else:
+        text = f"❌ Ошибка: {error or 'неизвестная ошибка'}"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="◀️ Назад",
+                callback_data=f"cf:secnd:{section_id}"
+            )
+        ]
+    ])
+
+    try:
+        await message.bot.edit_message_text(
+            chat_id=bot_chat_id,
+            message_id=bot_message_id,
+            text=text,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
     except TelegramAPIError:
         pass
 

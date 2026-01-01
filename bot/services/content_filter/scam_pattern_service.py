@@ -1792,6 +1792,52 @@ class CustomSectionService:
             logger.error(f"[CustomSectionService] Ошибка переключения паттерна: {e}")
             return False
 
+    async def update_pattern_weight(
+        self,
+        pattern_id: int,
+        new_weight: int,
+        session: AsyncSession
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Обновляет вес паттерна раздела.
+
+        Args:
+            pattern_id: ID паттерна
+            new_weight: Новый вес (1-1000)
+            session: Сессия БД
+
+        Returns:
+            Tuple[success, error_message]
+        """
+        # Валидация веса
+        if new_weight < 1:
+            return False, "Вес должен быть >= 1"
+        if new_weight > 1000:
+            return False, "Вес должен быть <= 1000"
+
+        try:
+            pattern = await self.get_section_pattern_by_id(pattern_id, session)
+            if not pattern:
+                return False, "Паттерн не найден"
+
+            query = update(CustomSectionPattern).where(
+                CustomSectionPattern.id == pattern_id
+            ).values(weight=new_weight)
+
+            await session.execute(query)
+            await session.commit()
+
+            logger.info(
+                f"[CustomSectionService] Вес паттерна ID={pattern_id} "
+                f"изменён: {pattern.weight} → {new_weight}"
+            )
+            return True, None
+
+        except Exception as e:
+            await session.rollback()
+            logger.error(f"[CustomSectionService] Ошибка обновления веса: {e}")
+            return False, str(e)
+
     async def get_patterns_count(
         self,
         section_id: int,

@@ -35,6 +35,7 @@ from bot.handlers.content_filter.shared import logger
 from bot.handlers.content_filter.common import (
     AddSectionPatternStates,
     SectionImportPatternsStates,
+    EditPatternWeightStates,
     SECTION_PATTERNS_PER_PAGE
 )
 # Импортируем сервис разделов
@@ -50,20 +51,17 @@ patterns_router = Router(name='sections_patterns')
 # СПИСОК ПАТТЕРНОВ
 # ============================================================
 
-@patterns_router.callback_query(F.data.regexp(r"^cf:secp:\d+:\d+$"))
-async def section_patterns_list(
+async def _show_patterns_list(
     callback: CallbackQuery,
-    session: AsyncSession
+    session: AsyncSession,
+    section_id: int,
+    page: int = 0
 ) -> None:
     """
-    Показывает список паттернов раздела с пагинацией.
+    Helper: показывает список паттернов раздела.
 
-    Callback: cf:secp:{section_id}:{page}
+    Используется из callback handler и после удаления/добавления.
     """
-    parts = callback.data.split(":")
-    section_id = int(parts[2])
-    page = int(parts[3])
-
     section_service = get_section_service()
 
     # Получаем раздел
@@ -75,9 +73,10 @@ async def section_patterns_list(
     # Получаем паттерны
     patterns = await section_service.get_section_patterns(section_id, session)
 
-    # Вычисляем пагинацию
-    total_pages = max(1, (len(patterns) + SECTION_PATTERNS_PER_PAGE - 1) // SECTION_PATTERNS_PER_PAGE)
-    page = min(page, total_pages - 1)
+    # Пагинация
+    total_patterns = len(patterns)
+    total_pages = max(1, (total_patterns + SECTION_PATTERNS_PER_PAGE - 1) // SECTION_PATTERNS_PER_PAGE)
+    page = max(0, min(page, total_pages - 1))
 
     # Получаем паттерны для страницы
     start_idx = page * SECTION_PATTERNS_PER_PAGE
@@ -96,15 +95,34 @@ async def section_patterns_list(
             weight_emoji = "🔴" if p.weight >= 200 else "🟡" if p.weight >= 100 else "🟢"
             text += f"{i}. {weight_emoji} <code>{p.pattern}</code> ({p.weight})\n"
 
-    # Передаём список ID паттернов для кнопок удаления
-    pattern_ids = [p.id for p in page_patterns]
-    keyboard = create_section_patterns_menu(section_id, page, total_pages, pattern_ids)
+    # Передаём данные паттернов для кнопок: (номер, id, текст)
+    pattern_data = [
+        (i, p.id, p.pattern)
+        for i, p in enumerate(page_patterns, start=start_idx + 1)
+    ]
+    keyboard = create_section_patterns_menu(section_id, page, total_pages, pattern_data)
 
     try:
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     except TelegramAPIError:
         pass
 
+
+@patterns_router.callback_query(F.data.regexp(r"^cf:secp:\d+:\d+$"))
+async def section_patterns_list(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает список паттернов раздела с пагинацией.
+
+    Callback: cf:secp:{section_id}:{page}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+    page = int(parts[3])
+
+    await _show_patterns_list(callback, session, section_id, page)
     await callback.answer()
 
 
@@ -136,7 +154,7 @@ async def start_add_section_pattern(
         f"📝 <b>Добавление паттерна</b>\n\n"
         f"Отправьте фразу или слово для детекции.\n\n"
         f"<i>Можно отправить несколько фраз, каждую с новой строки.</i>\n\n"
-        f"Каждый паттерн добавится с весом 100 баллов."
+        f"После ввода вы сможете указать вес паттерна."
     )
 
     keyboard = create_cancel_section_pattern_input_menu(section_id)
@@ -157,6 +175,7 @@ async def process_section_pattern(
 ) -> None:
     """
     Обрабатывает ввод паттерна раздела.
+    Показывает превью и запрашивает вес.
     """
     data = await state.get_data()
     section_id = data.get('section_id')
@@ -180,7 +199,7 @@ async def process_section_pattern(
 
     if not patterns:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="◀️ Отмена", callback_data=f"cf:secp:{section_id}:0")]
+            [InlineKeyboardButton(text="◀️ Назад", callback_data=f"cf:secp:{section_id}:0")]
         ])
         try:
             await message.bot.edit_message_text(
@@ -194,31 +213,129 @@ async def process_section_pattern(
             pass
         return
 
+    # Сохраняем паттерны в FSM и переходим к вводу веса
+    await state.update_data(pending_patterns=patterns)
+    await state.set_state(AddSectionPatternStates.waiting_for_weight)
+
+    # Формируем превью
+    text = f"📝 <b>Превью паттернов</b>\n\n"
+    for i, p in enumerate(patterns[:10], 1):
+        # Показываем оригинальный паттерн
+        text += f"{i}. <code>{p}</code>\n"
+
+    if len(patterns) > 10:
+        text += f"\n<i>...и ещё {len(patterns) - 10} паттернов</i>\n"
+
+    text += (
+        f"\n<b>Всего:</b> {len(patterns)} паттернов\n\n"
+        f"Введите вес (1-1000):\n\n"
+        f"<i>Рекомендации:\n"
+        f"• 15-30 — обычные фразы\n"
+        f"• 50-100 — подозрительные\n"
+        f"• 100-200 — явный скам\n"
+        f"• 200+ — 100% спам</i>"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data=f"cf:secp:{section_id}:0")]
+    ])
+
+    try:
+        await message.bot.edit_message_text(
+            chat_id=bot_chat_id,
+            message_id=bot_message_id,
+            text=text,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    except TelegramAPIError:
+        pass
+
+
+@patterns_router.message(AddSectionPatternStates.waiting_for_weight)
+async def process_section_pattern_weight(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ввод веса и сохраняет паттерны.
+    """
+    data = await state.get_data()
+    section_id = data.get('section_id')
+    bot_message_id = data.get('bot_message_id')
+    bot_chat_id = data.get('bot_chat_id')
+    patterns = data.get('pending_patterns', [])
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    if not section_id or not patterns:
+        await state.clear()
+        await message.answer("❌ Ошибка: данные сессии потеряны.")
+        return
+
+    # Парсим вес
+    try:
+        weight = int(message.text.strip())
+        if weight < 1 or weight > 1000:
+            raise ValueError("Вес вне диапазона")
+    except (ValueError, AttributeError):
+        # Сообщаем об ошибке, остаёмся в том же состоянии
+        text = (
+            f"❌ <b>Ошибка</b>\n\n"
+            f"Введите целое число от 1 до 1000.\n\n"
+            f"<i>Например: 100</i>"
+        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data=f"cf:secp:{section_id}:0")]
+        ])
+        try:
+            await message.bot.edit_message_text(
+                chat_id=bot_chat_id,
+                message_id=bot_message_id,
+                text=text,
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+        except TelegramAPIError:
+            pass
+        return
+
     await state.clear()
 
-    # Добавляем паттерны
+    # Добавляем паттерны с указанным весом
     section_service = get_section_service()
     added = 0
     skipped = 0
+    added_patterns = []
 
     for pattern in patterns:
         success, _, error = await section_service.add_section_pattern(
             section_id=section_id,
             pattern=pattern,
             session=session,
-            weight=100,
+            weight=weight,
             created_by=message.from_user.id
         )
         if success:
             added += 1
+            added_patterns.append(pattern)
         else:
             skipped += 1
 
-    # Формируем ответ
-    if added > 0 and skipped == 0:
-        text = f"✅ Добавлено паттернов: {added}"
-    elif added > 0 and skipped > 0:
-        text = f"✅ Добавлено: {added}, пропущено: {skipped}"
+    # Формируем ответ с показом добавленных паттернов
+    if added > 0:
+        text = f"✅ <b>Добавлено паттернов: {added}</b> (вес: {weight})\n\n"
+        for i, p in enumerate(added_patterns[:10], 1):
+            text += f"{i}. <code>{p}</code>\n"
+        if len(added_patterns) > 10:
+            text += f"\n<i>...и ещё {len(added_patterns) - 10}</i>\n"
+        if skipped > 0:
+            text += f"\n<i>Пропущено (дубликаты): {skipped}</i>"
     else:
         text = f"⚠️ Все паттерны уже существуют"
 
@@ -266,9 +383,8 @@ async def delete_section_pattern(
     else:
         await callback.answer("❌ Ошибка удаления", show_alert=True)
 
-    # Возвращаемся к списку
-    callback.data = f"cf:secp:{section_id}:0"
-    await section_patterns_list(callback, session)
+    # Возвращаемся к списку используя helper
+    await _show_patterns_list(callback, session, section_id, page=0)
 
 
 # ============================================================
@@ -340,9 +456,8 @@ async def clear_section_patterns_confirmed(
     else:
         await callback.answer("❌ Ошибка", show_alert=True)
 
-    # Возвращаемся к списку
-    callback.data = f"cf:secp:{section_id}:0"
-    await section_patterns_list(callback, session)
+    # Возвращаемся к списку используя helper
+    await _show_patterns_list(callback, session, section_id, page=0)
 
 
 # ============================================================
@@ -673,6 +788,155 @@ async def delete_all_patterns_confirmed(
     else:
         await callback.answer("Нет паттернов для удаления", show_alert=True)
 
-    # Возвращаемся к списку паттернов
-    callback.data = f"cf:secp:{section_id}:0"
-    await section_patterns_list(callback, session)
+    # Возвращаемся к списку паттернов используя helper
+    await _show_patterns_list(callback, session, section_id, page=0)
+
+
+# ============================================================
+# РЕДАКТИРОВАНИЕ ВЕСА ПАТТЕРНА
+# ============================================================
+
+@patterns_router.callback_query(F.data.regexp(r"^cf:secpw:\d+:\d+$"))
+async def start_edit_pattern_weight(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Начинает FSM для редактирования веса паттерна.
+
+    Callback: cf:secpw:{pattern_id}:{section_id}
+    """
+    parts = callback.data.split(":")
+    pattern_id = int(parts[2])
+    section_id = int(parts[3])
+
+    section_service = get_section_service()
+    pattern = await section_service.get_section_pattern_by_id(pattern_id, session)
+
+    if not pattern:
+        await callback.answer("❌ Паттерн не найден", show_alert=True)
+        return
+
+    # Сохраняем данные в FSM
+    await state.update_data(
+        pattern_id=pattern_id,
+        section_id=section_id,
+        bot_message_id=callback.message.message_id,
+        bot_chat_id=callback.message.chat.id
+    )
+    await state.set_state(EditPatternWeightStates.waiting_for_weight)
+
+    text = (
+        f"⚖️ <b>Изменение веса паттерна</b>\n\n"
+        f"Паттерн: <code>{pattern.pattern}</code>\n"
+        f"Текущий вес: <b>{pattern.weight}</b> баллов\n\n"
+        f"Введите новый вес (1-1000):\n\n"
+        f"<i>Рекомендации:\n"
+        f"• 15-30 — обычные фразы\n"
+        f"• 50-100 — подозрительные\n"
+        f"• 100-200 — явный скам\n"
+        f"• 200+ — 100% наркотики/скам</i>"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="◀️ Назад",
+                callback_data=f"cf:secp:{section_id}:0"
+            )
+        ]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@patterns_router.message(EditPatternWeightStates.waiting_for_weight)
+async def process_pattern_weight(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ввод нового веса паттерна.
+    """
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    # Получаем данные FSM
+    data = await state.get_data()
+    pattern_id = data.get('pattern_id')
+    section_id = data.get('section_id')
+    bot_message_id = data.get('bot_message_id')
+    bot_chat_id = data.get('bot_chat_id')
+
+    if not pattern_id or not section_id:
+        await state.clear()
+        return
+
+    # Парсим вес
+    try:
+        new_weight = int(message.text.strip())
+    except (ValueError, AttributeError):
+        # Сообщаем об ошибке
+        try:
+            await message.bot.edit_message_text(
+                chat_id=bot_chat_id,
+                message_id=bot_message_id,
+                text=(
+                    f"❌ <b>Ошибка</b>\n\n"
+                    f"Введите целое число от 1 до 1000.\n\n"
+                    f"<i>Например: 150</i>"
+                ),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="◀️ Назад",
+                            callback_data=f"cf:secp:{section_id}:0"
+                        )
+                    ]
+                ]),
+                parse_mode="HTML"
+            )
+        except TelegramAPIError:
+            pass
+        return
+
+    # Обновляем вес
+    section_service = get_section_service()
+    success, error = await section_service.update_pattern_weight(pattern_id, new_weight, session)
+
+    await state.clear()
+
+    if success:
+        text = f"✅ Вес паттерна изменён на <b>{new_weight}</b> баллов"
+    else:
+        text = f"❌ Ошибка: {error or 'неизвестная ошибка'}"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="◀️ К паттернам",
+                callback_data=f"cf:secp:{section_id}:0"
+            )
+        ]
+    ])
+
+    try:
+        await message.bot.edit_message_text(
+            chat_id=bot_chat_id,
+            message_id=bot_message_id,
+            text=text,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    except TelegramAPIError:
+        pass
