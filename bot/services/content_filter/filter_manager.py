@@ -41,6 +41,10 @@ from bot.services.content_filter.scam_detector import (
     fuzzy_match, extract_ngrams, ngram_match
 )
 from bot.services.content_filter.flood_detector import FloodDetector, create_flood_detector
+# Импортируем CAS сервис для проверки в глобальной базе спамеров
+from bot.services.cas_service import is_cas_banned
+# Импортируем spammer_registry для добавления в БД спаммеров
+from bot.services.spammer_registry import record_spammer_incident
 
 # Создаём логгер
 logger = logging.getLogger(__name__)
@@ -94,6 +98,9 @@ class FilterResult(NamedTuple):
     custom_ban_text: Optional[str] = None
     custom_delete_delay: Optional[int] = None
     custom_notification_delay: Optional[int] = None
+    # CAS и БД спаммеров (для custom_section)
+    cas_banned: bool = False
+    added_to_spammer_db: bool = False
 
 
 class FilterManager:
@@ -598,6 +605,40 @@ class FilterManager:
                         f"score={total_score}, порог={section.threshold}, action={final_action}"
                     )
 
+                    # ─────────────────────────────────────────────────────
+                    # CAS (COMBOT ANTI-SPAM) ПРОВЕРКА
+                    # ─────────────────────────────────────────────────────
+                    cas_banned = False
+                    if section.cas_enabled:
+                        try:
+                            cas_banned = await is_cas_banned(user_id)
+                            if cas_banned:
+                                logger.info(
+                                    f"[FilterManager] CAS: user_id={user_id} найден в базе CAS!"
+                                )
+                        except Exception as e:
+                            logger.warning(f"[FilterManager] CAS ошибка: {e}")
+
+                    # ─────────────────────────────────────────────────────
+                    # ДОБАВЛЕНИЕ В ГЛОБАЛЬНУЮ БД СПАММЕРОВ
+                    # ─────────────────────────────────────────────────────
+                    added_to_spammer_db = False
+                    if section.add_to_spammer_db:
+                        try:
+                            await record_spammer_incident(
+                                session=session,
+                                user_id=user_id,
+                                risk_score=total_score,
+                                reason=f"custom_section:{section.name}"
+                            )
+                            added_to_spammer_db = True
+                            logger.info(
+                                f"[FilterManager] Спаммер добавлен в БД: "
+                                f"user_id={user_id}, section={section.name}"
+                            )
+                        except Exception as e:
+                            logger.warning(f"[FilterManager] Ошибка добавления в БД спаммеров: {e}")
+
                     return FilterResult(
                         should_act=True,
                         detector_type='custom_section',
@@ -614,7 +655,10 @@ class FilterManager:
                         custom_mute_text=section.mute_text,
                         custom_ban_text=section.ban_text,
                         custom_delete_delay=section.delete_delay,
-                        custom_notification_delay=section.notification_delete_delay
+                        custom_notification_delay=section.notification_delete_delay,
+                        # CAS и БД спаммеров
+                        cas_banned=cas_banned,
+                        added_to_spammer_db=added_to_spammer_db
                     )
 
         # Ничего не найдено

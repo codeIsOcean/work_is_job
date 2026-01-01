@@ -542,3 +542,140 @@ async def process_section_forward_channel(
             pass
 
     await message.answer(confirm_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# CAS (COMBOT ANTI-SPAM) TOGGLE
+# ============================================================
+
+@advanced_router.callback_query(F.data.regexp(r"^cf:seccas:\d+$"))
+async def toggle_section_cas(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Переключает CAS (Combot Anti-Spam) для раздела.
+
+    CAS — бесплатная глобальная база забаненных спамеров Telegram.
+    При включении: если пользователь найден в CAS при срабатывании раздела,
+    к нему применяется действие раздела (mute/ban).
+
+    Callback: cf:seccas:{section_id}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+    section = await section_service.get_section_by_id(section_id, session)
+
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    # Переключаем флаг
+    new_value = not section.cas_enabled
+
+    success, error = await section_service.update_section(
+        section_id=section_id,
+        session=session,
+        cas_enabled=new_value
+    )
+
+    if success:
+        status = "включена ✅" if new_value else "выключена ❌"
+        await callback.answer(f"Проверка CAS {status}")
+    else:
+        await callback.answer(f"❌ {error or 'Ошибка'}", show_alert=True)
+        return
+
+    # Обновляем меню — получаем обновлённый раздел
+    section = await section_service.get_section_by_id(section_id, session)
+
+    # Формируем текст
+    mute_text_preview = section.mute_text[:30] + "..." if section.mute_text and len(section.mute_text) > 30 else section.mute_text or "По умолчанию"
+    ban_text_preview = section.ban_text[:30] + "..." if section.ban_text and len(section.ban_text) > 30 else section.ban_text or "По умолчанию"
+    notify_delay = section.notification_delete_delay or 0
+    notify_delay_text = f"{notify_delay} сек" if notify_delay else "Не удалять"
+
+    text = (
+        f"⚙️ <b>Дополнительные настройки</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n\n"
+        f"<b>Текст при муте:</b> {mute_text_preview}\n"
+        f"<b>Текст при бане:</b> {ban_text_preview}\n"
+        f"<b>Автоудаление уведомления:</b> {notify_delay_text}"
+    )
+
+    keyboard = create_section_advanced_menu(section_id, section)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+
+# ============================================================
+# БД СПАММЕРОВ TOGGLE
+# ============================================================
+
+@advanced_router.callback_query(F.data.regexp(r"^cf:secspdb:\d+$"))
+async def toggle_section_spammer_db(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Переключает добавление в глобальную БД спаммеров для раздела.
+
+    При включении: нарушитель добавляется в глобальную БД спаммеров бота.
+    Это позволяет мутить/банить спаммера во всех группах где бот админ.
+
+    Callback: cf:secspdb:{section_id}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    section_service = get_section_service()
+    section = await section_service.get_section_by_id(section_id, session)
+
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    # Переключаем флаг
+    new_value = not section.add_to_spammer_db
+
+    success, error = await section_service.update_section(
+        section_id=section_id,
+        session=session,
+        add_to_spammer_db=new_value
+    )
+
+    if success:
+        status = "включено ✅" if new_value else "выключено ❌"
+        await callback.answer(f"Добавление в БД спаммеров {status}")
+    else:
+        await callback.answer(f"❌ {error or 'Ошибка'}", show_alert=True)
+        return
+
+    # Обновляем меню — получаем обновлённый раздел
+    section = await section_service.get_section_by_id(section_id, session)
+
+    # Формируем текст
+    mute_text_preview = section.mute_text[:30] + "..." if section.mute_text and len(section.mute_text) > 30 else section.mute_text or "По умолчанию"
+    ban_text_preview = section.ban_text[:30] + "..." if section.ban_text and len(section.ban_text) > 30 else section.ban_text or "По умолчанию"
+    notify_delay = section.notification_delete_delay or 0
+    notify_delay_text = f"{notify_delay} сек" if notify_delay else "Не удалять"
+
+    text = (
+        f"⚙️ <b>Дополнительные настройки</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n\n"
+        f"<b>Текст при муте:</b> {mute_text_preview}\n"
+        f"<b>Текст при бане:</b> {ban_text_preview}\n"
+        f"<b>Автоудаление уведомления:</b> {notify_delay_text}"
+    )
+
+    keyboard = create_section_advanced_menu(section_id, section)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass

@@ -1131,13 +1131,20 @@ async def _send_journal_log(
         }
         action_text = action_names.get(result.action, result.action)
 
+        # CAS и БД спаммеров (если сработали)
+        extra_info = ""
+        if result.cas_banned:
+            extra_info += "\n🛡️ <b>CAS:</b> найден в базе спамеров"
+        if result.added_to_spammer_db:
+            extra_info += "\n📋 <b>БД:</b> добавлен в базу спамеров"
+
         # Формируем текст для журнала
         journal_text = (
             f"📂 <b>Раздел: {html.escape(section_name)}</b>{score_text}\n\n"
             f"👤 {user_link} [<code>{user_id}</code>]\n"
             f"🔎 Паттерны: <code>{trigger_safe}</code>\n"
             f"💬 <b>Текст:</b>\n<i>{original_safe}</i>\n\n"
-            f"⚡ {action_text}\n"
+            f"⚡ {action_text}{extra_info}\n"
             f"🕐 {time_str}"
         )
 
