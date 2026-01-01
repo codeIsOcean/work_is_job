@@ -42,6 +42,8 @@ from bot.handlers.content_filter.common import (
 from bot.services.content_filter.scam_pattern_service import get_section_service
 # Импортируем сервис паттернов для extract_patterns_from_text
 from bot.services.content_filter import get_pattern_service
+# Импортируем нормализатор для показа нормализованного вида паттерна
+from bot.services.content_filter.text_normalizer import get_normalizer
 
 # Создаём роутер для паттернов
 patterns_router = Router(name='sections_patterns')
@@ -213,15 +215,23 @@ async def process_section_pattern(
             pass
         return
 
+    # Получаем нормализатор для показа как паттерн будет выглядеть в БД
+    normalizer = get_normalizer()
+
     # Сохраняем паттерны в FSM и переходим к вводу веса
     await state.update_data(pending_patterns=patterns)
     await state.set_state(AddSectionPatternStates.waiting_for_weight)
 
-    # Формируем превью
+    # Формируем превью с показом нормализованного вида
     text = f"📝 <b>Превью паттернов</b>\n\n"
     for i, p in enumerate(patterns[:10], 1):
-        # Показываем оригинальный паттерн
-        text += f"{i}. <code>{p}</code>\n"
+        # Нормализуем паттерн для показа как он будет искаться
+        normalized = normalizer.normalize(p).lower().strip()
+        # Показываем оригинал → нормализованный вид
+        text += f"{i}. <code>{normalized}</code>\n"
+        # Если оригинал отличается - показываем его мелким шрифтом
+        if p != normalized:
+            text += f"   <i>(из: {p[:30]}{'...' if len(p) > 30 else ''})</i>\n"
 
     if len(patterns) > 10:
         text += f"\n<i>...и ещё {len(patterns) - 10} паттернов</i>\n"
@@ -307,14 +317,19 @@ async def process_section_pattern_weight(
 
     await state.clear()
 
+    # Получаем нормализатор для показа нормализованного вида
+    normalizer = get_normalizer()
+
     # Добавляем паттерны с указанным весом
     section_service = get_section_service()
     added = 0
     skipped = 0
+    # Храним кортежи (ID, нормализованный_паттерн)
     added_patterns = []
 
     for pattern in patterns:
-        success, _, error = await section_service.add_section_pattern(
+        # add_section_pattern возвращает (success, pattern_id, error)
+        success, pattern_id, error = await section_service.add_section_pattern(
             section_id=section_id,
             pattern=pattern,
             session=session,
@@ -323,15 +338,19 @@ async def process_section_pattern_weight(
         )
         if success:
             added += 1
-            added_patterns.append(pattern)
+            # Нормализуем для отображения (такой же как в БД)
+            normalized = normalizer.normalize(pattern).lower().strip()
+            # Сохраняем ID и нормализованный паттерн
+            added_patterns.append((pattern_id, normalized))
         else:
             skipped += 1
 
-    # Формируем ответ с показом добавленных паттернов
+    # Формируем ответ с показом ID и нормализованных паттернов
     if added > 0:
         text = f"✅ <b>Добавлено паттернов: {added}</b> (вес: {weight})\n\n"
-        for i, p in enumerate(added_patterns[:10], 1):
-            text += f"{i}. <code>{p}</code>\n"
+        for pattern_id, normalized in added_patterns[:10]:
+            # Показываем ID и нормализованный паттерн
+            text += f"#{pattern_id}: <code>{normalized}</code>\n"
         if len(added_patterns) > 10:
             text += f"\n<i>...и ещё {len(added_patterns) - 10}</i>\n"
         if skipped > 0:

@@ -497,6 +497,12 @@ class FilterManager:
         # Получаем все активные разделы группы
         sections = await section_service.get_sections(chat_id, session, enabled_only=True)
 
+        # Логируем для отладки сколько разделов найдено
+        logger.info(
+            f"[FilterManager] CustomSections: chat={chat_id}, "
+            f"разделов={len(sections) if sections else 0}"
+        )
+
         if sections:
             # Нормализуем текст один раз
             normalized_text = self._normalizer.normalize(text).lower()
@@ -504,6 +510,12 @@ class FilterManager:
             for section in sections:
                 # Получаем паттерны раздела
                 patterns = await section_service.get_section_patterns(section.id, session, active_only=True)
+
+                # Логируем раздел и количество паттернов
+                logger.info(
+                    f"[FilterManager] Раздел '{section.name}' (ID={section.id}): "
+                    f"паттернов={len(patterns) if patterns else 0}, порог={section.threshold}"
+                )
 
                 if not patterns:
                     continue
