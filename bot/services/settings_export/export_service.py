@@ -149,8 +149,54 @@ def _deserialize_value(value: Any, column_type: Any) -> Any:
     if 'DATETIME' in type_name and isinstance(value, str):
         return datetime.fromisoformat(value)
 
+    # Для Date конвертируем из ISO строки
+    if 'DATE' in type_name and 'DATETIME' not in type_name and isinstance(value, str):
+        return date.fromisoformat(value)
+
     # Остальные типы возвращаем как есть
     return value
+
+
+def _deserialize_dict_for_model(
+    data: Dict[str, Any],
+    model_class: Type[ExportableMixin],
+) -> Dict[str, Any]:
+    """
+    Десериализует все значения в словаре для конкретной модели.
+
+    Конвертирует строки в datetime/date и другие типы согласно
+    типам колонок модели.
+
+    Args:
+        data: Словарь с данными (из JSON)
+        model_class: Класс модели SQLAlchemy
+
+    Returns:
+        Словарь с конвертированными значениями
+    """
+    result = {}
+
+    # Получаем маппер модели для доступа к колонкам
+    mapper = inspect(model_class)
+
+    # Создаём словарь колонок для быстрого доступа
+    columns_by_name = {col.key: col for col in mapper.columns}
+
+    for key, value in data.items():
+        # Пропускаем служебные поля
+        if key.startswith('_'):
+            result[key] = value
+            continue
+
+        # Ищем соответствующую колонку
+        if key in columns_by_name:
+            column = columns_by_name[key]
+            result[key] = _deserialize_value(value, column.type)
+        else:
+            # Колонка не найдена - оставляем значение как есть
+            result[key] = value
+
+    return result
 
 
 def _model_to_dict(
@@ -469,6 +515,9 @@ async def import_group_settings(
             new_data = dict(table_data)
             new_data[model_class.__export_chat_id_column__] = chat_id
 
+            # Десериализуем DateTime и другие типы из JSON строк
+            new_data = _deserialize_dict_for_model(new_data, model_class)
+
             instance = model_class(**new_data)
 
             if merge:
@@ -504,11 +553,17 @@ async def import_group_settings(
                     # Для моделей верхнего уровня - добавляем chat_id
                     new_data[model_class.__export_chat_id_column__] = chat_id
 
-                # Добавляем user_id если есть колонка created_by/added_by
+                # Добавляем user_id если есть колонки аудита
+                # Разные модели используют разные названия колонок
                 if hasattr(model_class, 'created_by'):
                     new_data['created_by'] = user_id
                 if hasattr(model_class, 'added_by'):
                     new_data['added_by'] = user_id
+                if hasattr(model_class, 'added_by_user_id'):
+                    new_data['added_by_user_id'] = user_id
+
+                # Десериализуем DateTime и другие типы из JSON строк
+                new_data = _deserialize_dict_for_model(new_data, model_class)
 
                 # Создаём новую запись
                 instance = model_class(**new_data)

@@ -11,6 +11,7 @@
 # ============================================================
 
 # Импортируем стандартные библиотеки
+import html
 import logging
 from typing import Optional
 
@@ -440,8 +441,13 @@ async def callback_import_confirm(
     except Exception as e:
         logger.error(f"❌ [IMPORT] Ошибка импорта: {e}")
         await state.clear()
+        # Экранируем HTML в сообщении об ошибке чтобы избежать parse error
+        safe_error = html.escape(str(e))
+        # Ограничиваем длину сообщения об ошибке
+        if len(safe_error) > 500:
+            safe_error = safe_error[:500] + "..."
         await callback.message.edit_text(
-            f"❌ <b>Ошибка импорта</b>\n\n{str(e)}",
+            f"❌ <b>Ошибка импорта</b>\n\n<code>{safe_error}</code>",
             parse_mode="HTML"
         )
         await callback.answer("❌ Ошибка импорта", show_alert=True)
