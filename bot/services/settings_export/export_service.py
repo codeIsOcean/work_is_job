@@ -353,9 +353,12 @@ async def export_group_settings(
         if data:
             result['data'][key] = data
 
-            # Для родительских моделей сохраняем ID для дочерних
-            # (только для списков, не для settings)
-            if isinstance(data, list) and not model_class.__export_is_settings__:
+            # Для родительских моделей верхнего уровня сохраняем ID для дочерних
+            # (только для списков, не для settings, и только если есть chat_id)
+            # Дочерние модели (parent_key != None) пропускаем - у них нет chat_id
+            if (isinstance(data, list) and
+                not model_class.__export_is_settings__ and
+                parent_key is None):  # Только модели верхнего уровня!
                 # Получаем ID из БД - нужно запросить снова
                 chat_id_col = getattr(model_class, model_class.__export_chat_id_column__)
                 query = select(model_class).where(chat_id_col == chat_id)
