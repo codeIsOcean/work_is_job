@@ -203,6 +203,7 @@ def _model_to_dict(
     instance: Any,
     model_class: Type[ExportableMixin],
     include_parent_id: bool = False,
+    include_own_id: bool = False,
 ) -> Dict[str, Any]:
     """
     Конвертирует SQLAlchemy модель в словарь для JSON.
@@ -211,6 +212,7 @@ def _model_to_dict(
         instance: Экземпляр модели
         model_class: Класс модели с настройками экспорта
         include_parent_id: True = включить parent_column в экспорт
+        include_own_id: True = включить собственный ID как _old_id
 
     Returns:
         Словарь с данными модели
@@ -225,6 +227,10 @@ def _model_to_dict(
 
     # Результирующий словарь
     result = {}
+
+    # Для родительских моделей сохраняем старый ID для маппинга
+    if include_own_id and hasattr(instance, 'id'):
+        result['_old_id'] = instance.id
 
     # Проходим по всем колонкам модели
     for column in mapper.columns:
@@ -293,8 +299,14 @@ async def _export_top_level_model(
 
     # Для data-таблиц возвращаем список
     instances = db_result.scalars().all()
+
+    # Проверяем есть ли дочерние модели для этой модели
+    # Если есть - нужно сохранить _old_id для маппинга
+    child_models = get_child_models(model_class.__export_key__)
+    has_children = len(child_models) > 0
+
     return [
-        _model_to_dict(inst, model_class, include_parent_id=False)
+        _model_to_dict(inst, model_class, include_parent_id=False, include_own_id=has_children)
         for inst in instances
     ]
 
@@ -535,8 +547,9 @@ async def import_group_settings(
             for item in table_data:
                 new_data = dict(item)
 
-                # Убираем служебное поле _parent_id
+                # Убираем служебные поля
                 old_parent_id = new_data.pop('_parent_id', None)
+                old_own_id = new_data.pop('_old_id', None)
 
                 # Для дочерних моделей - подставляем новый parent_id
                 if parent_key is not None and parent_column is not None:
@@ -572,46 +585,17 @@ async def import_group_settings(
                 # Flush чтобы получить новый ID (для parent-child маппинга)
                 await session.flush()
 
-                # Сохраняем маппинг ID если это родительская модель
-                if parent_key is None and hasattr(instance, 'id'):
-                    # Для родительских моделей нужен маппинг
-                    # Но в экспорте v2.0 мы сохраняем _parent_id
-                    # Здесь нужно сохранить маппинг по порядку
-                    pass
+                # Сохраняем маппинг старый ID -> новый ID для родительских моделей
+                if parent_key is None and hasattr(instance, 'id') and old_own_id is not None:
+                    key_id_mapping[old_own_id] = instance.id
 
                 count += 1
 
             # Сохраняем маппинг для этой модели
-            # Для родительских моделей делаем flush и собираем ID
             if parent_key is None:
-                await session.flush()
-                # Запрашиваем все записи чтобы получить ID
-                chat_id_col = getattr(model_class, model_class.__export_chat_id_column__)
-                query = select(model_class).where(chat_id_col == chat_id)
-                db_result = await session.execute(query)
-                instances = db_result.scalars().all()
-
-                # Создаём маппинг по уникальному ключу (например name для sections)
-                # Это работает если в экспорте сохранены уникальные поля
-                for i, inst in enumerate(instances):
-                    if i < len(table_data):
-                        # Пытаемся найти соответствие по name или другому уникальному полю
-                        if hasattr(inst, 'name') and 'name' in table_data[i]:
-                            # Ищем в table_data запись с таким же name
-                            for j, item in enumerate(table_data):
-                                if item.get('name') == inst.name:
-                                    # Нашли соответствие
-                                    old_id_key = f"_idx_{j}"
-                                    key_id_mapping[j] = inst.id
-                                    break
-
-                # Альтернативный подход: маппинг по индексу
-                if not key_id_mapping:
-                    for i, inst in enumerate(instances):
-                        if i < len(table_data):
-                            key_id_mapping[i] = inst.id
-
                 id_mapping[key] = key_id_mapping
+                if key_id_mapping:
+                    logger.debug(f"  📎 {key}: создан маппинг {len(key_id_mapping)} ID")
 
             stats[key] = count
             if count > 0:
