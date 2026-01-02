@@ -26,15 +26,23 @@ from sqlalchemy import Index
 # utcnow - функция возвращающая текущее UTC время
 from bot.database.models import Base, utcnow
 
+# Импортируем миксин для автоматического экспорта моделей
+from bot.database.exportable_mixin import ExportableMixin
+
 
 # ============================================================
 # МОДЕЛЬ: НАСТРОЙКИ SCAM MEDIA ДЛЯ ГРУППЫ
 # ============================================================
 # Хранит настройки модуля фильтрации скам-фото для конкретной группы
 # Каждая группа имеет свои независимые настройки (мультитенантность)
-class ScamMediaSettings(Base):
+class ScamMediaSettings(Base, ExportableMixin):
     # Имя таблицы в базе данных PostgreSQL
     __tablename__ = 'scam_media_settings'
+
+    # ─── Настройки экспорта ───
+    __export_key__ = 'scam_media_settings'
+    __export_is_settings__ = True
+    __export_order__ = 120
 
     # ─────────────────────────────────────────────────────────
     # PRIMARY KEY: ID группы (chat_id)
@@ -155,9 +163,16 @@ class ScamMediaSettings(Base):
 # ============================================================
 # Хранит perceptual hash (pHash + dHash) скам-изображений
 # Используется для сравнения входящих фото с базой запрещённых
-class BannedImageHash(Base):
+class BannedImageHash(Base, ExportableMixin):
     # Имя таблицы в базе данных PostgreSQL
     __tablename__ = 'banned_image_hashes'
+
+    # ─── Настройки экспорта ───
+    # Экспортируются только локальные хеши (где chat_id != NULL)
+    __export_key__ = 'banned_image_hashes'
+    __export_order__ = 440
+    __export_exclude__ = ('id', 'added_at', 'added_by_user_id', 'added_by_username',
+                          'matches_count', 'last_match_at')
 
     # ─────────────────────────────────────────────────────────
     # PRIMARY KEY: Автоинкрементный ID

@@ -23,15 +23,23 @@ from sqlalchemy.orm import relationship
 # utcnow - функция возвращающая текущее UTC время
 from bot.database.models import Base, utcnow
 
+# Импортируем миксин для автоматического экспорта моделей
+from bot.database.exportable_mixin import ExportableMixin
+
 
 # ============================================================
 # МОДЕЛЬ: НАСТРОЙКИ PROFILE MONITOR ДЛЯ ГРУППЫ
 # ============================================================
 # Хранит все настройки модуля мониторинга для конкретной группы
 # Каждая группа имеет свои независимые настройки (мультитенантность)
-class ProfileMonitorSettings(Base):
+class ProfileMonitorSettings(Base, ExportableMixin):
     # Имя таблицы в базе данных PostgreSQL
     __tablename__ = 'profile_monitor_settings'
+
+    # ─── Настройки экспорта ───
+    __export_key__ = 'profile_monitor_settings'
+    __export_is_settings__ = True
+    __export_order__ = 110
 
     # ─────────────────────────────────────────────────────────
     # PRIMARY KEY: ID группы (chat_id)

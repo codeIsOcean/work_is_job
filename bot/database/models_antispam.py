@@ -6,6 +6,8 @@ from sqlalchemy.orm import relationship
 from bot.database.models import Base, utcnow
 # Импорт enum для типобезопасного определения констант
 import enum
+# Импорт миксина для автоматического экспорта моделей
+from bot.database.exportable_mixin import ExportableMixin
 
 
 # ============================================================
@@ -69,9 +71,13 @@ class WhitelistScope(str, enum.Enum):
 # ============================================================
 
 # Таблица для хранения правил антиспам для каждой группы
-class AntiSpamRule(Base):
+class AntiSpamRule(Base, ExportableMixin):
     # Имя таблицы в базе данных
     __tablename__ = "antispam_rules"
+
+    # ─── Настройки экспорта ───
+    __export_key__ = 'antispam_rules'
+    __export_order__ = 430
 
     # Уникальный идентификатор правила (первичный ключ)
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -130,9 +136,13 @@ class AntiSpamRule(Base):
 # ============================================================
 
 # Таблица для хранения исключений (белого списка) для антиспам правил
-class AntiSpamWhitelist(Base):
+class AntiSpamWhitelist(Base, ExportableMixin):
     # Имя таблицы в базе данных
     __tablename__ = "antispam_whitelist"
+
+    # ─── Настройки экспорта ───
+    __export_key__ = 'antispam_whitelist'
+    __export_order__ = 431
 
     # Уникальный идентификатор записи белого списка (первичный ключ)
     id = Column(Integer, primary_key=True, autoincrement=True)

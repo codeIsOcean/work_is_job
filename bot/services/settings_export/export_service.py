@@ -1,165 +1,90 @@
 # ============================================================
-# СЕРВИС ЭКСПОРТА/ИМПОРТА НАСТРОЕК ГРУППЫ
+# СЕРВИС ЭКСПОРТА/ИМПОРТА НАСТРОЕК ГРУППЫ (v2.0 - автосбор)
 # ============================================================
 # Этот модуль реализует:
 # - Экспорт настроек группы в JSON формат
 # - Импорт настроек из JSON в другую группу
-# - Расширяемый реестр таблиц (TABLE_REGISTRY)
+# - АВТОМАТИЧЕСКИЙ сбор моделей через ExportableMixin
 #
-# Архитектура:
-# 1. TABLE_REGISTRY содержит конфигурацию каждой экспортируемой таблицы
+# Архитектура v2.0:
+# 1. Модели с ExportableMixin автоматически регистрируются
 # 2. При экспорте: читаем данные из БД → конвертируем в словарь
 # 3. При импорте: читаем словарь → создаём/обновляем записи в БД
+# 4. Поддержка связанных моделей (parent-child через __export_parent_key__)
+#
+# Добавление новой модели:
+# 1. Добавить ExportableMixin к модели
+# 2. Определить __export_key__ и другие атрибуты
+# 3. Готово! Модель автоматически появится в экспорте
 # ============================================================
 
 # Импортируем стандартные библиотеки
 import json
 import logging
 from datetime import datetime, date
-from typing import Dict, List, Any, Optional, TypedDict, Callable
-from dataclasses import dataclass
+from typing import Dict, List, Any, Optional, Type
 
 # Импортируем SQLAlchemy для работы с БД
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.inspection import inspect
 
-# Импортируем модели данных для экспорта
-from bot.database.models import ChatSettings, CaptchaSettings
-from bot.database.models_content_filter import (
+# Импортируем миксин и функции для работы с реестром
+from bot.database.exportable_mixin import (
+    ExportableMixin,
+    get_exportable_models,
+    get_model_by_export_key,
+    get_child_models,
+)
+
+# ============================================================
+# ВАЖНО: Импортируем все модели чтобы они зарегистрировались
+# ============================================================
+# При импорте модели с ExportableMixin автоматически регистрируются
+# в реестре через __init_subclass__. Этот импорт гарантирует что
+# все модели будут доступны для экспорта/импорта.
+#
+# При добавлении новой модели с ExportableMixin добавьте её сюда!
+# ============================================================
+
+# Основные настройки (ChatSettings, CaptchaSettings)
+from bot.database.models import ChatSettings, CaptchaSettings  # noqa: F401
+
+# Content Filter (настройки, слова, паттерны, разделы)
+from bot.database.models_content_filter import (  # noqa: F401
     ContentFilterSettings,
     FilterWord,
     FilterWhitelist,
     ScamPattern,
     ScamSignalCategory,
+    ScamScoreThreshold,
+    CustomSpamSection,
+    CustomSectionPattern,
+    CustomSectionThreshold,
 )
-from bot.database.models_antispam import AntiSpamRule, AntiSpamWhitelist
-from bot.database.models_profile_monitor import ProfileMonitorSettings
+
+# Антиспам (правила, белый список)
+from bot.database.models_antispam import (  # noqa: F401
+    AntiSpamRule,
+    AntiSpamWhitelist,
+)
+
+# Profile Monitor (настройки)
+from bot.database.models_profile_monitor import ProfileMonitorSettings  # noqa: F401
+
+# Scam Media (настройки, хеши фото)
+from bot.database.models_scam_media import (  # noqa: F401
+    ScamMediaSettings,
+    BannedImageHash,
+)
 
 # Создаём логгер для отслеживания операций экспорта/импорта
 logger = logging.getLogger(__name__)
 
-
-# ============================================================
-# КОНФИГУРАЦИЯ РЕЕСТРА ТАБЛИЦ
-# ============================================================
-# Этот dataclass описывает как экспортировать/импортировать одну таблицу
-
-@dataclass
-class TableConfig:
-    """
-    Конфигурация для экспорта/импорта одной таблицы.
-
-    Attributes:
-        model: SQLAlchemy модель таблицы (класс)
-        key_name: Название ключа в JSON (например 'filter_words')
-        chat_id_column: Имя колонки с ID чата (обычно 'chat_id')
-        exclude_columns: Колонки которые НЕ экспортировать (id, created_at, etc.)
-        is_settings: True если это таблица настроек (одна запись на группу)
-    """
-    # SQLAlchemy модель таблицы
-    model: Any
-    # Название ключа в JSON для этой таблицы
-    key_name: str
-    # Имя колонки содержащей chat_id
-    chat_id_column: str = 'chat_id'
-    # Колонки которые исключаем из экспорта (служебные)
-    exclude_columns: tuple = ('id', 'created_at', 'updated_at', 'created_by', 'added_by', 'added_at')
-    # Является ли таблица настройками (одна запись на группу)
-    is_settings: bool = False
-
-
-# ============================================================
-# РЕЕСТР ТАБЛИЦ ДЛЯ ЭКСПОРТА
-# ============================================================
-# Для добавления новой таблицы: добавить новый TableConfig в этот список
-# Порядок важен для импорта (зависимости сначала)
-
-TABLE_REGISTRY: List[TableConfig] = [
-    # ─────────────────────────────────────────────────────────
-    # НАСТРОЙКИ ГРУПП (settings-таблицы, одна запись на группу)
-    # ─────────────────────────────────────────────────────────
-
-    # Основные настройки чата (капча, фильтры, муты)
-    TableConfig(
-        model=ChatSettings,
-        key_name='chat_settings',
-        chat_id_column='chat_id',
-        # Исключаем username т.к. это идентификатор конкретной группы
-        exclude_columns=('username',),
-        is_settings=True,
-    ),
-
-    # Настройки капчи (устаревшие, но ещё используются)
-    TableConfig(
-        model=CaptchaSettings,
-        key_name='captcha_settings',
-        chat_id_column='group_id',
-        exclude_columns=('created_at',),
-        is_settings=True,
-    ),
-
-    # Настройки фильтра контента
-    TableConfig(
-        model=ContentFilterSettings,
-        key_name='content_filter_settings',
-        is_settings=True,
-    ),
-
-    # Настройки мониторинга профилей
-    TableConfig(
-        model=ProfileMonitorSettings,
-        key_name='profile_monitor_settings',
-        is_settings=True,
-    ),
-
-    # ─────────────────────────────────────────────────────────
-    # ДАННЫЕ (много записей на группу)
-    # ─────────────────────────────────────────────────────────
-
-    # Запрещённые слова
-    TableConfig(
-        model=FilterWord,
-        key_name='filter_words',
-        # Исключаем id, created_at, created_by - они служебные
-        exclude_columns=('id', 'created_at', 'created_by'),
-    ),
-
-    # Белый список слов
-    TableConfig(
-        model=FilterWhitelist,
-        key_name='filter_whitelist',
-        exclude_columns=('id', 'added_by', 'added_at'),
-    ),
-
-    # Паттерны скама
-    TableConfig(
-        model=ScamPattern,
-        key_name='scam_patterns',
-        exclude_columns=('id', 'created_at', 'created_by', 'triggers_count', 'last_triggered_at'),
-    ),
-
-    # Категории сигналов скама
-    TableConfig(
-        model=ScamSignalCategory,
-        key_name='scam_signal_categories',
-        exclude_columns=('id', 'created_at', 'updated_at', 'created_by'),
-    ),
-
-    # Правила антиспама
-    TableConfig(
-        model=AntiSpamRule,
-        key_name='antispam_rules',
-        exclude_columns=('id', 'created_at', 'updated_at'),
-    ),
-
-    # Белый список антиспама
-    TableConfig(
-        model=AntiSpamWhitelist,
-        key_name='antispam_whitelist',
-        exclude_columns=('id', 'added_by', 'added_at'),
-    ),
-]
+# Версия формата экспорта
+# 1.0 - старый формат с TABLE_REGISTRY
+# 2.0 - новый формат с ExportableMixin и поддержкой parent-child
+EXPORT_VERSION = '2.0'
 
 
 # ============================================================
@@ -230,20 +155,25 @@ def _deserialize_value(value: Any, column_type: Any) -> Any:
 
 def _model_to_dict(
     instance: Any,
-    exclude_columns: tuple,
-    chat_id_column: str,
+    model_class: Type[ExportableMixin],
+    include_parent_id: bool = False,
 ) -> Dict[str, Any]:
     """
     Конвертирует SQLAlchemy модель в словарь для JSON.
 
     Args:
         instance: Экземпляр модели
-        exclude_columns: Колонки которые исключить
-        chat_id_column: Имя колонки с chat_id (тоже исключаем)
+        model_class: Класс модели с настройками экспорта
+        include_parent_id: True = включить parent_column в экспорт
 
     Returns:
         Словарь с данными модели
     """
+    # Получаем настройки экспорта из миксина
+    exclude_columns = model_class.__export_exclude__
+    chat_id_column = model_class.__export_chat_id_column__
+    parent_column = model_class.__export_parent_column__
+
     # Получаем маппер модели для доступа к колонкам
     mapper = inspect(instance.__class__)
 
@@ -263,6 +193,13 @@ def _model_to_dict(
         if col_name == chat_id_column:
             continue
 
+        # Для дочерних моделей: сохраняем parent_column как _parent_id
+        if col_name == parent_column:
+            if include_parent_id:
+                value = getattr(instance, col_name)
+                result['_parent_id'] = _serialize_value(value)
+            continue
+
         # Получаем значение колонки
         value = getattr(instance, col_name)
 
@@ -273,7 +210,91 @@ def _model_to_dict(
 
 
 # ============================================================
-# ОСНОВНЫЕ ФУНКЦИИ ЭКСПОРТА
+# ЭКСПОРТ МОДЕЛЕЙ ВЕРХНЕГО УРОВНЯ (с chat_id)
+# ============================================================
+
+async def _export_top_level_model(
+    session: AsyncSession,
+    model_class: Type[ExportableMixin],
+    chat_id: int,
+) -> Any:
+    """
+    Экспортирует модель верхнего уровня (привязанную к chat_id).
+
+    Args:
+        session: Сессия БД
+        model_class: Класс модели
+        chat_id: ID группы
+
+    Returns:
+        Словарь (для settings) или список словарей (для data)
+    """
+    # Получаем колонку chat_id
+    chat_id_col = getattr(model_class, model_class.__export_chat_id_column__)
+
+    # Формируем запрос
+    query = select(model_class).where(chat_id_col == chat_id)
+
+    # Выполняем запрос
+    db_result = await session.execute(query)
+
+    # Для settings-таблиц возвращаем один словарь
+    if model_class.__export_is_settings__:
+        instance = db_result.scalar_one_or_none()
+        if instance:
+            return _model_to_dict(instance, model_class)
+        return None
+
+    # Для data-таблиц возвращаем список
+    instances = db_result.scalars().all()
+    return [
+        _model_to_dict(inst, model_class, include_parent_id=False)
+        for inst in instances
+    ]
+
+
+# ============================================================
+# ЭКСПОРТ ДОЧЕРНИХ МОДЕЛЕЙ (с parent_id)
+# ============================================================
+
+async def _export_child_model(
+    session: AsyncSession,
+    model_class: Type[ExportableMixin],
+    parent_ids: List[int],
+) -> List[Dict[str, Any]]:
+    """
+    Экспортирует дочернюю модель (привязанную к parent_id).
+
+    Args:
+        session: Сессия БД
+        model_class: Класс дочерней модели
+        parent_ids: Список ID родительских записей
+
+    Returns:
+        Список словарей с _parent_id для привязки
+    """
+    if not parent_ids:
+        return []
+
+    # Получаем колонку parent_id
+    parent_col = getattr(model_class, model_class.__export_parent_column__)
+
+    # Формируем запрос
+    query = select(model_class).where(parent_col.in_(parent_ids))
+
+    # Выполняем запрос
+    db_result = await session.execute(query)
+    instances = db_result.scalars().all()
+
+    # Конвертируем с сохранением parent_id
+    return [
+        _model_to_dict(inst, model_class, include_parent_id=True)
+        for inst in instances
+    ]
+
+
+# ============================================================
+# ОСНОВНАЯ ФУНКЦИЯ ЭКСПОРТА
 # ============================================================
 
 async def export_group_settings(
@@ -283,7 +304,7 @@ async def export_group_settings(
     """
     Экспортирует все настройки группы в словарь.
 
-    Читает данные из всех таблиц зарегистрированных в TABLE_REGISTRY
+    Автоматически собирает все модели с ExportableMixin
     и формирует единый словарь для сериализации в JSON.
 
     Args:
@@ -298,8 +319,8 @@ async def export_group_settings(
 
     # Результирующий словарь с метаданными
     result = {
-        # Версия формата экспорта (для совместимости при импорте)
-        'export_version': '1.0',
+        # Версия формата экспорта
+        'export_version': EXPORT_VERSION,
         # Дата и время экспорта
         'exported_at': datetime.utcnow().isoformat(),
         # ID группы-источника (для информации)
@@ -308,45 +329,45 @@ async def export_group_settings(
         'data': {},
     }
 
-    # Проходим по всем зарегистрированным таблицам
-    for config in TABLE_REGISTRY:
-        # Получаем имя колонки chat_id для этой модели
-        chat_id_col = getattr(config.model, config.chat_id_column)
+    # Получаем все экспортируемые модели (отсортированы по order)
+    models = get_exportable_models()
 
-        # Формируем запрос на выборку данных
-        query = select(config.model).where(chat_id_col == chat_id)
+    # Словарь для хранения ID родительских записей (для дочерних моделей)
+    # Формат: {'custom_spam_sections': [1, 2, 3], ...}
+    parent_ids_map: Dict[str, List[int]] = {}
 
-        # Выполняем запрос
-        db_result = await session.execute(query)
+    # Проходим по всем моделям
+    for model_class in models:
+        key = model_class.__export_key__
+        parent_key = model_class.__export_parent_key__
 
-        # Для settings-таблиц берём одну запись
-        if config.is_settings:
-            # Получаем единственную запись (или None)
-            instance = db_result.scalar_one_or_none()
-
-            if instance:
-                # Конвертируем в словарь
-                result['data'][config.key_name] = _model_to_dict(
-                    instance,
-                    config.exclude_columns,
-                    config.chat_id_column,
-                )
-                # Логируем успех
-                logger.debug(f"  ✓ {config.key_name}: 1 запись")
+        # Если это дочерняя модель - экспортируем через parent_ids
+        if parent_key is not None:
+            parent_ids = parent_ids_map.get(parent_key, [])
+            data = await _export_child_model(session, model_class, parent_ids)
         else:
-            # Для data-таблиц берём все записи
-            instances = db_result.scalars().all()
+            # Модель верхнего уровня - экспортируем по chat_id
+            data = await _export_top_level_model(session, model_class, chat_id)
 
-            # Конвертируем каждую запись в словарь
-            result['data'][config.key_name] = [
-                _model_to_dict(inst, config.exclude_columns, config.chat_id_column)
-                for inst in instances
-            ]
+        # Сохраняем данные если они есть
+        if data:
+            result['data'][key] = data
 
-            # Логируем количество записей
-            count = len(result['data'][config.key_name])
-            if count > 0:
-                logger.debug(f"  ✓ {config.key_name}: {count} записей")
+            # Для родительских моделей сохраняем ID для дочерних
+            # (только для списков, не для settings)
+            if isinstance(data, list) and not model_class.__export_is_settings__:
+                # Получаем ID из БД - нужно запросить снова
+                chat_id_col = getattr(model_class, model_class.__export_chat_id_column__)
+                query = select(model_class).where(chat_id_col == chat_id)
+                db_result = await session.execute(query)
+                instances = db_result.scalars().all()
+                parent_ids_map[key] = [inst.id for inst in instances]
+
+            # Логируем
+            if isinstance(data, list):
+                logger.debug(f"  ✓ {key}: {len(data)} записей")
+            else:
+                logger.debug(f"  ✓ {key}: 1 запись")
 
     # Логируем завершение экспорта
     total_keys = len([k for k, v in result['data'].items() if v])
@@ -354,6 +375,10 @@ async def export_group_settings(
 
     return result
 
+
+# ============================================================
+# ОСНОВНАЯ ФУНКЦИЯ ИМПОРТА
+# ============================================================
 
 async def import_group_settings(
     session: AsyncSession,
@@ -364,6 +389,8 @@ async def import_group_settings(
 ) -> Dict[str, int]:
     """
     Импортирует настройки из словаря в группу.
+
+    Поддерживает как формат v1.0 (старый), так и v2.0 (с parent-child).
 
     Args:
         session: Асинхронная сессия БД
@@ -391,70 +418,146 @@ async def import_group_settings(
     # Данные для импорта
     import_data = data['data']
 
-    # Проходим по всем зарегистрированным таблицам
-    for config in TABLE_REGISTRY:
-        # Проверяем есть ли данные для этой таблицы
-        if config.key_name not in import_data:
+    # Маппинг старых ID на новые (для parent-child связей)
+    # Формат: {'custom_spam_sections': {old_id: new_id, ...}, ...}
+    id_mapping: Dict[str, Dict[int, int]] = {}
+
+    # Получаем все экспортируемые модели (отсортированы по order)
+    models = get_exportable_models()
+
+    # Проходим по всем моделям
+    for model_class in models:
+        key = model_class.__export_key__
+        parent_key = model_class.__export_parent_key__
+        parent_column = model_class.__export_parent_column__
+
+        # Проверяем есть ли данные для этой модели
+        if key not in import_data:
             continue
 
         # Получаем данные для импорта
-        table_data = import_data[config.key_name]
+        table_data = import_data[key]
 
         # Пропускаем пустые данные
         if not table_data:
             continue
 
-        # Получаем колонку chat_id
-        chat_id_col = getattr(config.model, config.chat_id_column)
-
         # Если не merge - удаляем старые данные
         if not merge:
-            # Удаляем все записи для этой группы
-            delete_stmt = delete(config.model).where(chat_id_col == chat_id)
-            await session.execute(delete_stmt)
-            logger.debug(f"  🗑️ {config.key_name}: удалены старые записи")
+            if parent_key is not None:
+                # Для дочерних моделей удаляем через parent_ids
+                parent_mapping = id_mapping.get(parent_key, {})
+                if parent_mapping:
+                    parent_col = getattr(model_class, parent_column)
+                    # Удаляем по новым parent_id (которые уже созданы)
+                    delete_stmt = delete(model_class).where(
+                        parent_col.in_(list(parent_mapping.values()))
+                    )
+                    await session.execute(delete_stmt)
+            else:
+                # Для моделей верхнего уровня удаляем по chat_id
+                chat_id_col = getattr(model_class, model_class.__export_chat_id_column__)
+                delete_stmt = delete(model_class).where(chat_id_col == chat_id)
+                await session.execute(delete_stmt)
+                logger.debug(f"  🗑️ {key}: удалены старые записи")
 
         # Для settings-таблиц создаём одну запись
-        if config.is_settings:
-            # table_data это словарь
+        if model_class.__export_is_settings__:
             new_data = dict(table_data)
-            # Добавляем chat_id
-            new_data[config.chat_id_column] = chat_id
+            new_data[model_class.__export_chat_id_column__] = chat_id
 
-            # Создаём новую запись
-            instance = config.model(**new_data)
+            instance = model_class(**new_data)
 
-            # Если merge - используем merge, иначе add
             if merge:
                 await session.merge(instance)
             else:
                 session.add(instance)
 
-            stats[config.key_name] = 1
-            logger.debug(f"  ✓ {config.key_name}: импортированы настройки")
+            stats[key] = 1
+            logger.debug(f"  ✓ {key}: импортированы настройки")
         else:
             # Для data-таблиц создаём много записей
             count = 0
+            key_id_mapping: Dict[int, int] = {}
+
             for item in table_data:
-                # Копируем данные
                 new_data = dict(item)
-                # Добавляем chat_id
-                new_data[config.chat_id_column] = chat_id
+
+                # Убираем служебное поле _parent_id
+                old_parent_id = new_data.pop('_parent_id', None)
+
+                # Для дочерних моделей - подставляем новый parent_id
+                if parent_key is not None and parent_column is not None:
+                    if old_parent_id is not None:
+                        parent_mapping = id_mapping.get(parent_key, {})
+                        new_parent_id = parent_mapping.get(old_parent_id)
+                        if new_parent_id is None:
+                            logger.warning(
+                                f"⚠️ {key}: не найден parent_id {old_parent_id}, пропускаем"
+                            )
+                            continue
+                        new_data[parent_column] = new_parent_id
+                else:
+                    # Для моделей верхнего уровня - добавляем chat_id
+                    new_data[model_class.__export_chat_id_column__] = chat_id
 
                 # Добавляем user_id если есть колонка created_by/added_by
-                if hasattr(config.model, 'created_by'):
+                if hasattr(model_class, 'created_by'):
                     new_data['created_by'] = user_id
-                if hasattr(config.model, 'added_by'):
+                if hasattr(model_class, 'added_by'):
                     new_data['added_by'] = user_id
 
                 # Создаём новую запись
-                instance = config.model(**new_data)
+                instance = model_class(**new_data)
                 session.add(instance)
+
+                # Flush чтобы получить новый ID (для parent-child маппинга)
+                await session.flush()
+
+                # Сохраняем маппинг ID если это родительская модель
+                if parent_key is None and hasattr(instance, 'id'):
+                    # Для родительских моделей нужен маппинг
+                    # Но в экспорте v2.0 мы сохраняем _parent_id
+                    # Здесь нужно сохранить маппинг по порядку
+                    pass
+
                 count += 1
 
-            stats[config.key_name] = count
+            # Сохраняем маппинг для этой модели
+            # Для родительских моделей делаем flush и собираем ID
+            if parent_key is None:
+                await session.flush()
+                # Запрашиваем все записи чтобы получить ID
+                chat_id_col = getattr(model_class, model_class.__export_chat_id_column__)
+                query = select(model_class).where(chat_id_col == chat_id)
+                db_result = await session.execute(query)
+                instances = db_result.scalars().all()
+
+                # Создаём маппинг по уникальному ключу (например name для sections)
+                # Это работает если в экспорте сохранены уникальные поля
+                for i, inst in enumerate(instances):
+                    if i < len(table_data):
+                        # Пытаемся найти соответствие по name или другому уникальному полю
+                        if hasattr(inst, 'name') and 'name' in table_data[i]:
+                            # Ищем в table_data запись с таким же name
+                            for j, item in enumerate(table_data):
+                                if item.get('name') == inst.name:
+                                    # Нашли соответствие
+                                    old_id_key = f"_idx_{j}"
+                                    key_id_mapping[j] = inst.id
+                                    break
+
+                # Альтернативный подход: маппинг по индексу
+                if not key_id_mapping:
+                    for i, inst in enumerate(instances):
+                        if i < len(table_data):
+                            key_id_mapping[i] = inst.id
+
+                id_mapping[key] = key_id_mapping
+
+            stats[key] = count
             if count > 0:
-                logger.debug(f"  ✓ {config.key_name}: импортировано {count} записей")
+                logger.debug(f"  ✓ {key}: импортировано {count} записей")
 
     # Сохраняем изменения
     await session.commit()
@@ -513,7 +616,7 @@ def validate_import_data(data: Dict[str, Any]) -> List[str]:
 
     Проверяет:
     - Наличие обязательных ключей
-    - Версию формата
+    - Версию формата (поддерживаются 1.0 и 2.0)
     - Корректность структуры данных
 
     Args:
@@ -529,9 +632,9 @@ def validate_import_data(data: Dict[str, Any]) -> List[str]:
         errors.append("Отсутствует обязательный ключ 'data'")
         return errors
 
-    # Проверяем версию формата
+    # Проверяем версию формата (поддерживаем 1.0 и 2.0)
     version = data.get('export_version', '1.0')
-    if version != '1.0':
+    if version not in ('1.0', '2.0'):
         errors.append(f"Неподдерживаемая версия формата: {version}")
 
     # Проверяем что data это словарь
@@ -540,7 +643,7 @@ def validate_import_data(data: Dict[str, Any]) -> List[str]:
         return errors
 
     # Проверяем известные ключи
-    known_keys = {config.key_name for config in TABLE_REGISTRY}
+    known_keys = {m.__export_key__ for m in get_exportable_models()}
     for key in data['data'].keys():
         if key not in known_keys:
             # Это не ошибка - просто предупреждение о неизвестном ключе

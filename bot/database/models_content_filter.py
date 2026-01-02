@@ -31,15 +31,23 @@ from sqlalchemy.orm import relationship
 # utcnow - функция возвращающая текущее UTC время
 from bot.database.models import Base, utcnow
 
+# Импортируем миксин для автоматического экспорта моделей
+from bot.database.exportable_mixin import ExportableMixin
+
 
 # ============================================================
 # МОДЕЛЬ: НАСТРОЙКИ CONTENT FILTER ДЛЯ ГРУППЫ
 # ============================================================
 # Хранит все настройки модуля фильтрации для конкретной группы
 # Каждая группа имеет свои независимые настройки (мультитенантность)
-class ContentFilterSettings(Base):
+class ContentFilterSettings(Base, ExportableMixin):
     # Имя таблицы в базе данных PostgreSQL
     __tablename__ = 'content_filter_settings'
+
+    # ─── Настройки экспорта ───
+    __export_key__ = 'content_filter_settings'
+    __export_is_settings__ = True
+    __export_order__ = 100
 
     # ─────────────────────────────────────────────────────────
     # PRIMARY KEY: ID группы (chat_id)
@@ -277,9 +285,13 @@ class ContentFilterSettings(Base):
 # ============================================================
 # Хранит список запрещённых слов для каждой группы
 # Каждая группа имеет свой независимый список (мультитенантность)
-class FilterWord(Base):
+class FilterWord(Base, ExportableMixin):
     # Имя таблицы в базе данных
     __tablename__ = 'filter_words'
+
+    # ─── Настройки экспорта ───
+    __export_key__ = 'filter_words'
+    __export_order__ = 410
 
     # ─────────────────────────────────────────────────────────
     # PRIMARY KEY: Автоинкрементный ID
@@ -377,9 +389,13 @@ class FilterWord(Base):
 # ============================================================
 # Слова которые НЕ нужно фильтровать, даже если они похожи на запрещённые
 # Пример: "анализ" не должен срабатывать на паттерн "анал"
-class FilterWhitelist(Base):
+class FilterWhitelist(Base, ExportableMixin):
     # Имя таблицы в базе данных
     __tablename__ = 'filter_whitelist'
+
+    # ─── Настройки экспорта ───
+    __export_key__ = 'filter_whitelist'
+    __export_order__ = 411
 
     # ─────────────────────────────────────────────────────────
     # PRIMARY KEY
@@ -531,9 +547,13 @@ class FilterViolation(Base):
 # 2. Проверяет текст на совпадение с каждым паттерном группы
 # 3. Суммирует веса (weight) всех сработавших паттернов
 # 4. Если сумма >= порога чувствительности (scam_sensitivity) → СКАМ
-class ScamPattern(Base):
+class ScamPattern(Base, ExportableMixin):
     # Имя таблицы в базе данных
     __tablename__ = 'scam_patterns'
+
+    # ─── Настройки экспорта ───
+    __export_key__ = 'scam_patterns'
+    __export_order__ = 420
 
     # ─────────────────────────────────────────────────────────
     # PRIMARY KEY: Автоинкрементный ID
@@ -662,9 +682,13 @@ class ScamPattern(Base):
 # 2. Проверяем наличие любого ключевого слова в тексте
 # 3. Если найдено → добавляем weight баллов к скору
 # 4. Если суммарный скор >= scam_sensitivity → СКАМ
-class ScamSignalCategory(Base):
+class ScamSignalCategory(Base, ExportableMixin):
     # Имя таблицы в базе данных
     __tablename__ = 'scam_signal_categories'
+
+    # ─── Настройки экспорта ───
+    __export_key__ = 'scam_signal_categories'
+    __export_order__ = 421
 
     # ─────────────────────────────────────────────────────────
     # PRIMARY KEY: Автоинкрементный ID
@@ -751,9 +775,13 @@ class ScamSignalCategory(Base):
 # 2. Ищем порог где min_score <= score <= max_score
 # 3. Если найден → применяем action из порога
 # 4. Если НЕ найден → используем scam_action из ContentFilterSettings
-class ScamScoreThreshold(Base):
+class ScamScoreThreshold(Base, ExportableMixin):
     # Имя таблицы в базе данных
     __tablename__ = 'scam_score_thresholds'
+
+    # ─── Настройки экспорта ───
+    __export_key__ = 'scam_score_thresholds'
+    __export_order__ = 422
 
     # ─────────────────────────────────────────────────────────
     # PRIMARY KEY: Автоинкрементный ID
@@ -857,9 +885,14 @@ class ScamScoreThreshold(Base):
 # - Свой порог срабатывания
 # - Своё действие (delete, mute, ban, forward+delete)
 # - Опционально: канал для пересылки
-class CustomSpamSection(Base):
+class CustomSpamSection(Base, ExportableMixin):
     # Имя таблицы в базе данных
     __tablename__ = 'custom_spam_sections'
+
+    # ─── Настройки экспорта ───
+    # Родительская модель для CustomSectionPattern и CustomSectionThreshold
+    __export_key__ = 'custom_spam_sections'
+    __export_order__ = 200  # Импортируется раньше дочерних
 
     # ─────────────────────────────────────────────────────────
     # PRIMARY KEY: Автоинкрементный ID
@@ -1023,9 +1056,16 @@ class CustomSpamSection(Base):
 # ============================================================
 # Хранит паттерны для кастомных разделов спама.
 # Аналогично ScamPattern, но привязан к разделу.
-class CustomSectionPattern(Base):
+class CustomSectionPattern(Base, ExportableMixin):
     # Имя таблицы в базе данных
     __tablename__ = 'custom_section_patterns'
+
+    # ─── Настройки экспорта ───
+    # Дочерняя модель - привязана к CustomSpamSection через section_id
+    __export_key__ = 'custom_section_patterns'
+    __export_order__ = 300  # Импортируется после родителя
+    __export_parent_key__ = 'custom_spam_sections'
+    __export_parent_column__ = 'section_id'
 
     # ─────────────────────────────────────────────────────────
     # PRIMARY KEY: Автоинкрементный ID
@@ -1130,9 +1170,16 @@ class CustomSectionPattern(Base):
 # 2. Ищем порог где min_score <= score <= max_score
 # 3. Если найден → применяем action из порога
 # 4. Если НЕ найден → используем action из CustomSpamSection
-class CustomSectionThreshold(Base):
+class CustomSectionThreshold(Base, ExportableMixin):
     # Имя таблицы в базе данных
     __tablename__ = 'custom_section_thresholds'
+
+    # ─── Настройки экспорта ───
+    # Дочерняя модель - привязана к CustomSpamSection через section_id
+    __export_key__ = 'custom_section_thresholds'
+    __export_order__ = 301  # Импортируется после родителя
+    __export_parent_key__ = 'custom_spam_sections'
+    __export_parent_column__ = 'section_id'
 
     # ─────────────────────────────────────────────────────────
     # PRIMARY KEY: Автоинкрементный ID

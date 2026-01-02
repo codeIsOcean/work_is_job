@@ -1172,4 +1172,107 @@ git diff --cached | grep "^+.*import"
 
 ---
 
-*Последнее обновление: 2026-01-02 (добавлен раздел 33 — проверка новых файлов при коммите)*
+## 34. ExportableMixin — автоматический экспорт настроек (ОБЯЗАТЕЛЬНО!)
+
+**⚠️ КРИТИЧЕСКОЕ ПРАВИЛО — чтобы настройки групп копировались корректно!**
+
+### Что это:
+Миксин `ExportableMixin` автоматически регистрирует модели для экспорта/импорта настроек группы.
+Когда админ скачивает настройки и загружает на другую группу — экспортируются ВСЕ модели с этим миксином.
+
+### КОГДА добавлять миксин:
+Добавлять `ExportableMixin` к модели если она:
+- Хранит **настройки группы** (ChatSettings, ContentFilterSettings, etc.)
+- Хранит **данные для группы** (FilterWord, ScamPattern, AntiSpamRule, etc.)
+- Должна **копироваться** при переносе настроек на другую группу
+
+### КОГДА НЕ добавлять миксин:
+- **Логи/история** (FilterViolation, ProfileChangeLog) — не нужно копировать
+- **Статистика** (UserStats) — уникальна для группы
+- **Глобальные данные** (SpammerRecord) — не привязаны к группе
+- **Временные данные** (кэши, сессии)
+
+### КАК добавить миксин к новой модели:
+
+**Шаг 1:** Добавить миксин и настройки в модель:
+```python
+from bot.database.exportable_mixin import ExportableMixin
+
+class MyNewModel(Base, ExportableMixin):
+    __tablename__ = 'my_table'
+
+    # ─── Настройки экспорта ───
+    __export_key__ = 'my_models'           # Уникальный ключ в JSON
+    __export_order__ = 450                 # Порядок импорта (меньше = раньше)
+    __export_is_settings__ = False         # True если одна запись на группу
+    # __export_exclude__ = ('field1',)     # Поля которые НЕ экспортировать
+    # __export_chat_id_column__ = 'chat_id'  # Колонка с ID группы (по умолчанию)
+
+    # Остальные поля модели...
+    chat_id = Column(BigInteger, ...)
+```
+
+**Шаг 2:** Добавить импорт в `bot/services/settings_export/export_service.py`:
+```python
+# В секции импортов моделей
+from bot.database.models_xxx import MyNewModel  # noqa: F401
+```
+
+### Параметры миксина:
+
+| Параметр | Обязательный | Описание |
+|----------|--------------|----------|
+| `__export_key__` | ✅ ДА | Уникальный ключ в JSON (например: 'filter_words') |
+| `__export_order__` | ❌ нет | Порядок импорта: 0-99 настройки, 100-199 модули, 200+ данные |
+| `__export_is_settings__` | ❌ нет | True = одна запись на группу (настройки) |
+| `__export_exclude__` | ❌ нет | Tuple полей для исключения: `('id', 'created_at')` |
+| `__export_chat_id_column__` | ❌ нет | Имя колонки chat_id (по умолчанию 'chat_id') |
+| `__export_parent_key__` | ❌ нет | Для дочерних моделей: ключ родителя |
+| `__export_parent_column__` | ❌ нет | Для дочерних моделей: колонка FK |
+
+### Рекомендуемые значения `__export_order__`:
+
+| Диапазон | Тип моделей | Примеры |
+|----------|-------------|---------|
+| 0-99 | Основные настройки | ChatSettings (10), CaptchaSettings (20) |
+| 100-199 | Настройки модулей | ContentFilterSettings (100), ProfileMonitorSettings (110) |
+| 200-299 | Родительские данные | CustomSpamSection (200) |
+| 300-399 | Дочерние данные | CustomSectionPattern (300), CustomSectionThreshold (301) |
+| 400-499 | Обычные данные | FilterWord (410), AntiSpamRule (430) |
+
+### Пример для дочерней модели (parent-child):
+```python
+class CustomSectionPattern(Base, ExportableMixin):
+    __tablename__ = 'custom_section_patterns'
+
+    # ─── Настройки экспорта ───
+    __export_key__ = 'custom_section_patterns'
+    __export_order__ = 300  # После родителя (200)
+    __export_parent_key__ = 'custom_spam_sections'  # Ключ родителя
+    __export_parent_column__ = 'section_id'         # FK колонка
+
+    section_id = Column(Integer, ForeignKey("custom_spam_sections.id"))
+```
+
+### Чек-лист при создании новой модели с chat_id:
+
+```
+[ ] Модель хранит данные/настройки группы?
+[ ] Эти данные должны копироваться при экспорте?
+    ↓ Если ДА на оба вопроса:
+[ ] Добавил ExportableMixin к классу
+[ ] Определил __export_key__ (уникальный!)
+[ ] Определил __export_order__ (правильный диапазон)
+[ ] Если settings — добавил __export_is_settings__ = True
+[ ] Добавил импорт в export_service.py
+[ ] Проверил что импорты работают
+```
+
+### ЗАПРЕЩЕНО:
+- Создавать модель с chat_id без обсуждения нужен ли экспорт
+- Забывать добавлять импорт в export_service.py
+- Использовать одинаковые __export_key__ для разных моделей
+
+---
+
+*Последнее обновление: 2026-01-02 (добавлен раздел 34 — ExportableMixin для экспорта настроек)*

@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 
 Base = declarative_base()
 
+# Импортируем миксин для автоматического экспорта моделей
+from bot.database.exportable_mixin import ExportableMixin
+
 
 def utcnow():
     return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -75,8 +78,15 @@ class UserGroup(Base):
 
 
 # ⚙️ Настройки капчи
-class CaptchaSettings(Base):
+class CaptchaSettings(Base, ExportableMixin):
     __tablename__ = "captcha_settings"
+
+    # ─── Настройки экспорта ───
+    __export_key__ = 'captcha_settings'
+    __export_exclude__ = ('created_at',)
+    __export_is_settings__ = True
+    __export_chat_id_column__ = 'group_id'
+    __export_order__ = 20
 
     group_id = Column(BigInteger, ForeignKey("groups.chat_id"), primary_key=True)
     is_enabled = Column(Boolean, default=True)
@@ -152,8 +162,14 @@ class GroupUsers(Base):
 
 
 # ⚙️ Настройки чата (включение фильтров, параметры мута и пр.)
-class ChatSettings(Base):
+class ChatSettings(Base, ExportableMixin):
     __tablename__ = "chat_settings"
+
+    # ─── Настройки экспорта ───
+    __export_key__ = 'chat_settings'
+    __export_exclude__ = ('username',)  # username - идентификатор конкретной группы
+    __export_is_settings__ = True
+    __export_order__ = 10  # Основные настройки - импортируются первыми
 
     chat_id = Column(BigInteger, ForeignKey("groups.chat_id", ondelete="CASCADE"), primary_key=True)
     # Username публичной группы (для поиска по deep link). Может быть NULL для приватных чатов.
