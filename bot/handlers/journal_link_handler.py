@@ -8,8 +8,10 @@ Handler для привязки журнала к группе через пер
 """
 import logging
 import html
+import asyncio
 from datetime import datetime
-from aiogram import Router, F
+from typing import List
+from aiogram import Router, F, Bot
 from aiogram.types import Message
 from aiogram.filters import Command, Filter
 from aiogram.fsm.context import FSMContext
@@ -23,6 +25,22 @@ from bot.services.group_journal_service import (
 from bot.services.groups_settings_in_private_logic import check_granular_permissions
 
 logger = logging.getLogger(__name__)
+
+
+async def _safe_delete_messages(bot: Bot, chat_id: int, message_ids: List[int], delay: float = 0) -> None:
+    """
+    Безопасное удаление сообщений с опциональной задержкой.
+    Игнорирует ошибки если сообщения уже удалены или нет прав.
+    """
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+    for msg_id in message_ids:
+        try:
+            await bot.delete_message(chat_id, msg_id)
+        except Exception as e:
+            # Игнорируем ошибки — сообщение могло быть уже удалено
+            logger.debug(f"Не удалось удалить сообщение {msg_id}: {e}")
 
 journal_link_router = Router()
 
@@ -108,7 +126,12 @@ async def link_journal_command(message: Message, session: AsyncSession, state: F
 
     # Устанавливаем FSM состояние ожидания пересылки
     await state.set_state(JournalLinkStates.waiting_for_forward)
-    await state.update_data(chat_id=chat_id, user_id=user_id)
+    # Сохраняем ID сообщений для последующего удаления
+    await state.update_data(
+        chat_id=chat_id,
+        user_id=user_id,
+        messages_to_delete=[message.message_id]  # ID команды /linkjournal
+    )
 
     if existing:
         text = (
@@ -130,7 +153,13 @@ async def link_journal_command(message: Message, session: AsyncSession, state: F
             f"<i>Для отмены введите /cancel</i>"
         )
 
-    await message.reply(text, parse_mode="HTML")
+    # Отправляем ответ и сохраняем его ID для последующего удаления
+    reply_msg = await message.reply(text, parse_mode="HTML")
+    # Добавляем ID ответа в список на удаление
+    data = await state.get_data()
+    messages_to_delete = data.get('messages_to_delete', [])
+    messages_to_delete.append(reply_msg.message_id)
+    await state.update_data(messages_to_delete=messages_to_delete)
 
 
 @journal_link_router.message(Command("unlinkjournal"))
@@ -167,18 +196,27 @@ async def unlink_journal_command(message: Message, session: AsyncSession):
             return
     
     existing = await get_group_journal_channel(session, chat_id)
-    
+
     if not existing:
-        await message.reply("❌ Журнал не привязан к этой группе.")
+        reply_msg = await message.reply("❌ Журнал не привязан к этой группе.")
+        # Удаляем команду и ответ через 5 секунд
+        asyncio.create_task(
+            _safe_delete_messages(message.bot, chat_id, [message.message_id, reply_msg.message_id], delay=5)
+        )
         return
-    
+
     # Отвязываем
     success = await unlink_journal_channel(session, chat_id)
-    
+
     if success:
-        await message.reply("✅ Журнал успешно отвязан от группы.")
+        reply_msg = await message.reply("✅ Журнал успешно отвязан от группы.")
     else:
-        await message.reply("❌ Ошибка при отвязке журнала.")
+        reply_msg = await message.reply("❌ Ошибка при отвязке журнала.")
+
+    # Удаляем команду и ответ через 5 секунд чтобы не засорять группу
+    asyncio.create_task(
+        _safe_delete_messages(message.bot, chat_id, [message.message_id, reply_msg.message_id], delay=5)
+    )
 
 
 @journal_link_router.message(Command("cancel"), JournalLinkStates.waiting_for_forward)
@@ -186,8 +224,21 @@ async def cancel_journal_link(message: Message, state: FSMContext):
     """
     Отмена привязки журнала.
     """
+    # Получаем список сообщений на удаление
+    data = await state.get_data()
+    messages_to_delete = data.get('messages_to_delete', [])
+    chat_id = message.chat.id
+
     await state.clear()
-    await message.reply("❌ Привязка журнала отменена.")
+    reply_msg = await message.reply("❌ Привязка журнала отменена.")
+
+    # Добавляем команду /cancel и ответ в список на удаление
+    messages_to_delete.extend([message.message_id, reply_msg.message_id])
+
+    # Удаляем все сообщения через 3 секунды
+    asyncio.create_task(
+        _safe_delete_messages(message.bot, chat_id, messages_to_delete, delay=3)
+    )
 
 
 @journal_link_router.message(JournalLinkStates.waiting_for_forward, F.forward_from_chat)
@@ -201,12 +252,21 @@ async def handle_journal_link_forward(message: Message, session: AsyncSession, s
     """
     forward_from_chat = message.forward_from_chat
 
+    # Получаем данные из FSM для удаления сообщений
+    data = await state.get_data()
+    messages_to_delete = data.get('messages_to_delete', [])
+    # Добавляем пересылку в список на удаление
+    messages_to_delete.append(message.message_id)
+
     # Проверяем, что пересылка из канала или группы
     if not forward_from_chat or forward_from_chat.type not in ("channel", "group", "supergroup"):
-        await message.reply(
+        reply_msg = await message.reply(
             "❌ Пересылка должна быть из канала или группы.\n"
             "Перешлите сообщение из канала журнала."
         )
+        # Добавляем ответ в список и обновляем state
+        messages_to_delete.append(reply_msg.message_id)
+        await state.update_data(messages_to_delete=messages_to_delete)
         return
 
     user_id = message.from_user.id if message.from_user else None
@@ -214,7 +274,9 @@ async def handle_journal_link_forward(message: Message, session: AsyncSession, s
 
     # Проверяем, что канал не является самой группой
     if forward_from_chat.id == chat_id:
-        await message.reply("❌ Нельзя привязать группу саму к себе как журнал.")
+        reply_msg = await message.reply("❌ Нельзя привязать группу саму к себе как журнал.")
+        messages_to_delete.append(reply_msg.message_id)
+        await state.update_data(messages_to_delete=messages_to_delete)
         return
 
     try:
@@ -263,7 +325,7 @@ async def handle_journal_link_forward(message: Message, session: AsyncSession, s
 
                 group_title_display = f"<a href='{html.escape(group_link)}'>{group_title_text}</a>"
 
-                await message.reply(
+                reply_msg = await message.reply(
                     f"✅ <b>Журнал привязан!</b>\n\n"
                     f"📢 Канал журнала: {journal_title_display}\n"
                     f"🏢 Группа: {group_title_display}\n\n"
@@ -273,7 +335,7 @@ async def handle_journal_link_forward(message: Message, session: AsyncSession, s
                 )
             else:
                 # Обновлена существующая привязка
-                await message.reply(
+                reply_msg = await message.reply(
                     f"✅ <b>Журнал обновлён!</b>\n\n"
                     f"📢 Новый канал: <b>{journal_title}</b>\n"
                     f"🏢 Группа: <b>{message.chat.title}</b>",
@@ -284,13 +346,27 @@ async def handle_journal_link_forward(message: Message, session: AsyncSession, s
                 f"✅ Журнал привязан: группа {chat_id} -> канал {journal_channel_id} "
                 f"(привязал пользователь {user_id})"
             )
+
+            # Добавляем ответ в список и удаляем все сообщения через 5 секунд
+            messages_to_delete.append(reply_msg.message_id)
+            asyncio.create_task(
+                _safe_delete_messages(message.bot, chat_id, messages_to_delete, delay=5)
+            )
         else:
-            await message.reply("❌ Ошибка при привязке журнала.")
+            reply_msg = await message.reply("❌ Ошибка при привязке журнала.")
+            messages_to_delete.append(reply_msg.message_id)
+            asyncio.create_task(
+                _safe_delete_messages(message.bot, chat_id, messages_to_delete, delay=5)
+            )
 
     except Exception as e:
         logger.error(f"❌ Ошибка при обработке пересылки для привязки журнала: {e}")
         await state.clear()
-        await message.reply("❌ Ошибка при привязке журнала. Проверьте логи.")
+        reply_msg = await message.reply("❌ Ошибка при привязке журнала. Проверьте логи.")
+        messages_to_delete.append(reply_msg.message_id)
+        asyncio.create_task(
+            _safe_delete_messages(message.bot, chat_id, messages_to_delete, delay=5)
+        )
 
 
 @journal_link_router.message(JournalLinkStates.waiting_for_forward)
@@ -303,10 +379,19 @@ async def handle_non_forward_in_waiting_state(message: Message, state: FSMContex
     if message.text and message.text.startswith("/"):
         return
 
-    await message.reply(
+    # Получаем список сообщений на удаление и добавляем текущее
+    data = await state.get_data()
+    messages_to_delete = data.get('messages_to_delete', [])
+    messages_to_delete.append(message.message_id)
+
+    reply_msg = await message.reply(
         "⏳ Ожидаю пересылку сообщения из канала журнала.\n"
         "Перешлите любое сообщение из канала/группы, который хотите привязать.\n\n"
         "<i>Для отмены введите /cancel</i>",
         parse_mode="HTML"
     )
+
+    # Добавляем ответ в список и обновляем state
+    messages_to_delete.append(reply_msg.message_id)
+    await state.update_data(messages_to_delete=messages_to_delete)
 
