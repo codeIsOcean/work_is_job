@@ -592,8 +592,25 @@ def create_scam_settings_menu(
     }
     action_text = action_map.get(settings.default_action, '🗑️ Удалить')
 
+    # Статус toggle кнопок
+    scam_detector_on = getattr(settings, 'scam_detector_enabled', True)
+    custom_sections_on = getattr(settings, 'custom_sections_enabled', True)
+
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
+            # ─────────────────────────────────────────────────────
+            # Toggle: Общий скам-детектор и Кастомные разделы
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text=f"Общий детектор {EMOJI_ON if scam_detector_on else EMOJI_OFF}",
+                    callback_data=f"cf:t:scamdet:{chat_id}"
+                ),
+                InlineKeyboardButton(
+                    text=f"Разделы {EMOJI_ON if custom_sections_on else EMOJI_OFF}",
+                    callback_data=f"cf:t:custsec:{chat_id}"
+                )
+            ],
             # ─────────────────────────────────────────────────────
             # Паттерны
             # ─────────────────────────────────────────────────────

@@ -100,6 +100,14 @@ class ContentFilterSettings(Base, ExportableMixin):
     # 90 = низкая (только явный скам)
     scam_sensitivity = Column(Integer, default=60, nullable=False)
 
+    # Включён ли общий скам-детектор (эвристика: деньги, крипта, призывы)
+    # Если False — проверяется только через custom sections (разделы)
+    scam_detector_enabled = Column(Boolean, default=True, nullable=False)
+
+    # Включены ли кастомные разделы (Наркотики, Попрошайки и т.д.)
+    # Если False — проверяется только через общий scam_detector
+    custom_sections_enabled = Column(Boolean, default=True, nullable=False)
+
     # Действие при обнаружении скама (delete/warn/mute/kick/ban)
     # Если NULL - используется default_action
     scam_action = Column(String(20), nullable=True)

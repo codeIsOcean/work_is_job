@@ -426,9 +426,343 @@ class FilterManager:
                 )
 
         # ─────────────────────────────────────────────────────────
-        # ШАГ 4: Scam Detector (эвристика + кастомные паттерны)
+        # ШАГ 4: Custom Sections (кастомные разделы спама)
+        # ПРИОРИТЕТ: Разделы проверяются ПЕРВЫМИ перед общим scam_detector
         # ─────────────────────────────────────────────────────────
-        if settings.scam_detection_enabled:
+        # Проверяем текст на паттерны кастомных разделов.
+        # Каждый раздел имеет свой набор паттернов, порог и действие.
+        if settings.scam_detection_enabled and getattr(settings, 'custom_sections_enabled', True):
+            from bot.services.content_filter.scam_pattern_service import get_section_service
+            section_service = get_section_service()
+
+            # Получаем все активные разделы группы
+            sections = await section_service.get_sections(chat_id, session, enabled_only=True)
+
+            # Логируем для отладки сколько разделов найдено
+            logger.info(
+                f"[FilterManager] CustomSections: chat={chat_id}, "
+                f"разделов={len(sections) if sections else 0}"
+            )
+
+            if sections:
+                # Нормализуем текст один раз
+                normalized_text = self._normalizer.normalize(text).lower()
+
+                for section in sections:
+                    # Получаем паттерны раздела
+                    patterns = await section_service.get_section_patterns(section.id, session, active_only=True)
+
+                    # Логируем раздел и количество паттернов
+                    logger.info(
+                        f"[FilterManager] Раздел '{section.name}' (ID={section.id}): "
+                        f"паттернов={len(patterns) if patterns else 0}, порог={section.threshold}"
+                    )
+
+                    if not patterns:
+                        continue
+
+                    # Вычисляем общий скор по паттернам
+                    total_score = 0
+                    triggered_patterns = []
+
+                    # Предварительно извлекаем n-граммы из текста для n-gram matching
+                    text_bigrams = extract_ngrams(normalized_text, n=2)
+                    text_trigrams = extract_ngrams(normalized_text, n=3)
+
+                    for pattern in patterns:
+                        matched = False
+                        match_method = None
+                        match_context = None  # Контекст где найдено совпадение
+
+                        # ─────────────────────────────────────────────────────
+                        # МЕТОД 0: REGEX (точное совпадение по регулярному выражению)
+                        # Для паттернов с pattern_type='regex' — используем только regex
+                        # и пропускаем phrase/fuzzy/ngram методы
+                        # ─────────────────────────────────────────────────────
+                        if pattern.pattern_type == 'regex':
+                            try:
+                                # Компилируем regex с флагами регистронезависимости и Unicode
+                                regex = re.compile(pattern.pattern, re.IGNORECASE | re.UNICODE)
+                                # Ищем в нормализованном тексте
+                                match_obj = regex.search(normalized_text)
+                                # Если не нашли — пробуем в оригинальном тексте (lowercase)
+                                if not match_obj:
+                                    match_obj = regex.search(text.lower())
+
+                                if match_obj:
+                                    matched = True
+                                    match_method = 'regex'
+                                    # Формируем контекст совпадения
+                                    pos = match_obj.start()
+                                    matched_text = match_obj.group()
+                                    # Берём контекст: 20 символов до и после
+                                    source_text = normalized_text if match_obj.string == normalized_text else text.lower()
+                                    start = max(0, pos - 20)
+                                    end = min(len(source_text), pos + len(matched_text) + 20)
+                                    match_context = source_text[start:end]
+                                    if start > 0:
+                                        match_context = "..." + match_context
+                                    if end < len(source_text):
+                                        match_context = match_context + "..."
+                            except re.error as e:
+                                # Некорректный regex — логируем и пропускаем паттерн
+                                logger.warning(
+                                    f"[FilterManager] Некорректный regex паттерн #{pattern.id}: "
+                                    f"'{pattern.pattern}' — ошибка: {e}"
+                                )
+                                continue
+
+                            # Обрабатываем результат regex и переходим к следующему паттерну
+                            # ВАЖНО: regex паттерны НЕ используют fuzzy/ngram
+                            if matched:
+                                total_score += pattern.weight
+                                # Формируем строку с контекстом для отображения
+                                trigger_info = f"{pattern.pattern} [{match_method}]"
+                                if match_context:
+                                    trigger_info += f" → найдено в: «{match_context}»"
+                                triggered_patterns.append(trigger_info)
+
+                                # Увеличиваем счётчик срабатываний
+                                await section_service.increment_pattern_trigger(pattern.id, session)
+
+                                # Детальный лог для отладки
+                                logger.info(
+                                    f"[FilterManager] 🔍 REGEX MATCH: паттерн='{pattern.pattern}' "
+                                    f"[{match_method}] +{pattern.weight} баллов\n"
+                                    f"    📍 Контекст: {match_context}\n"
+                                    f"    📝 Норм.текст (первые 200 симв): {normalized_text[:200]}..."
+                                )
+                            # Переходим к следующему паттерну — пропускаем phrase/fuzzy/ngram
+                            continue
+
+                        # ─────────────────────────────────────────────────────
+                        # МЕТОД 1: Точное совпадение подстроки
+                        # Для КОРОТКИХ паттернов (< 5 символов) требуем границы слов
+                        # чтобы избежать ложных срабатываний (weed→вед в "ведущая")
+                        # ─────────────────────────────────────────────────────
+                        pattern_norm_lower = pattern.normalized.lower()
+
+                        # Для коротких паттернов используем word boundaries
+                        if len(pattern_norm_lower) < 5:
+                            # Ищем как отдельное слово с границами \b
+                            word_boundary_regex = r'\b' + re.escape(pattern_norm_lower) + r'\b'
+                            match_obj = re.search(word_boundary_regex, normalized_text)
+                            if match_obj:
+                                matched = True
+                                match_method = 'phrase'
+                                pos = match_obj.start()
+                                # Берём контекст: 20 символов до и после
+                                start = max(0, pos - 20)
+                                end = min(len(normalized_text), pos + len(pattern_norm_lower) + 20)
+                                match_context = normalized_text[start:end]
+                                if start > 0:
+                                    match_context = "..." + match_context
+                                if end < len(normalized_text):
+                                    match_context = match_context + "..."
+                        else:
+                            # Для длинных паттернов - обычный поиск подстроки
+                            if pattern_norm_lower in normalized_text:
+                                matched = True
+                                match_method = 'phrase'
+                                # Находим позицию совпадения для контекста
+                                pos = normalized_text.find(pattern_norm_lower)
+                                if pos >= 0:
+                                    # Берём контекст: 20 символов до и после
+                                    start = max(0, pos - 20)
+                                    end = min(len(normalized_text), pos + len(pattern_norm_lower) + 20)
+                                    match_context = normalized_text[start:end]
+                                    # Добавляем маркер где именно совпадение
+                                    if start > 0:
+                                        match_context = "..." + match_context
+                                    if end < len(normalized_text):
+                                        match_context = match_context + "..."
+
+                        # ─────────────────────────────────────────────────────
+                        # МЕТОД 2: Fuzzy matching (порог 0.8)
+                        # Ловит перестановки слов и небольшие изменения
+                        # ВАЖНО: Пропускаем fuzzy для коротких паттернов (< 5 символов)
+                        # т.к. они дают много ложных срабатываний (вед в ведущая)
+                        # ─────────────────────────────────────────────────────
+                        if not matched and len(pattern_norm_lower) >= 5:
+                            if fuzzy_match(normalized_text, pattern.normalized, threshold=0.8):
+                                matched = True
+                                match_method = 'fuzzy'
+                                # Показываем нормализованную форму паттерна
+                                match_context = f"fuzzy ~ '{pattern.normalized}'"
+
+                        # ─────────────────────────────────────────────────────
+                        # МЕТОД 3: N-gram matching (перекрытие 0.6)
+                        # Ловит перестановки слов в длинных фразах
+                        # ─────────────────────────────────────────────────────
+                        if not matched:
+                            pattern_words = pattern.normalized.split()
+                            # Биграммы для паттернов из 2+ слов
+                            if len(pattern_words) >= 2:
+                                pattern_bigrams = extract_ngrams(pattern.normalized, n=2)
+                                if ngram_match(text_bigrams, pattern_bigrams, min_overlap=0.6):
+                                    matched = True
+                                    match_method = 'ngram'
+                                    # Показываем нормализованную форму паттерна
+                                    match_context = f"ngram ~ '{pattern.normalized}'"
+                            # Триграммы для паттернов из 3+ слов
+                            if not matched and len(pattern_words) >= 3:
+                                pattern_trigrams = extract_ngrams(pattern.normalized, n=3)
+                                if ngram_match(text_trigrams, pattern_trigrams, min_overlap=0.5):
+                                    matched = True
+                                    match_method = 'ngram'
+                                    # Показываем нормализованную форму паттерна
+                                    match_context = f"ngram ~ '{pattern.normalized}'"
+
+                        # Если паттерн сработал - добавляем скор
+                        if matched:
+                            total_score += pattern.weight
+                            # Формируем строку с контекстом для отображения
+                            trigger_info = f"{pattern.pattern} [{match_method}]"
+                            if match_context:
+                                trigger_info += f" → найдено в: «{match_context}»"
+                            triggered_patterns.append(trigger_info)
+
+                            # Увеличиваем счётчик срабатываний
+                            await section_service.increment_pattern_trigger(pattern.id, session)
+
+                            # ВАЖНО: Детальный лог для отладки
+                            logger.info(
+                                f"[FilterManager] 🔍 MATCH: паттерн='{pattern.pattern}' "
+                                f"(norm='{pattern.normalized}') [{match_method}] +{pattern.weight} баллов\n"
+                                f"    📍 Контекст: {match_context}\n"
+                                f"    📝 Норм.текст (первые 200 симв): {normalized_text[:200]}..."
+                            )
+
+                    # Проверяем достижен ли порог
+                    if total_score >= section.threshold:
+                        # Раздел сработал!
+                        trigger_str = ', '.join(triggered_patterns[:3])
+                        if len(triggered_patterns) > 3:
+                            trigger_str += f" (+{len(triggered_patterns) - 3})"
+
+                        # ─────────────────────────────────────────────────────
+                        # ПРОВЕРЯЕМ ПОРОГИ БАЛЛОВ РАЗДЕЛА (Баг 1 fix)
+                        # Если есть подходящий порог — используем его action
+                        # Если нет — используем action из самого раздела
+                        # ─────────────────────────────────────────────────────
+                        threshold_result = await section_service.get_action_for_section_score(
+                            section_id=section.id,
+                            score=total_score,
+                            session=session
+                        )
+
+                        # Определяем финальное действие и длительность
+                        if threshold_result:
+                            # Нашли подходящий порог — используем его
+                            final_action = threshold_result[0]
+                            final_mute_duration = threshold_result[1] or section.mute_duration
+                            logger.info(
+                                f"[FilterManager] CustomSection '{section.name}': "
+                                f"порог баллов {total_score} → {final_action}"
+                            )
+                        else:
+                            # Порог не найден — используем action из раздела
+                            final_action = section.action
+                            final_mute_duration = section.mute_duration
+
+                        logger.info(
+                            f"[FilterManager] CustomSection '{section.name}' сработал в чате {chat_id}: "
+                            f"score={total_score}, порог={section.threshold}, action={final_action}"
+                        )
+
+                        # ─────────────────────────────────────────────────────
+                        # CAS (COMBOT ANTI-SPAM) ПРОВЕРКА
+                        # ─────────────────────────────────────────────────────
+                        cas_banned = False
+                        if section.cas_enabled:
+                            try:
+                                cas_banned = await is_cas_banned(user_id)
+                                if cas_banned:
+                                    logger.info(
+                                        f"[FilterManager] CAS: user_id={user_id} найден в базе CAS!"
+                                    )
+                            except Exception as e:
+                                logger.warning(f"[FilterManager] CAS ошибка: {e}")
+
+                        # ─────────────────────────────────────────────────────
+                        # ДОБАВЛЕНИЕ В ГЛОБАЛЬНУЮ БД СПАММЕРОВ
+                        # Добавляем только при срабатывании САМОГО ВЫСОКОГО порога
+                        # чтобы избежать ложных попаданий в БД спамеров
+                        # ─────────────────────────────────────────────────────
+                        added_to_spammer_db = False
+                        if section.add_to_spammer_db:
+                            # Получаем все активные пороги раздела
+                            all_thresholds = await section_service.get_section_thresholds(
+                                section.id, session, enabled_only=True
+                            )
+
+                            # Определяем, попадает ли score в самый высокий порог
+                            should_add_to_db = False
+                            if all_thresholds:
+                                # Находим порог с максимальным min_score (самый строгий)
+                                highest_threshold = max(all_thresholds, key=lambda t: t.min_score)
+                                # Добавляем в БД только если score >= min_score самого высокого порога
+                                if total_score >= highest_threshold.min_score:
+                                    should_add_to_db = True
+                                    logger.info(
+                                        f"[FilterManager] Score {total_score} >= {highest_threshold.min_score} "
+                                        f"(самый высокий порог) → добавляем в БД спаммеров"
+                                    )
+                                else:
+                                    logger.info(
+                                        f"[FilterManager] Score {total_score} < {highest_threshold.min_score} "
+                                        f"(самый высокий порог) → НЕ добавляем в БД спаммеров"
+                                    )
+                            else:
+                                # Нет порогов — добавляем по старой логике (флаг раздела)
+                                should_add_to_db = True
+                                logger.info(
+                                    f"[FilterManager] Нет порогов в разделе, добавляем в БД спаммеров по флагу"
+                                )
+
+                            if should_add_to_db:
+                                try:
+                                    await record_spammer_incident(
+                                        session=session,
+                                        user_id=user_id,
+                                        risk_score=total_score,
+                                        reason=f"custom_section:{section.name}"
+                                    )
+                                    added_to_spammer_db = True
+                                    logger.info(
+                                        f"[FilterManager] Спаммер добавлен в БД: "
+                                        f"user_id={user_id}, section={section.name}"
+                                    )
+                                except Exception as e:
+                                    logger.warning(f"[FilterManager] Ошибка добавления в БД спаммеров: {e}")
+
+                        return FilterResult(
+                            should_act=True,
+                            detector_type='custom_section',
+                            trigger=trigger_str,
+                            action=final_action,
+                            action_duration=final_mute_duration,
+                            scam_score=total_score,
+                            forward_channel_id=section.forward_channel_id,
+                            section_name=section.name,
+                            forward_on_delete=section.forward_on_delete,
+                            forward_on_mute=section.forward_on_mute,
+                            forward_on_ban=section.forward_on_ban,
+                            # Передаём кастомные тексты и задержки из раздела
+                            custom_mute_text=section.mute_text,
+                            custom_ban_text=section.ban_text,
+                            custom_delete_delay=section.delete_delay,
+                            custom_notification_delay=section.notification_delete_delay,
+                            # CAS и БД спаммеров
+                            cas_banned=cas_banned,
+                            added_to_spammer_db=added_to_spammer_db
+                        )
+
+        # ─────────────────────────────────────────────────────────
+        # ШАГ 5: Scam Detector (эвристика + кастомные паттерны)
+        # Проверяется ПОСЛЕ Custom Sections
+        # ─────────────────────────────────────────────────────────
+        if settings.scam_detection_enabled and getattr(settings, 'scam_detector_enabled', True):
             # Проверяем на скам с учётом кастомных паттернов группы
             scam_result = await self._scam_detector.check_with_custom_patterns(
                 text=text,
@@ -487,302 +821,6 @@ class FilterManager:
                     action_duration=mute_duration,
                     scam_score=scam_result.score
                 )
-
-        # ─────────────────────────────────────────────────────────
-        # ШАГ 5: Custom Sections (кастомные разделы спама)
-        # ─────────────────────────────────────────────────────────
-        # Проверяем текст на паттерны кастомных разделов.
-        # Каждый раздел имеет свой набор паттернов, порог и действие.
-        from bot.services.content_filter.scam_pattern_service import get_section_service
-        section_service = get_section_service()
-
-        # Получаем все активные разделы группы
-        sections = await section_service.get_sections(chat_id, session, enabled_only=True)
-
-        # Логируем для отладки сколько разделов найдено
-        logger.info(
-            f"[FilterManager] CustomSections: chat={chat_id}, "
-            f"разделов={len(sections) if sections else 0}"
-        )
-
-        if sections:
-            # Нормализуем текст один раз
-            normalized_text = self._normalizer.normalize(text).lower()
-
-            for section in sections:
-                # Получаем паттерны раздела
-                patterns = await section_service.get_section_patterns(section.id, session, active_only=True)
-
-                # Логируем раздел и количество паттернов
-                logger.info(
-                    f"[FilterManager] Раздел '{section.name}' (ID={section.id}): "
-                    f"паттернов={len(patterns) if patterns else 0}, порог={section.threshold}"
-                )
-
-                if not patterns:
-                    continue
-
-                # Вычисляем общий скор по паттернам
-                total_score = 0
-                triggered_patterns = []
-
-                # Предварительно извлекаем n-граммы из текста для n-gram matching
-                text_bigrams = extract_ngrams(normalized_text, n=2)
-                text_trigrams = extract_ngrams(normalized_text, n=3)
-
-                for pattern in patterns:
-                    matched = False
-                    match_method = None
-                    match_context = None  # Контекст где найдено совпадение
-
-                    # ─────────────────────────────────────────────────────
-                    # МЕТОД 0: REGEX (точное совпадение по регулярному выражению)
-                    # Для паттернов с pattern_type='regex' — используем только regex
-                    # и пропускаем phrase/fuzzy/ngram методы
-                    # ─────────────────────────────────────────────────────
-                    if pattern.pattern_type == 'regex':
-                        try:
-                            # Компилируем regex с флагами регистронезависимости и Unicode
-                            regex = re.compile(pattern.pattern, re.IGNORECASE | re.UNICODE)
-                            # Ищем в нормализованном тексте
-                            match_obj = regex.search(normalized_text)
-                            # Если не нашли — пробуем в оригинальном тексте (lowercase)
-                            if not match_obj:
-                                match_obj = regex.search(text.lower())
-
-                            if match_obj:
-                                matched = True
-                                match_method = 'regex'
-                                # Формируем контекст совпадения
-                                pos = match_obj.start()
-                                matched_text = match_obj.group()
-                                # Берём контекст: 20 символов до и после
-                                source_text = normalized_text if match_obj.string == normalized_text else text.lower()
-                                start = max(0, pos - 20)
-                                end = min(len(source_text), pos + len(matched_text) + 20)
-                                match_context = source_text[start:end]
-                                if start > 0:
-                                    match_context = "..." + match_context
-                                if end < len(source_text):
-                                    match_context = match_context + "..."
-                        except re.error as e:
-                            # Некорректный regex — логируем и пропускаем паттерн
-                            logger.warning(
-                                f"[FilterManager] Некорректный regex паттерн #{pattern.id}: "
-                                f"'{pattern.pattern}' — ошибка: {e}"
-                            )
-                            continue
-
-                        # Обрабатываем результат regex и переходим к следующему паттерну
-                        # ВАЖНО: regex паттерны НЕ используют fuzzy/ngram
-                        if matched:
-                            total_score += pattern.weight
-                            # Формируем строку с контекстом для отображения
-                            trigger_info = f"{pattern.pattern} [{match_method}]"
-                            if match_context:
-                                trigger_info += f" → найдено в: «{match_context}»"
-                            triggered_patterns.append(trigger_info)
-
-                            # Увеличиваем счётчик срабатываний
-                            await section_service.increment_pattern_trigger(pattern.id, session)
-
-                            # Детальный лог для отладки
-                            logger.info(
-                                f"[FilterManager] 🔍 REGEX MATCH: паттерн='{pattern.pattern}' "
-                                f"[{match_method}] +{pattern.weight} баллов\n"
-                                f"    📍 Контекст: {match_context}\n"
-                                f"    📝 Норм.текст (первые 200 симв): {normalized_text[:200]}..."
-                            )
-                        # Переходим к следующему паттерну — пропускаем phrase/fuzzy/ngram
-                        continue
-
-                    # ─────────────────────────────────────────────────────
-                    # МЕТОД 1: Точное совпадение подстроки
-                    # Для КОРОТКИХ паттернов (< 5 символов) требуем границы слов
-                    # чтобы избежать ложных срабатываний (weed→вед в "ведущая")
-                    # ─────────────────────────────────────────────────────
-                    pattern_norm_lower = pattern.normalized.lower()
-
-                    # Для коротких паттернов используем word boundaries
-                    if len(pattern_norm_lower) < 5:
-                        # Ищем как отдельное слово с границами \b
-                        word_boundary_regex = r'\b' + re.escape(pattern_norm_lower) + r'\b'
-                        match_obj = re.search(word_boundary_regex, normalized_text)
-                        if match_obj:
-                            matched = True
-                            match_method = 'phrase'
-                            pos = match_obj.start()
-                            # Берём контекст: 20 символов до и после
-                            start = max(0, pos - 20)
-                            end = min(len(normalized_text), pos + len(pattern_norm_lower) + 20)
-                            match_context = normalized_text[start:end]
-                            if start > 0:
-                                match_context = "..." + match_context
-                            if end < len(normalized_text):
-                                match_context = match_context + "..."
-                    else:
-                        # Для длинных паттернов - обычный поиск подстроки
-                        if pattern_norm_lower in normalized_text:
-                            matched = True
-                            match_method = 'phrase'
-                            # Находим позицию совпадения для контекста
-                            pos = normalized_text.find(pattern_norm_lower)
-                            if pos >= 0:
-                                # Берём контекст: 20 символов до и после
-                                start = max(0, pos - 20)
-                                end = min(len(normalized_text), pos + len(pattern_norm_lower) + 20)
-                                match_context = normalized_text[start:end]
-                                # Добавляем маркер где именно совпадение
-                                if start > 0:
-                                    match_context = "..." + match_context
-                                if end < len(normalized_text):
-                                    match_context = match_context + "..."
-
-                    # ─────────────────────────────────────────────────────
-                    # МЕТОД 2: Fuzzy matching (порог 0.8)
-                    # Ловит перестановки слов и небольшие изменения
-                    # ВАЖНО: Пропускаем fuzzy для коротких паттернов (< 5 символов)
-                    # т.к. они дают много ложных срабатываний (вед в ведущая)
-                    # ─────────────────────────────────────────────────────
-                    if not matched and len(pattern_norm_lower) >= 5:
-                        if fuzzy_match(normalized_text, pattern.normalized, threshold=0.8):
-                            matched = True
-                            match_method = 'fuzzy'
-                            match_context = f"fuzzy match в тексте длиной {len(normalized_text)} символов"
-
-                    # ─────────────────────────────────────────────────────
-                    # МЕТОД 3: N-gram matching (перекрытие 0.6)
-                    # Ловит перестановки слов в длинных фразах
-                    # ─────────────────────────────────────────────────────
-                    if not matched:
-                        pattern_words = pattern.normalized.split()
-                        # Биграммы для паттернов из 2+ слов
-                        if len(pattern_words) >= 2:
-                            pattern_bigrams = extract_ngrams(pattern.normalized, n=2)
-                            if ngram_match(text_bigrams, pattern_bigrams, min_overlap=0.6):
-                                matched = True
-                                match_method = 'ngram'
-                                match_context = f"ngram bigrams match"
-                        # Триграммы для паттернов из 3+ слов
-                        if not matched and len(pattern_words) >= 3:
-                            pattern_trigrams = extract_ngrams(pattern.normalized, n=3)
-                            if ngram_match(text_trigrams, pattern_trigrams, min_overlap=0.5):
-                                matched = True
-                                match_method = 'ngram'
-                                match_context = f"ngram trigrams match"
-
-                    # Если паттерн сработал - добавляем скор
-                    if matched:
-                        total_score += pattern.weight
-                        # Формируем строку с контекстом для отображения
-                        trigger_info = f"{pattern.pattern} [{match_method}]"
-                        if match_context:
-                            trigger_info += f" → найдено в: «{match_context}»"
-                        triggered_patterns.append(trigger_info)
-
-                        # Увеличиваем счётчик срабатываний
-                        await section_service.increment_pattern_trigger(pattern.id, session)
-
-                        # ВАЖНО: Детальный лог для отладки
-                        logger.info(
-                            f"[FilterManager] 🔍 MATCH: паттерн='{pattern.pattern}' "
-                            f"(norm='{pattern.normalized}') [{match_method}] +{pattern.weight} баллов\n"
-                            f"    📍 Контекст: {match_context}\n"
-                            f"    📝 Норм.текст (первые 200 симв): {normalized_text[:200]}..."
-                        )
-
-                # Проверяем достижен ли порог
-                if total_score >= section.threshold:
-                    # Раздел сработал!
-                    trigger_str = ', '.join(triggered_patterns[:3])
-                    if len(triggered_patterns) > 3:
-                        trigger_str += f" (+{len(triggered_patterns) - 3})"
-
-                    # ─────────────────────────────────────────────────────
-                    # ПРОВЕРЯЕМ ПОРОГИ БАЛЛОВ РАЗДЕЛА (Баг 1 fix)
-                    # Если есть подходящий порог — используем его action
-                    # Если нет — используем action из самого раздела
-                    # ─────────────────────────────────────────────────────
-                    threshold_result = await section_service.get_action_for_section_score(
-                        section_id=section.id,
-                        score=total_score,
-                        session=session
-                    )
-
-                    # Определяем финальное действие и длительность
-                    if threshold_result:
-                        # Нашли подходящий порог — используем его
-                        final_action = threshold_result[0]
-                        final_mute_duration = threshold_result[1] or section.mute_duration
-                        logger.info(
-                            f"[FilterManager] CustomSection '{section.name}': "
-                            f"порог баллов {total_score} → {final_action}"
-                        )
-                    else:
-                        # Порог не найден — используем action из раздела
-                        final_action = section.action
-                        final_mute_duration = section.mute_duration
-
-                    logger.info(
-                        f"[FilterManager] CustomSection '{section.name}' сработал в чате {chat_id}: "
-                        f"score={total_score}, порог={section.threshold}, action={final_action}"
-                    )
-
-                    # ─────────────────────────────────────────────────────
-                    # CAS (COMBOT ANTI-SPAM) ПРОВЕРКА
-                    # ─────────────────────────────────────────────────────
-                    cas_banned = False
-                    if section.cas_enabled:
-                        try:
-                            cas_banned = await is_cas_banned(user_id)
-                            if cas_banned:
-                                logger.info(
-                                    f"[FilterManager] CAS: user_id={user_id} найден в базе CAS!"
-                                )
-                        except Exception as e:
-                            logger.warning(f"[FilterManager] CAS ошибка: {e}")
-
-                    # ─────────────────────────────────────────────────────
-                    # ДОБАВЛЕНИЕ В ГЛОБАЛЬНУЮ БД СПАММЕРОВ
-                    # ─────────────────────────────────────────────────────
-                    added_to_spammer_db = False
-                    if section.add_to_spammer_db:
-                        try:
-                            await record_spammer_incident(
-                                session=session,
-                                user_id=user_id,
-                                risk_score=total_score,
-                                reason=f"custom_section:{section.name}"
-                            )
-                            added_to_spammer_db = True
-                            logger.info(
-                                f"[FilterManager] Спаммер добавлен в БД: "
-                                f"user_id={user_id}, section={section.name}"
-                            )
-                        except Exception as e:
-                            logger.warning(f"[FilterManager] Ошибка добавления в БД спаммеров: {e}")
-
-                    return FilterResult(
-                        should_act=True,
-                        detector_type='custom_section',
-                        trigger=trigger_str,
-                        action=final_action,
-                        action_duration=final_mute_duration,
-                        scam_score=total_score,
-                        forward_channel_id=section.forward_channel_id,
-                        section_name=section.name,
-                        forward_on_delete=section.forward_on_delete,
-                        forward_on_mute=section.forward_on_mute,
-                        forward_on_ban=section.forward_on_ban,
-                        # Передаём кастомные тексты и задержки из раздела
-                        custom_mute_text=section.mute_text,
-                        custom_ban_text=section.ban_text,
-                        custom_delete_delay=section.delete_delay,
-                        custom_notification_delay=section.notification_delete_delay,
-                        # CAS и БД спаммеров
-                        cas_banned=cas_banned,
-                        added_to_spammer_db=added_to_spammer_db
-                    )
 
         # Ничего не найдено
         return FilterResult(should_act=False)

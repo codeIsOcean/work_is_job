@@ -46,6 +46,96 @@ settings_router = Router(name='scam_settings')
 
 
 # ============================================================
+# TOGGLE: ОБЩИЙ СКАМ-ДЕТЕКТОР
+# ============================================================
+
+@settings_router.callback_query(F.data.regexp(r"^cf:t:scamdet:-?\d+$"))
+async def toggle_scam_detector(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Переключает статус общего скам-детектора.
+
+    Callback: cf:t:scamdet:{chat_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[3])
+
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+
+    # Переключаем статус
+    current = getattr(settings, 'scam_detector_enabled', True)
+    settings.scam_detector_enabled = not current
+    await session.commit()
+
+    status_text = "включён" if settings.scam_detector_enabled else "выключен"
+    await callback.answer(f"Общий детектор {status_text}")
+
+    # Обновляем меню
+    text = (
+        f"🎯 <b>Настройки антискама</b>\n\n"
+        f"Эвристический анализ сообщений:\n"
+        f"• Деньги, криптовалюта\n"
+        f"• Призывы к действию\n"
+        f"• Гарантии заработка\n\n"
+        f"Чувствительность определяет порог срабатывания."
+    )
+
+    keyboard = create_scam_settings_menu(chat_id, settings)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+
+# ============================================================
+# TOGGLE: КАСТОМНЫЕ РАЗДЕЛЫ
+# ============================================================
+
+@settings_router.callback_query(F.data.regexp(r"^cf:t:custsec:-?\d+$"))
+async def toggle_custom_sections(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Переключает статус кастомных разделов.
+
+    Callback: cf:t:custsec:{chat_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[3])
+
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+
+    # Переключаем статус
+    current = getattr(settings, 'custom_sections_enabled', True)
+    settings.custom_sections_enabled = not current
+    await session.commit()
+
+    status_text = "включены" if settings.custom_sections_enabled else "выключены"
+    await callback.answer(f"Разделы {status_text}")
+
+    # Обновляем меню
+    text = (
+        f"🎯 <b>Настройки антискама</b>\n\n"
+        f"Эвристический анализ сообщений:\n"
+        f"• Деньги, криптовалюта\n"
+        f"• Призывы к действию\n"
+        f"• Гарантии заработка\n\n"
+        f"Чувствительность определяет порог срабатывания."
+    )
+
+    keyboard = create_scam_settings_menu(chat_id, settings)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+
+# ============================================================
 # МЕНЮ НАСТРОЕК АНТИСКАМА
 # ============================================================
 
