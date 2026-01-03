@@ -26,7 +26,7 @@ import re
 
 # Импортируем SQLAlchemy для работы с БД
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete, update, func
+from sqlalchemy import select, delete, update, func, or_
 from sqlalchemy.exc import IntegrityError
 
 # Импортируем модели ScamPattern, ScamScoreThreshold и кастомные разделы
@@ -1583,6 +1583,39 @@ class CustomSectionService:
         query = query.order_by(CustomSectionPattern.weight.desc())
 
         result = await session.execute(query)
+        return list(result.scalars().all())
+
+    async def search_patterns(
+        self,
+        section_id: int,
+        query_text: str,
+        session: AsyncSession,
+        limit: int = 20
+    ) -> List[CustomSectionPattern]:
+        """
+        Поиск паттернов раздела по тексту.
+
+        Ищет совпадения в полях pattern и normalized.
+
+        Args:
+            section_id: ID раздела
+            query_text: Текст для поиска
+            session: Сессия БД
+            limit: Максимальное количество результатов
+
+        Returns:
+            Список найденных паттернов отсортированный по ID
+        """
+        # Ищем в pattern или normalized (регистронезависимо)
+        search_query = select(CustomSectionPattern).where(
+            CustomSectionPattern.section_id == section_id,
+            or_(
+                CustomSectionPattern.pattern.ilike(f'%{query_text}%'),
+                CustomSectionPattern.normalized.ilike(f'%{query_text}%')
+            )
+        ).order_by(CustomSectionPattern.id).limit(limit)
+
+        result = await session.execute(search_query)
         return list(result.scalars().all())
 
     async def add_section_pattern(

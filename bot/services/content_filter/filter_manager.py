@@ -536,6 +536,67 @@ class FilterManager:
                     match_context = None  # Контекст где найдено совпадение
 
                     # ─────────────────────────────────────────────────────
+                    # МЕТОД 0: REGEX (точное совпадение по регулярному выражению)
+                    # Для паттернов с pattern_type='regex' — используем только regex
+                    # и пропускаем phrase/fuzzy/ngram методы
+                    # ─────────────────────────────────────────────────────
+                    if pattern.pattern_type == 'regex':
+                        try:
+                            # Компилируем regex с флагами регистронезависимости и Unicode
+                            regex = re.compile(pattern.pattern, re.IGNORECASE | re.UNICODE)
+                            # Ищем в нормализованном тексте
+                            match_obj = regex.search(normalized_text)
+                            # Если не нашли — пробуем в оригинальном тексте (lowercase)
+                            if not match_obj:
+                                match_obj = regex.search(text.lower())
+
+                            if match_obj:
+                                matched = True
+                                match_method = 'regex'
+                                # Формируем контекст совпадения
+                                pos = match_obj.start()
+                                matched_text = match_obj.group()
+                                # Берём контекст: 20 символов до и после
+                                source_text = normalized_text if match_obj.string == normalized_text else text.lower()
+                                start = max(0, pos - 20)
+                                end = min(len(source_text), pos + len(matched_text) + 20)
+                                match_context = source_text[start:end]
+                                if start > 0:
+                                    match_context = "..." + match_context
+                                if end < len(source_text):
+                                    match_context = match_context + "..."
+                        except re.error as e:
+                            # Некорректный regex — логируем и пропускаем паттерн
+                            logger.warning(
+                                f"[FilterManager] Некорректный regex паттерн #{pattern.id}: "
+                                f"'{pattern.pattern}' — ошибка: {e}"
+                            )
+                            continue
+
+                        # Обрабатываем результат regex и переходим к следующему паттерну
+                        # ВАЖНО: regex паттерны НЕ используют fuzzy/ngram
+                        if matched:
+                            total_score += pattern.weight
+                            # Формируем строку с контекстом для отображения
+                            trigger_info = f"{pattern.pattern} [{match_method}]"
+                            if match_context:
+                                trigger_info += f" → найдено в: «{match_context}»"
+                            triggered_patterns.append(trigger_info)
+
+                            # Увеличиваем счётчик срабатываний
+                            await section_service.increment_pattern_trigger(pattern.id, session)
+
+                            # Детальный лог для отладки
+                            logger.info(
+                                f"[FilterManager] 🔍 REGEX MATCH: паттерн='{pattern.pattern}' "
+                                f"[{match_method}] +{pattern.weight} баллов\n"
+                                f"    📍 Контекст: {match_context}\n"
+                                f"    📝 Норм.текст (первые 200 симв): {normalized_text[:200]}..."
+                            )
+                        # Переходим к следующему паттерну — пропускаем phrase/fuzzy/ngram
+                        continue
+
+                    # ─────────────────────────────────────────────────────
                     # МЕТОД 1: Точное совпадение подстроки
                     # Для КОРОТКИХ паттернов (< 5 символов) требуем границы слов
                     # чтобы избежать ложных срабатываний (weed→вед в "ведущая")

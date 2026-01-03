@@ -40,6 +40,7 @@ from bot.handlers.content_filter.common import (
     AddSectionPatternStates,
     SectionImportPatternsStates,
     EditPatternWeightStates,
+    SearchSectionPatternStates,
     SECTION_PATTERNS_PER_PAGE
 )
 # Импортируем сервис разделов
@@ -98,8 +99,11 @@ async def _show_patterns_list(
     else:
         text = f"📋 <b>Паттерны раздела «{section.name}»</b> (стр. {page + 1}/{total_pages})\n\n"
         for i, p in enumerate(page_patterns, start=start_idx + 1):
+            # Эмодзи веса: 🔴 для высокого (>=200), 🟡 для среднего (>=100), 🟢 для низкого
             weight_emoji = "🔴" if p.weight >= 200 else "🟡" if p.weight >= 100 else "🟢"
-            text += f"{i}. {weight_emoji} <code>{p.pattern}</code> ({p.weight})\n"
+            # Добавляем метку [regex] для regex-паттернов
+            type_label = " [regex]" if getattr(p, 'pattern_type', None) == 'regex' else ""
+            text += f"{i}. {weight_emoji} <code>{p.pattern}</code> ({p.weight}){type_label}\n"
 
     # Передаём данные паттернов для кнопок: (номер, id, текст)
     pattern_data = [
@@ -1072,3 +1076,388 @@ async def process_pattern_weight(
         )
     except TelegramAPIError:
         pass
+
+
+# ============================================================
+# ПОИСК ПАТТЕРНОВ
+# ============================================================
+
+@patterns_router.callback_query(F.data.regexp(r"^cf:secpsrch:\d+$"))
+async def start_search_pattern(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Начинает FSM для поиска паттернов.
+
+    Callback: cf:secpsrch:{section_id}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    # Получаем раздел для отображения названия
+    section_service = get_section_service()
+    section = await section_service.get_section_by_id(section_id, session)
+
+    if not section:
+        await callback.answer("❌ Раздел не найден", show_alert=True)
+        return
+
+    # Сохраняем данные в FSM
+    await state.update_data(
+        section_id=section_id,
+        bot_message_id=callback.message.message_id,
+        bot_chat_id=callback.message.chat.id
+    )
+    await state.set_state(SearchSectionPatternStates.waiting_for_query)
+
+    text = (
+        f"🔍 <b>Поиск паттерна</b>\n\n"
+        f"Раздел: <b>{section.name}</b>\n\n"
+        f"Введите слово или часть паттерна для поиска:"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="◀️ Отмена",
+            callback_data=f"cf:secp:{section_id}:0"
+        )]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@patterns_router.message(SearchSectionPatternStates.waiting_for_query)
+async def process_search_query(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает поисковый запрос и показывает результаты.
+    """
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    data = await state.get_data()
+    section_id = data.get('section_id')
+    bot_message_id = data.get('bot_message_id')
+    bot_chat_id = data.get('bot_chat_id')
+
+    if not section_id:
+        await state.clear()
+        return
+
+    query_text = message.text.strip() if message.text else ""
+
+    if not query_text:
+        return
+
+    # Выполняем поиск
+    section_service = get_section_service()
+    patterns = await section_service.search_patterns(section_id, query_text, session)
+
+    if not patterns:
+        text = (
+            f"🔍 <b>Результаты поиска: «{query_text}»</b>\n\n"
+            f"❌ Ничего не найдено.\n\n"
+            f"Попробуйте другой запрос."
+        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="🔍 Новый поиск",
+                callback_data=f"cf:secpsrch:{section_id}"
+            )],
+            [InlineKeyboardButton(
+                text="◀️ К списку",
+                callback_data=f"cf:secp:{section_id}:0"
+            )]
+        ])
+        await state.clear()
+    else:
+        # Формируем список найденных паттернов
+        text = (
+            f"🔍 <b>Результаты поиска: «{query_text}»</b>\n"
+            f"Найдено: {len(patterns)} паттерн(ов)\n\n"
+        )
+        for i, p in enumerate(patterns, start=1):
+            weight_emoji = "🔴" if p.weight >= 200 else "🟡" if p.weight >= 100 else "🟢"
+            type_label = " [regex]" if getattr(p, 'pattern_type', None) == 'regex' else ""
+            text += f"{i}. {weight_emoji} <code>{p.pattern}</code> ({p.weight}){type_label}\n"
+
+        text += "\n<i>Для удаления введите номер (1-{}):</i>".format(len(patterns))
+
+        # Сохраняем результаты поиска в FSM
+        await state.update_data(
+            search_query=query_text,
+            search_results=[p.id for p in patterns]
+        )
+        await state.set_state(SearchSectionPatternStates.waiting_for_delete)
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="🔍 Новый поиск",
+                callback_data=f"cf:secpsrch:{section_id}"
+            )],
+            [InlineKeyboardButton(
+                text="◀️ К списку",
+                callback_data=f"cf:secp:{section_id}:0"
+            )]
+        ])
+
+    try:
+        await message.bot.edit_message_text(
+            chat_id=bot_chat_id,
+            message_id=bot_message_id,
+            text=text,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    except TelegramAPIError:
+        pass
+
+
+@patterns_router.message(SearchSectionPatternStates.waiting_for_delete)
+async def process_delete_by_number(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ввод номера паттерна для удаления.
+    """
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    data = await state.get_data()
+    section_id = data.get('section_id')
+    search_results = data.get('search_results', [])
+    bot_message_id = data.get('bot_message_id')
+    bot_chat_id = data.get('bot_chat_id')
+
+    if not section_id or not search_results:
+        await state.clear()
+        return
+
+    # Парсим номер
+    try:
+        num = int(message.text.strip())
+    except (ValueError, AttributeError):
+        return  # Игнорируем неверный ввод
+
+    if num < 1 or num > len(search_results):
+        return  # Игнорируем неверный номер
+
+    # Получаем ID паттерна по номеру
+    pattern_id = search_results[num - 1]
+
+    # Получаем паттерн для отображения
+    section_service = get_section_service()
+    pattern = await section_service.get_section_pattern_by_id(pattern_id, session)
+
+    if not pattern:
+        return
+
+    # Сохраняем ID для удаления
+    await state.update_data(delete_pattern_id=pattern_id)
+
+    # Показываем подтверждение
+    type_label = " [regex]" if getattr(pattern, 'pattern_type', None) == 'regex' else ""
+    text = (
+        f"🗑️ <b>Удалить паттерн?</b>\n\n"
+        f"<code>{pattern.pattern}</code> ({pattern.weight}){type_label}"
+    )
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✅ Да, удалить",
+                callback_data=f"cf:secpsdelc:{section_id}"
+            ),
+            InlineKeyboardButton(
+                text="❌ Отмена",
+                callback_data=f"cf:secpsback:{section_id}"
+            )
+        ]
+    ])
+
+    try:
+        await message.bot.edit_message_text(
+            chat_id=bot_chat_id,
+            message_id=bot_message_id,
+            text=text,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    except TelegramAPIError:
+        pass
+
+
+@patterns_router.callback_query(F.data.regexp(r"^cf:secpsdelc:\d+$"))
+async def confirm_delete_search_result(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Подтверждает удаление паттерна из результатов поиска.
+
+    Callback: cf:secpsdelc:{section_id}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    data = await state.get_data()
+    pattern_id = data.get('delete_pattern_id')
+    search_query = data.get('search_query', '')
+
+    if not pattern_id:
+        await callback.answer("❌ Ошибка: паттерн не найден", show_alert=True)
+        return
+
+    # Удаляем паттерн
+    section_service = get_section_service()
+    pattern = await section_service.get_section_pattern_by_id(pattern_id, session)
+    deleted_pattern_text = pattern.pattern if pattern else "?"
+
+    success = await section_service.delete_section_pattern(pattern_id, session)
+
+    if success:
+        await callback.answer(f"✅ Паттерн удалён")
+    else:
+        await callback.answer("❌ Ошибка удаления", show_alert=True)
+        return
+
+    # Повторяем поиск чтобы обновить результаты
+    patterns = await section_service.search_patterns(section_id, search_query, session)
+
+    if not patterns:
+        text = (
+            f"✅ Паттерн «{deleted_pattern_text}» удалён\n\n"
+            f"🔍 <b>Результаты поиска: «{search_query}»</b>\n\n"
+            f"Больше паттернов не найдено."
+        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="🔍 Новый поиск",
+                callback_data=f"cf:secpsrch:{section_id}"
+            )],
+            [InlineKeyboardButton(
+                text="◀️ К списку",
+                callback_data=f"cf:secp:{section_id}:0"
+            )]
+        ])
+        await state.clear()
+    else:
+        # Формируем обновлённый список
+        text = (
+            f"✅ Паттерн «{deleted_pattern_text}» удалён\n\n"
+            f"🔍 <b>Результаты поиска: «{search_query}»</b>\n"
+            f"Найдено: {len(patterns)} паттерн(ов)\n\n"
+        )
+        for i, p in enumerate(patterns, start=1):
+            weight_emoji = "🔴" if p.weight >= 200 else "🟡" if p.weight >= 100 else "🟢"
+            type_label = " [regex]" if getattr(p, 'pattern_type', None) == 'regex' else ""
+            text += f"{i}. {weight_emoji} <code>{p.pattern}</code> ({p.weight}){type_label}\n"
+
+        text += "\n<i>Для удаления введите номер (1-{}):</i>".format(len(patterns))
+
+        # Обновляем результаты поиска в FSM
+        await state.update_data(
+            search_results=[p.id for p in patterns],
+            delete_pattern_id=None
+        )
+        await state.set_state(SearchSectionPatternStates.waiting_for_delete)
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="🔍 Новый поиск",
+                callback_data=f"cf:secpsrch:{section_id}"
+            )],
+            [InlineKeyboardButton(
+                text="◀️ К списку",
+                callback_data=f"cf:secp:{section_id}:0"
+            )]
+        ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+
+@patterns_router.callback_query(F.data.regexp(r"^cf:secpsback:\d+$"))
+async def cancel_delete_search_result(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Отменяет удаление и возвращает к результатам поиска.
+
+    Callback: cf:secpsback:{section_id}
+    """
+    parts = callback.data.split(":")
+    section_id = int(parts[2])
+
+    data = await state.get_data()
+    search_query = data.get('search_query', '')
+
+    # Повторяем поиск
+    section_service = get_section_service()
+    patterns = await section_service.search_patterns(section_id, search_query, session)
+
+    if not patterns:
+        text = (
+            f"🔍 <b>Результаты поиска: «{search_query}»</b>\n\n"
+            f"❌ Ничего не найдено."
+        )
+        await state.clear()
+    else:
+        text = (
+            f"🔍 <b>Результаты поиска: «{search_query}»</b>\n"
+            f"Найдено: {len(patterns)} паттерн(ов)\n\n"
+        )
+        for i, p in enumerate(patterns, start=1):
+            weight_emoji = "🔴" if p.weight >= 200 else "🟡" if p.weight >= 100 else "🟢"
+            type_label = " [regex]" if getattr(p, 'pattern_type', None) == 'regex' else ""
+            text += f"{i}. {weight_emoji} <code>{p.pattern}</code> ({p.weight}){type_label}\n"
+
+        text += "\n<i>Для удаления введите номер (1-{}):</i>".format(len(patterns))
+
+        # Обновляем результаты поиска в FSM
+        await state.update_data(
+            search_results=[p.id for p in patterns],
+            delete_pattern_id=None
+        )
+        await state.set_state(SearchSectionPatternStates.waiting_for_delete)
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🔍 Новый поиск",
+            callback_data=f"cf:secpsrch:{section_id}"
+        )],
+        [InlineKeyboardButton(
+            text="◀️ К списку",
+            callback_data=f"cf:secp:{section_id}:0"
+        )]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
