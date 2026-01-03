@@ -580,10 +580,14 @@ class FilterManager:
                         # ─────────────────────────────────────────────────────
                         # МЕТОД 2: Fuzzy matching (порог 0.8)
                         # Ловит перестановки слов и небольшие изменения
-                        # ВАЖНО: Пропускаем fuzzy для коротких паттернов (< 5 символов)
-                        # т.к. они дают много ложных срабатываний (вед в ведущая)
                         # ─────────────────────────────────────────────────────
-                        if not matched and len(pattern_norm_lower) >= 5:
+                        # ВАЖНО: Для длинных текстов (>400 символов) отключаем fuzzy
+                        # для коротких паттернов (<8 символов), чтобы избежать
+                        # ложных срабатываний типа "в руки" → "в руский" (83% similarity)
+                        # Для коротких текстов (спам) fuzzy работает как раньше
+                        # ─────────────────────────────────────────────────────
+                        min_pattern_len_for_fuzzy = 8 if len(normalized_text) > 400 else 5
+                        if not matched and len(pattern_norm_lower) >= min_pattern_len_for_fuzzy:
                             if fuzzy_match(normalized_text, pattern.normalized, threshold=0.8):
                                 matched = True
                                 match_method = 'fuzzy'
