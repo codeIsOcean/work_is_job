@@ -295,10 +295,23 @@ async def format_activity_message(
         message += f"#captcha #timeout #user{user_id}"
     
     elif event_type == "AUTO_MUTE_SCAMMER":
+        # Получаем уровень скама и причину из дополнительной информации
         scammer_level = additional_info.get('scammer_level', 0) if additional_info else 0
         scammer_reason = additional_info.get('reason', 'Обнаружен как скаммер') if additional_info else 'Обнаружен как скаммер'
+
+        # Формируем имя пользователя как ссылку для быстрого перехода в профиль
+        user_name = f"{first_name} {last_name}".strip() or "Без имени"
+        # Создаём ссылку вида tg://user?id=123 которая откроет профиль при клике
+        user_link = f'<a href="tg://user?id={user_id}">{html.escape(user_name)}</a>'
+        # Добавляем username и ID после ссылки для информативности
+        user_display_linked = user_link
+        if username:
+            user_display_linked += f" [@{username}]"
+        user_display_linked += f" [{user_id}]"
+
         message = f"🤖 <b>#АВТОМУТ_СКАММЕРА</b> {status_emoji}\n\n"
-        message += f"👤 <b>Пользователь:</b> {user_display}\n"
+        # Используем user_display_linked со ссылкой вместо обычного user_display
+        message += f"👤 <b>Пользователь:</b> {user_display_linked}\n"
         message += f"🏢 <b>Группа:</b> {group_display}\n"
         message += f"📊 <b>Уровень скама:</b> {scammer_level}/100\n"
         message += f"📝 <b>Причина:</b> {scammer_reason}\n"
@@ -542,6 +555,28 @@ async def create_activity_keyboard(
             # Кнопка бана - усилить наказание
             InlineKeyboardButton(
                 text="🚫 Забанить",
+                callback_data=f"ban_user_{user_id}_{chat_id}"
+            )
+        ])
+
+    # Кнопки для автомута скаммера - unmute, mute 7d, ban
+    elif event_type == "AUTO_MUTE_SCAMMER":
+        user_id = user_data.get('user_id')
+        chat_id = group_data.get('chat_id')
+        buttons.append([
+            # Кнопка размутить - если это не скаммер, можно снять ограничения
+            InlineKeyboardButton(
+                text="🔓 Unmute",
+                callback_data=f"unmute_user_{user_id}_{chat_id}"
+            ),
+            # Кнопка мут на 7 дней - ограничить на неделю
+            InlineKeyboardButton(
+                text="🔇 Mute 7d",
+                callback_data=f"mute7d_user_{user_id}_{chat_id}"
+            ),
+            # Кнопка бана - забанить если точно скаммер
+            InlineKeyboardButton(
+                text="🚫 Ban",
                 callback_data=f"ban_user_{user_id}_{chat_id}"
             )
         ])
