@@ -203,6 +203,14 @@ class FilterManager:
         # Получаем user_id для детекторов
         user_id = message.from_user.id if message.from_user else 0
 
+        # ─────────────────────────────────────────────────────────
+        # Пропускаем сообщения от Telegram (ID 777000)
+        # Это пересылки из каналов — не нужно проверять на спам
+        # ─────────────────────────────────────────────────────────
+        if user_id == 777000:
+            logger.debug(f"[FilterManager] ⏭️ Пропуск: user_id=777000 (Telegram forward)")
+            return FilterResult(should_act=False)
+
         # Определяем тип медиа (для медиа-флуда)
         # Поддерживаются ВСЕ типы медиа из Telegram API
         media_type: Optional[str] = None
