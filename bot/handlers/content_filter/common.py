@@ -62,8 +62,12 @@ class AddWordStates(StatesGroup):
 
 class AddPatternStates(StatesGroup):
     """Состояния FSM для добавления паттерна скама."""
+    # Ожидание выбора типа паттерна (phrase/regex)
+    waiting_for_type = State()
     # Ожидание ввода паттерна от пользователя
     waiting_for_pattern = State()
+    # Ожидание ввода веса после preview
+    waiting_for_weight = State()
     # Ожидание текста для импорта
     waiting_for_import_text = State()
 
@@ -201,6 +205,7 @@ class AddSectionStates(StatesGroup):
 
 class AddSectionPatternStates(StatesGroup):
     """FSM состояния для добавления паттерна в раздел."""
+    waiting_for_type = State()  # Выбор типа: phrase/regex
     waiting_for_pattern = State()
     waiting_for_weight = State()
 

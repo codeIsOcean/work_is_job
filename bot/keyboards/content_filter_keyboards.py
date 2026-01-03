@@ -2223,6 +2223,52 @@ def create_import_preview_menu(
 
 
 # ============================================================
+# ВЫБОР ТИПА ПАТТЕРНА
+# ============================================================
+
+def create_pattern_type_menu(
+    chat_id: int
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню выбора типа паттерна.
+
+    Типы:
+    - phrase: Фраза (fuzzy matching) - текущее поведение
+    - regex: Регулярное выражение - точный контроль
+
+    Args:
+        chat_id: ID группы
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура выбора типа
+    """
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📝 Фраза (fuzzy)",
+                    callback_data=f"cf:scpat:phrase:{chat_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⚙️ Regex (точный)",
+                    callback_data=f"cf:scpat:regex:{chat_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI_BACK} Отмена",
+                    callback_data=f"cf:scp:{chat_id}"
+                )
+            ]
+        ]
+    )
+
+    return keyboard
+
+
+# ============================================================
 # ОТМЕНА FSM (добавление паттерна)
 # ============================================================
 
@@ -3026,6 +3072,44 @@ def create_cancel_section_input_menu(
                 InlineKeyboardButton(
                     text=f"{EMOJI_BACK} Отмена",
                     callback_data=f"cf:sccat:{chat_id}"
+                )
+            ]
+        ]
+    )
+
+    return keyboard
+
+
+def create_section_pattern_type_menu(
+    section_id: int
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню выбора типа паттерна для раздела.
+
+    Args:
+        section_id: ID раздела
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура выбора типа
+    """
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📝 Фраза (fuzzy)",
+                    callback_data=f"cf:secpat:phrase:{section_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⚙️ Regex (точный)",
+                    callback_data=f"cf:secpat:regex:{section_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI_BACK} Отмена",
+                    callback_data=f"cf:secp:{section_id}:0"
                 )
             ]
         ]

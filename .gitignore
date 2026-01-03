@@ -146,7 +146,6 @@ secrets/
 
 # Документация с конфиденциальной информацией
 docs/
-CLAUDE.md
 BOT_TROUBLESHOOTING_GUIDE.md
 PROBLEM_ANALYSIS.md
 SYNC_LOCAL_SERVER.md

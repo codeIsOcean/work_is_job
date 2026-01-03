@@ -11,6 +11,9 @@
 # Вынесено из settings_handler.py для соблюдения SRP (Правило 30)
 # ============================================================
 
+# Импортируем re для валидации regex
+import re
+
 # Импортируем Router и F для фильтров
 from aiogram import Router, F
 # Импортируем типы
@@ -26,7 +29,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # Импортируем клавиатуры
 from bot.keyboards.content_filter_keyboards import (
     create_section_patterns_menu,
-    create_cancel_section_pattern_input_menu
+    create_cancel_section_pattern_input_menu,
+    create_section_pattern_type_menu
 )
 
 # Импортируем общие объекты
@@ -43,7 +47,7 @@ from bot.services.content_filter.scam_pattern_service import get_section_service
 # Импортируем сервис паттернов для extract_patterns_from_text
 from bot.services.content_filter import get_pattern_service
 # Импортируем нормализатор для показа нормализованного вида паттерна
-from bot.services.content_filter.text_normalizer import get_normalizer
+from bot.services.content_filter.text_normalizer import get_normalizer, generate_catch_examples
 
 # Создаём роутер для паттернов
 patterns_router = Router(name='sections_patterns')
@@ -138,7 +142,7 @@ async def start_add_section_pattern(
     state: FSMContext
 ) -> None:
     """
-    Начинает FSM для добавления паттерна в раздел.
+    Начинает FSM для добавления паттерна в раздел - показывает выбор типа.
 
     Callback: cf:secpa:{section_id}
     """
@@ -150,14 +154,64 @@ async def start_add_section_pattern(
         bot_message_id=callback.message.message_id,
         bot_chat_id=callback.message.chat.id
     )
-    await state.set_state(AddSectionPatternStates.waiting_for_pattern)
+    await state.set_state(AddSectionPatternStates.waiting_for_type)
 
     text = (
         f"📝 <b>Добавление паттерна</b>\n\n"
-        f"Отправьте фразу или слово для детекции.\n\n"
-        f"<i>Можно отправить несколько фраз, каждую с новой строки.</i>\n\n"
-        f"После ввода вы сможете указать вес паттерна."
+        f"Выберите тип паттерна:\n\n"
+        f"📝 <b>Фраза (fuzzy)</b> — ищет похожий текст\n"
+        f"<i>Пример: «травка» найдёт «тр@вк@», «травку»</i>\n\n"
+        f"⚙️ <b>Regex (точный)</b> — регулярное выражение\n"
+        f"<i>Пример: \\bтравк[ауие]\\b — точное слово</i>"
     )
+
+    keyboard = create_section_pattern_type_menu(section_id)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@patterns_router.callback_query(F.data.regexp(r"^cf:secpat:(phrase|regex):\d+$"))
+async def select_section_pattern_type(
+    callback: CallbackQuery,
+    state: FSMContext
+) -> None:
+    """
+    Обрабатывает выбор типа паттерна для раздела.
+
+    Callback: cf:secpat:{type}:{section_id}
+    """
+    parts = callback.data.split(":")
+    pattern_type = parts[2]  # phrase или regex
+    section_id = int(parts[3])
+
+    # Сохраняем тип в FSM
+    await state.update_data(pattern_type=pattern_type)
+    await state.set_state(AddSectionPatternStates.waiting_for_pattern)
+
+    # Текст зависит от типа
+    if pattern_type == 'regex':
+        text = (
+            f"⚙️ <b>Добавление Regex паттерна</b>\n\n"
+            f"Отправьте регулярное выражение.\n"
+            f"Можно несколько, каждое с новой строки.\n\n"
+            f"<b>Примеры:</b>\n"
+            f"<code>\\bтравк[ауие]\\b</code> — слово травка/травку/травки\n"
+            f"<code>\\bгаш(иш)?\\b</code> — гаш или гашиш\n"
+            f"<code>\\d{{3,}}\\$</code> — сумма от 100$\n\n"
+            f"После ввода вы сможете указать вес."
+        )
+    else:
+        text = (
+            f"📝 <b>Добавление паттерна</b>\n\n"
+            f"Отправьте фразу или слово для детекции.\n\n"
+            f"<i>Можно отправить несколько фраз, каждую с новой строки.</i>\n\n"
+            f"После ввода вы сможете указать вес паттерна."
+        )
 
     keyboard = create_cancel_section_pattern_input_menu(section_id)
 
@@ -218,23 +272,59 @@ async def process_section_pattern(
     # Получаем нормализатор для показа как паттерн будет выглядеть в БД
     normalizer = get_normalizer()
 
+    # Получаем тип паттерна из FSM
+    selected_type = data.get('pattern_type', 'phrase')
+    is_regex = (selected_type == 'regex')
+
     # Сохраняем паттерны в FSM и переходим к вводу веса
     await state.update_data(pending_patterns=patterns)
     await state.set_state(AddSectionPatternStates.waiting_for_weight)
 
-    # Формируем превью с показом нормализованного вида
-    text = f"📝 <b>Превью паттернов</b>\n\n"
+    # Формируем превью
+    if is_regex:
+        text = f"⚙️ <b>Превью Regex паттернов</b>\n\n"
+    else:
+        text = f"📝 <b>Превью паттернов</b>\n\n"
+
+    invalid_count = 0
     for i, p in enumerate(patterns[:10], 1):
-        # Нормализуем паттерн для показа как он будет искаться
+        # Нормализуем паттерн для показа
         normalized = normalizer.normalize(p).lower().strip()
-        # Показываем оригинал → нормализованный вид
-        text += f"{i}. <code>{normalized}</code>\n"
-        # Если оригинал отличается - показываем его мелким шрифтом
-        if p != normalized:
-            text += f"   <i>(из: {p[:30]}{'...' if len(p) > 30 else ''})</i>\n"
+
+        if is_regex:
+            # Для regex - показываем как есть и проверяем валидность
+            try:
+                re.compile(p)
+                text += f"{i}. <code>{p}</code> ✓\n"
+            except re.error as e:
+                text += f"{i}. <code>{p}</code> ❌ <i>(ошибка: {str(e)[:30]})</i>\n"
+                invalid_count += 1
+                continue
+
+            # Показываем как правильно записать и что будет ловиться
+            if p != normalized and not any(c in p for c in r'\[](){}*+?.^$|'):
+                # Это не regex-синтаксис, а простое слово - показываем подсказку
+                text += f"   💡 <i>Запишите как: <code>{normalized}</code></i>\n"
+                examples = generate_catch_examples(normalized, max_examples=6)
+                if examples:
+                    examples_str = ', '.join(examples[:6])
+                    text += f"   📋 <i>Ловит: {examples_str}</i>\n"
+        else:
+            # Для фразы - показываем нормализованный вид
+            text += f"{i}. <code>{normalized}</code>\n"
+            if p != normalized:
+                text += f"   <i>(из: {p[:30]}{'...' if len(p) > 30 else ''})</i>\n"
+            # Показываем примеры что будет ловиться
+            examples = generate_catch_examples(normalized, max_examples=6)
+            if examples and len(normalized) <= 15:
+                examples_str = ', '.join(examples[:6])
+                text += f"   📋 <i>Ловит: {examples_str}</i>\n"
 
     if len(patterns) > 10:
         text += f"\n<i>...и ещё {len(patterns) - 10} паттернов</i>\n"
+
+    if invalid_count > 0:
+        text += f"\n⚠️ <b>Невалидных regex: {invalid_count}</b> (будут пропущены)\n"
 
     text += (
         f"\n<b>Всего:</b> {len(patterns)} паттернов\n\n"
@@ -246,8 +336,10 @@ async def process_section_pattern(
         f"• 200+ — 100% спам</i>"
     )
 
+    # Кнопка "◀️ Назад" возвращает к вводу паттерна
+    pattern_type = 'regex' if is_regex else 'phrase'
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ Назад", callback_data=f"cf:secp:{section_id}:0")]
+        [InlineKeyboardButton(text="◀️ Назад", callback_data=f"cf:secpat:{pattern_type}:{section_id}")]
     ])
 
     try:
@@ -276,6 +368,9 @@ async def process_section_pattern_weight(
     bot_message_id = data.get('bot_message_id')
     bot_chat_id = data.get('bot_chat_id')
     patterns = data.get('pending_patterns', [])
+    # Получаем тип паттерна из FSM (phrase → phrase, regex → regex)
+    selected_type = data.get('pattern_type', 'phrase')
+    db_pattern_type = 'regex' if selected_type == 'regex' else 'phrase'
 
     # Удаляем сообщение пользователя
     try:
@@ -324,37 +419,55 @@ async def process_section_pattern_weight(
     section_service = get_section_service()
     added = 0
     skipped = 0
+    invalid_regex = 0
     # Храним кортежи (ID, нормализованный_паттерн)
     added_patterns = []
 
     for pattern in patterns:
+        # Для regex проверяем валидность
+        if db_pattern_type == 'regex':
+            try:
+                re.compile(pattern)
+            except re.error as e:
+                logger.warning(f"Невалидный regex '{pattern}': {e}")
+                invalid_regex += 1
+                continue
+
         # add_section_pattern возвращает (success, pattern_id, error)
         success, pattern_id, error = await section_service.add_section_pattern(
             section_id=section_id,
             pattern=pattern,
             session=session,
+            pattern_type=db_pattern_type,
             weight=weight,
             created_by=message.from_user.id
         )
         if success:
             added += 1
-            # Нормализуем для отображения (такой же как в БД)
-            normalized = normalizer.normalize(pattern).lower().strip()
-            # Сохраняем ID и нормализованный паттерн
-            added_patterns.append((pattern_id, normalized))
+            # Для regex показываем как есть, для phrase - нормализованный
+            if db_pattern_type == 'regex':
+                display_pattern = pattern
+            else:
+                display_pattern = normalizer.normalize(pattern).lower().strip()
+            # Сохраняем ID и паттерн для отображения
+            added_patterns.append((pattern_id, display_pattern))
         else:
             skipped += 1
 
-    # Формируем ответ с показом ID и нормализованных паттернов
+    # Формируем ответ с показом ID и паттернов
+    type_label = "regex" if db_pattern_type == 'regex' else "фраз"
     if added > 0:
-        text = f"✅ <b>Добавлено паттернов: {added}</b> (вес: {weight})\n\n"
-        for pattern_id, normalized in added_patterns[:10]:
-            # Показываем ID и нормализованный паттерн
-            text += f"#{pattern_id}: <code>{normalized}</code>\n"
+        text = f"✅ <b>Добавлено {type_label}-паттернов: {added}</b> (вес: {weight})\n\n"
+        for pattern_id, display in added_patterns[:10]:
+            text += f"#{pattern_id}: <code>{display}</code>\n"
         if len(added_patterns) > 10:
             text += f"\n<i>...и ещё {len(added_patterns) - 10}</i>\n"
         if skipped > 0:
             text += f"\n<i>Пропущено (дубликаты): {skipped}</i>"
+        if invalid_regex > 0:
+            text += f"\n<i>Невалидных regex: {invalid_regex}</i>"
+    elif invalid_regex > 0:
+        text = f"❌ Все regex невалидны ({invalid_regex})"
     else:
         text = f"⚠️ Все паттерны уже существуют"
 

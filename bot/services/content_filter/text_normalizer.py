@@ -617,3 +617,118 @@ def get_normalizer() -> TextNormalizer:
     if _normalizer_instance is None:
         _normalizer_instance = TextNormalizer()
     return _normalizer_instance
+
+
+# ============================================================
+# ГЕНЕРАЦИЯ ПРИМЕРОВ СЛОВ КОТОРЫЕ БУДУТ ЛОВИТЬСЯ
+# ============================================================
+
+def generate_catch_examples(normalized: str, max_examples: int = 10) -> list[str]:
+    """
+    Генерирует примеры слов которые будут пойманы regex паттерном.
+
+    Args:
+        normalized: Нормализованное слово (кириллица)
+        max_examples: Максимальное количество примеров
+
+    Returns:
+        Список примеров слов которые будут пойманы
+
+    Example:
+        >>> generate_catch_examples("травка")
+        ['травка', 'travka', 'tr4vka', 'травки', ...]
+    """
+    if not normalized or len(normalized) < 2:
+        return [normalized] if normalized else []
+
+    examples = set()
+
+    # 1. Оригинал кириллицей
+    examples.add(normalized)
+
+    # 2. Латиницей (транслит)
+    latin = _to_latin(normalized)
+    if latin:
+        examples.add(latin)
+
+    # 3. С удвоением букв латиницей (travvka)
+    if latin:
+        latin_doubled = _double_consonant(latin)
+        if latin_doubled:
+            examples.add(latin_doubled)
+
+    # 4. С @ вместо а
+    with_at = normalized.replace('а', '@')
+    if with_at != normalized:
+        examples.add(with_at)
+
+    # 5. С 0 вместо о
+    with_zero = normalized.replace('о', '0')
+    if with_zero != normalized:
+        examples.add(with_zero)
+
+    # 6. Латиница с цифрами
+    if latin:
+        latin_leet = latin.replace('a', '4').replace('o', '0')
+        if latin_leet != latin:
+            examples.add(latin_leet)
+
+    # 7. Вариации окончаний (травка → травки, травку)
+    endings = [('а', 'и'), ('а', 'у'), ('а', 'ой'), ('о', 'а'), ('о', 'и')]
+    for old_end, new_end in endings:
+        if normalized.endswith(old_end):
+            variant = normalized[:-len(old_end)] + new_end
+            examples.add(variant)
+            if len(examples) >= max_examples:
+                break
+
+    # 8. Латиница с вариациями окончаний
+    if latin and len(examples) < max_examples:
+        lat_endings = [('a', 'i'), ('a', 'u'), ('a', 'oy'), ('o', 'a')]
+        for old_end, new_end in lat_endings:
+            if latin.endswith(old_end):
+                variant = latin[:-len(old_end)] + new_end
+                examples.add(variant)
+                if len(examples) >= max_examples:
+                    break
+
+    # Сортируем: сначала короткие
+    result = sorted(examples, key=lambda x: (len(x), x))
+    return result[:max_examples]
+
+
+def _to_latin(cyrillic: str) -> Optional[str]:
+    """Преобразует кириллицу в латиницу (простой транслит)."""
+    cyr_to_lat = {
+        'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd',
+        'е': 'e', 'ё': 'e', 'ж': 'zh', 'з': 'z', 'и': 'i',
+        'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm', 'н': 'n',
+        'о': 'o', 'п': 'p', 'р': 'r', 'с': 's', 'т': 't',
+        'у': 'u', 'ф': 'f', 'х': 'h', 'ц': 'ts', 'ч': 'ch',
+        'ш': 'sh', 'щ': 'sch', 'ъ': '', 'ы': 'y', 'ь': '',
+        'э': 'e', 'ю': 'yu', 'я': 'ya'
+    }
+    result = []
+    for char in cyrillic:
+        if char in cyr_to_lat:
+            result.append(cyr_to_lat[char])
+        else:
+            result.append(char)
+    return ''.join(result) if result else None
+
+
+def _double_consonant(text: str) -> Optional[str]:
+    """Удваивает одну согласную в слове (travka → travvka)."""
+    if not text or len(text) < 3:
+        return None
+
+    # Согласные которые часто удваивают
+    consonants = set('bdfgklmnprstvz')
+
+    result = list(text)
+    # Ищем согласную в середине слова
+    for i in range(1, len(text) - 1):
+        if text[i].lower() in consonants:
+            result.insert(i + 1, text[i])
+            return ''.join(result)
+    return None
