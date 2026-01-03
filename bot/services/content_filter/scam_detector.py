@@ -270,6 +270,17 @@ def fuzzy_match(text: str, pattern: str, threshold: float = 0.8) -> bool:
     if pattern_len < 3:
         return pattern_lower in text_lower
 
+    # ─────────────────────────────────────────────────────────
+    # ФИКС БАГА (2026-01-03): проверяем минимальную длину ТЕКСТА
+    # ─────────────────────────────────────────────────────────
+    # partial_ratio ищет короткую строку внутри длинной.
+    # Когда text="Я" (1 символ), partial_ratio("обменяю usdt", "я") = 100%
+    # потому что буква "я" есть в слове "обменЯю".
+    # Это приводило к false positive: score=4870 для сообщения "Я".
+    # Для коротких текстов fuzzy matching не имеет смысла — используем точное вхождение.
+    if len(text_lower) < 4:
+        return pattern_lower in text_lower
+
     # Конвертируем threshold из 0.0-1.0 в 0-100 (rapidfuzz использует 0-100)
     threshold_100 = threshold * 100
 
@@ -333,6 +344,16 @@ def fuzzy_match_batch(text: str, patterns: List[str], threshold: float = 0.8) ->
     threshold_100 = threshold * 100
     words = text_lower.split()
     results = []
+
+    # ─────────────────────────────────────────────────────────
+    # ФИКС БАГА (2026-01-03): проверяем минимальную длину ТЕКСТА
+    # ─────────────────────────────────────────────────────────
+    # Если текст слишком короткий — только точное вхождение для всех паттернов
+    if len(text_lower) < 4:
+        for pattern in patterns:
+            pattern_lower = pattern.lower()
+            results.append(pattern_lower in text_lower)
+        return results
 
     for pattern in patterns:
         pattern_lower = pattern.lower()
