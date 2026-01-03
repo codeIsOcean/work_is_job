@@ -6,10 +6,12 @@
 # - /unrepin - отключить автозакреп
 #
 # Команды работают только в группах и только для админов.
+# Поддерживаются анонимные админы (sender_chat == chat).
 # ============================================================
 
 # Импортируем логгер для записи событий
 import logging
+import asyncio
 
 # Импортируем типы из aiogram
 from aiogram import Router, F
@@ -56,20 +58,34 @@ async def cmd_repin(message: Message, session: AsyncSession) -> None:
         message: Сообщение с командой
         session: Асинхронная сессия SQLAlchemy
     """
-    # Получаем ID группы и пользователя
+    # Получаем ID группы
     chat_id = message.chat.id
-    user_id = message.from_user.id
 
     # ─────────────────────────────────────────────────────────
     # ПРОВЕРКА: пользователь — администратор?
+    # Поддерживаем анонимных админов (sender_chat == chat)
     # ─────────────────────────────────────────────────────────
-    if not await is_user_admin(message.bot, chat_id, user_id):
-        # Не админ — не отвечаем (тихий отказ)
-        logger.debug(
-            f"[MessageManagement] /repin от не-админа: "
-            f"user_id={user_id}, chat_id={chat_id}"
-        )
-        return
+    # Проверяем: если сообщение от имени группы (sender_chat == chat),
+    # значит это анонимный админ — у него точно есть права
+    is_anonymous_admin = (
+        message.sender_chat is not None and
+        message.sender_chat.id == chat_id
+    )
+
+    if is_anonymous_admin:
+        # Анонимный админ — пропускаем проверку прав
+        user_id = None
+        logger.debug(f"[MessageManagement] /repin от анонимного админа: chat_id={chat_id}")
+    else:
+        # Обычный пользователь — проверяем права
+        user_id = message.from_user.id if message.from_user else None
+        if not user_id or not await is_user_admin(message.bot, chat_id, user_id):
+            # Не админ — не отвечаем (тихий отказ)
+            logger.debug(
+                f"[MessageManagement] /repin от не-админа: "
+                f"user_id={user_id}, chat_id={chat_id}"
+            )
+            return
 
     # ─────────────────────────────────────────────────────────
     # ПРОВЕРКА: команда вызвана в ответ на сообщение?
@@ -92,7 +108,6 @@ async def cmd_repin(message: Message, session: AsyncSession) -> None:
             pass
 
         # Планируем удаление подсказки
-        import asyncio
         asyncio.create_task(_delete_message_delayed(hint_msg, 10))
 
         return
@@ -136,7 +151,6 @@ async def cmd_repin(message: Message, session: AsyncSession) -> None:
         pass
 
     # Удаляем подтверждение через 10 секунд
-    import asyncio
     asyncio.create_task(_delete_message_delayed(confirm_msg, 10))
 
 
@@ -159,20 +173,34 @@ async def cmd_unrepin(message: Message, session: AsyncSession) -> None:
         message: Сообщение с командой
         session: Асинхронная сессия SQLAlchemy
     """
-    # Получаем ID группы и пользователя
+    # Получаем ID группы
     chat_id = message.chat.id
-    user_id = message.from_user.id
 
     # ─────────────────────────────────────────────────────────
     # ПРОВЕРКА: пользователь — администратор?
+    # Поддерживаем анонимных админов (sender_chat == chat)
     # ─────────────────────────────────────────────────────────
-    if not await is_user_admin(message.bot, chat_id, user_id):
-        # Не админ — не отвечаем (тихий отказ)
-        logger.debug(
-            f"[MessageManagement] /unrepin от не-админа: "
-            f"user_id={user_id}, chat_id={chat_id}"
-        )
-        return
+    # Проверяем: если сообщение от имени группы (sender_chat == chat),
+    # значит это анонимный админ — у него точно есть права
+    is_anonymous_admin = (
+        message.sender_chat is not None and
+        message.sender_chat.id == chat_id
+    )
+
+    if is_anonymous_admin:
+        # Анонимный админ — пропускаем проверку прав
+        user_id = None
+        logger.debug(f"[MessageManagement] /unrepin от анонимного админа: chat_id={chat_id}")
+    else:
+        # Обычный пользователь — проверяем права
+        user_id = message.from_user.id if message.from_user else None
+        if not user_id or not await is_user_admin(message.bot, chat_id, user_id):
+            # Не админ — не отвечаем (тихий отказ)
+            logger.debug(
+                f"[MessageManagement] /unrepin от не-админа: "
+                f"user_id={user_id}, chat_id={chat_id}"
+            )
+            return
 
     # ─────────────────────────────────────────────────────────
     # ОТКЛЮЧАЕМ РЕПИН В БД
@@ -204,7 +232,6 @@ async def cmd_unrepin(message: Message, session: AsyncSession) -> None:
         pass
 
     # Удаляем подтверждение через 10 секунд
-    import asyncio
     asyncio.create_task(_delete_message_delayed(confirm_msg, 10))
 
 
@@ -220,8 +247,6 @@ async def _delete_message_delayed(message: Message, delay_seconds: int) -> None:
         message: Сообщение для удаления
         delay_seconds: Задержка в секундах
     """
-    import asyncio
-
     try:
         # Ждём указанное время
         await asyncio.sleep(delay_seconds)
