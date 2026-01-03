@@ -103,6 +103,9 @@ class FilterResult(NamedTuple):
     # CAS и БД спаммеров (для custom_section)
     cas_banned: bool = False
     added_to_spammer_db: bool = False
+    # Детальная информация о сработавших паттернах (для custom_section)
+    # Список словарей: [{'pattern': str, 'method': str, 'weight': int, 'context': str}, ...]
+    matched_patterns: Optional[List[dict]] = None
 
 
 class FilterManager:
@@ -471,7 +474,11 @@ class FilterManager:
 
                     # Вычисляем общий скор по паттернам
                     total_score = 0
+                    # Список строк для обратной совместимости (trigger)
                     triggered_patterns = []
+                    # Детальная информация о каждом паттерне для журнала
+                    # Формат: [{'pattern': str, 'method': str, 'weight': int, 'context': str}, ...]
+                    matched_patterns_detailed = []
 
                     # Предварительно извлекаем n-граммы из текста для n-gram matching
                     text_bigrams = extract_ngrams(normalized_text, n=2)
@@ -529,6 +536,14 @@ class FilterManager:
                                 if match_context:
                                     trigger_info += f" → найдено в: «{match_context}»"
                                 triggered_patterns.append(trigger_info)
+
+                                # Добавляем детальную информацию о паттерне для журнала
+                                matched_patterns_detailed.append({
+                                    'pattern': pattern.pattern,
+                                    'method': match_method,
+                                    'weight': pattern.weight,
+                                    'context': match_context or ''
+                                })
 
                                 # Увеличиваем счётчик срабатываний
                                 await section_service.increment_pattern_trigger(pattern.id, session)
@@ -633,6 +648,14 @@ class FilterManager:
                             if match_context:
                                 trigger_info += f" → найдено в: «{match_context}»"
                             triggered_patterns.append(trigger_info)
+
+                            # Добавляем детальную информацию о паттерне для журнала
+                            matched_patterns_detailed.append({
+                                'pattern': pattern.pattern,
+                                'method': match_method,
+                                'weight': pattern.weight,
+                                'context': match_context or ''
+                            })
 
                             # Увеличиваем счётчик срабатываний
                             await section_service.increment_pattern_trigger(pattern.id, session)
@@ -767,7 +790,9 @@ class FilterManager:
                             custom_notification_delay=section.notification_delete_delay,
                             # CAS и БД спаммеров
                             cas_banned=cas_banned,
-                            added_to_spammer_db=added_to_spammer_db
+                            added_to_spammer_db=added_to_spammer_db,
+                            # Детальная информация о паттернах для журнала
+                            matched_patterns=matched_patterns_detailed
                         )
 
         # ─────────────────────────────────────────────────────────

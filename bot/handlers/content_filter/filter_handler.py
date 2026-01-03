@@ -1111,10 +1111,42 @@ async def _send_journal_log(
     elif result.detector_type == 'custom_section':
         # Название раздела
         section_name = result.section_name or 'Раздел'
-        # Триггеры (паттерны которые сработали)
-        trigger_safe = html.escape(result.trigger[:100] if result.trigger else 'N/A')
         # Скор
         score_text = f" (score: {result.scam_score})" if result.scam_score else ""
+
+        # ─── Формируем ссылку на группу ───
+        chat = message.chat
+        chat_title = chat.title or chat.username or f"ID: {chat_id}"
+        chat_title_safe = html.escape(chat_title)
+        # Формируем ссылку на группу: если есть username — https://t.me/..., иначе tg://
+        if chat.username:
+            group_link = f'<a href="https://t.me/{chat.username}">{chat_title_safe}</a>'
+            group_link += f" [@{chat.username}]"
+        else:
+            group_link = f'<a href="tg://openmessage?chat_id={str(chat_id).replace("-100", "")}">{chat_title_safe}</a>'
+        group_link += f" [{chat_id}]"
+
+        # ─── Формируем паттерны построчно с весами ───
+        patterns_text = ""
+        if result.matched_patterns:
+            # Форматируем каждый паттерн на отдельной строке
+            for p in result.matched_patterns:
+                pattern_safe = html.escape(p.get('pattern', ''))
+                method = p.get('method', 'phrase')
+                weight = p.get('weight', 0)
+                context = p.get('context', '')
+                # Обрезаем контекст если слишком длинный
+                if len(context) > 50:
+                    context = context[:50] + '...'
+                context_safe = html.escape(context)
+                # Форматируем строку паттерна
+                patterns_text += f"\n• <code>{pattern_safe}</code> [{method}] <b>[{weight}]</b>"
+                if context_safe:
+                    patterns_text += f" → «{context_safe}»"
+        else:
+            # Fallback на старый формат если matched_patterns не заполнен
+            trigger_safe = html.escape(result.trigger[:100] if result.trigger else 'N/A')
+            patterns_text = f"\n<code>{trigger_safe}</code>"
 
         # Полный текст сообщения
         original_text = message.text or message.caption or ''
@@ -1138,11 +1170,12 @@ async def _send_journal_log(
         if result.added_to_spammer_db:
             extra_info += "\n📋 <b>БД:</b> добавлен в базу спамеров"
 
-        # Формируем текст для журнала
+        # Формируем текст для журнала с группой и детальными паттернами
         journal_text = (
             f"📂 <b>Раздел: {html.escape(section_name)}</b>{score_text}\n\n"
             f"👤 {user_link} [<code>{user_id}</code>]\n"
-            f"🔎 Паттерны: <code>{trigger_safe}</code>\n"
+            f"🏢 {group_link}\n\n"
+            f"🔎 <b>Паттерны:</b>{patterns_text}\n\n"
             f"💬 <b>Текст:</b>\n<i>{original_safe}</i>\n\n"
             f"⚡ {action_text}{extra_info}\n"
             f"🕐 {time_str}"
