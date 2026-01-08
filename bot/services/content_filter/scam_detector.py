@@ -281,6 +281,18 @@ def fuzzy_match(text: str, pattern: str, threshold: float = 0.8) -> bool:
     if len(text_lower) < 4:
         return pattern_lower in text_lower
 
+    # ─────────────────────────────────────────────────────────
+    # ФИКС БАГА (2026-01-08): проверяем СООТНОШЕНИЕ длин текста и паттерна
+    # ─────────────────────────────────────────────────────────
+    # partial_ratio("есть зелёная белый", "есть") = 100%, потому что
+    # "есть" полностью содержится в паттерне как подстрока.
+    # Это приводило к false positive: текст "Есть" матчился с длинными
+    # паттернами типа "есть зелёная белый", "меня есть зелёная" и т.д.
+    # Если текст значительно короче паттерна (<50% длины) — это не fuzzy match,
+    # а просто совпадение одного слова из паттерна. Используем точное вхождение.
+    if len(text_lower) < len(pattern_lower) * 0.5:
+        return pattern_lower in text_lower
+
     # Конвертируем threshold из 0.0-1.0 в 0-100 (rapidfuzz использует 0-100)
     threshold_100 = threshold * 100
 
@@ -355,11 +367,24 @@ def fuzzy_match_batch(text: str, patterns: List[str], threshold: float = 0.8) ->
             results.append(pattern_lower in text_lower)
         return results
 
+    # Длина текста — вычисляем один раз для всех паттернов
+    text_len = len(text_lower)
+
     for pattern in patterns:
         pattern_lower = pattern.lower()
         pattern_len = len(pattern_lower)
 
+        # Для коротких паттернов — только точное вхождение
         if pattern_len < 3:
+            results.append(pattern_lower in text_lower)
+            continue
+
+        # ─────────────────────────────────────────────────────────
+        # ФИКС БАГА (2026-01-08): проверяем СООТНОШЕНИЕ длин
+        # ─────────────────────────────────────────────────────────
+        # Если текст значительно короче паттерна (<50% длины) — только точное вхождение.
+        # Защита от false positive: "Есть" → "есть зелёная белый"
+        if text_len < pattern_len * 0.5:
             results.append(pattern_lower in text_lower)
             continue
 
