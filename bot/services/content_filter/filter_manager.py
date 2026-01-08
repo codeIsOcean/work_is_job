@@ -562,42 +562,64 @@ class FilterManager:
                         # МЕТОД 1: Точное совпадение подстроки
                         # Для КОРОТКИХ паттернов (< 5 символов) требуем границы слов
                         # чтобы избежать ложных срабатываний (weed→вед в "ведущая")
+                        # ВАЖНО: Проверяем и по normalized_text, и по text.lower()
+                        # чтобы английские паттерны работали с английским текстом
+                        # (normalizer транслитерирует англ→кириллица)
                         # ─────────────────────────────────────────────────────
                         pattern_norm_lower = pattern.normalized.lower()
+                        pattern_orig_lower = pattern.pattern.lower()
+                        text_lower = text.lower()
 
                         # Для коротких паттернов используем word boundaries
                         if len(pattern_norm_lower) < 5:
                             # Ищем как отдельное слово с границами \b
                             word_boundary_regex = r'\b' + re.escape(pattern_norm_lower) + r'\b'
                             match_obj = re.search(word_boundary_regex, normalized_text)
+                            source_text = normalized_text
+                            # Если не нашли в нормализованном — пробуем в оригинальном
+                            if not match_obj:
+                                word_boundary_regex_orig = r'\b' + re.escape(pattern_orig_lower) + r'\b'
+                                match_obj = re.search(word_boundary_regex_orig, text_lower)
+                                source_text = text_lower
                             if match_obj:
                                 matched = True
                                 match_method = 'phrase'
                                 pos = match_obj.start()
                                 # Берём контекст: 20 символов до и после
                                 start = max(0, pos - 20)
-                                end = min(len(normalized_text), pos + len(pattern_norm_lower) + 20)
-                                match_context = normalized_text[start:end]
+                                end = min(len(source_text), pos + len(pattern_norm_lower) + 20)
+                                match_context = source_text[start:end]
                                 if start > 0:
                                     match_context = "..." + match_context
-                                if end < len(normalized_text):
+                                if end < len(source_text):
                                     match_context = match_context + "..."
                         else:
                             # Для длинных паттернов - обычный поиск подстроки
+                            # Сначала ищем в нормализованном тексте
                             if pattern_norm_lower in normalized_text:
                                 matched = True
                                 match_method = 'phrase'
+                                source_text = normalized_text
+                                search_pattern = pattern_norm_lower
+                            # Если не нашли — ищем оригинальный паттерн в оригинальном тексте
+                            elif pattern_orig_lower in text_lower:
+                                matched = True
+                                match_method = 'phrase'
+                                source_text = text_lower
+                                search_pattern = pattern_orig_lower
+
+                            if matched and match_method == 'phrase':
                                 # Находим позицию совпадения для контекста
-                                pos = normalized_text.find(pattern_norm_lower)
+                                pos = source_text.find(search_pattern)
                                 if pos >= 0:
                                     # Берём контекст: 20 символов до и после
                                     start = max(0, pos - 20)
-                                    end = min(len(normalized_text), pos + len(pattern_norm_lower) + 20)
-                                    match_context = normalized_text[start:end]
+                                    end = min(len(source_text), pos + len(search_pattern) + 20)
+                                    match_context = source_text[start:end]
                                     # Добавляем маркер где именно совпадение
                                     if start > 0:
                                         match_context = "..." + match_context
-                                    if end < len(normalized_text):
+                                    if end < len(source_text):
                                         match_context = match_context + "..."
 
                         # ─────────────────────────────────────────────────────

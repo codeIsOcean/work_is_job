@@ -985,8 +985,10 @@ async def get_user_profile_data(
         if result["has_photo"]:
             photos = await pyrogram_service.get_profile_photos_dates(user_id)
             if photos and len(photos) > 0:
-                # Берём file_id первого (текущего) фото
-                result["photo_id"] = photos[0].get("file_id")
+                # Берём file_unique_id первого (текущего) фото
+                # ВАЖНО: Используем file_unique_id вместо file_id, т.к. file_id нестабилен
+                # и может меняться между запросами даже для одного и того же фото
+                result["photo_id"] = photos[0].get("file_unique_id") or photos[0].get("file_id")
 
         # Получаем возраст аккаунта
         age_info = await pyrogram_service.get_account_age(user_id)
