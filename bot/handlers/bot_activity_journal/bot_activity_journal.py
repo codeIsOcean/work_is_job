@@ -103,6 +103,51 @@ async def send_activity_log(
         logger.error(f"❌ Детали ошибки: {type(e).__name__}: {str(e)}")
 
 
+def format_user_link(user_id: int, first_name: str, last_name: str, username: str) -> str:
+    """
+    Форматирует кликабельную ссылку на пользователя.
+
+    Возвращает: <a href="tg://user?id=123">Имя</a> [@username] [123]
+    """
+    # Формируем отображаемое имя
+    display_name = f"{first_name} {last_name}".strip() or "Пользователь"
+
+    # Создаём кликабельную ссылку
+    user_link = f'<a href="tg://user?id={user_id}">{html.escape(display_name)}</a>'
+
+    # Добавляем username если есть
+    if username:
+        user_link += f" @{username}"
+
+    # Добавляем ID
+    user_link += f" [{user_id}]"
+
+    return user_link
+
+
+def format_group_display(group_data: Dict[str, Any]) -> str:
+    """
+    Форматирует отображение группы с кликабельной ссылкой.
+    """
+    group_title = group_data.get('title') or ''
+    group_username = group_data.get('username') or ''
+    group_id = group_data.get('chat_id', 'N/A')
+
+    display_title = group_title or (f"@{group_username}" if group_username else f"ID: {group_id}")
+
+    if group_username:
+        group_link = f"https://t.me/{group_username}"
+    else:
+        # Для приватных групп используем tg://openmessage
+        group_link = f"tg://openmessage?chat_id={str(group_id).replace('-100', '')}"
+
+    result = f'<a href="{html.escape(group_link)}">{html.escape(display_title)}</a>'
+    if group_username:
+        result += f" @{group_username}"
+
+    return result
+
+
 async def format_activity_message(
     event_type: str,
     user_data: Dict[str, Any],
@@ -111,42 +156,27 @@ async def format_activity_message(
     status: str = "success"
 ) -> str:
     """Форматирует сообщение для журнала активности"""
-    
+
     # Получаем текущее время в UTC+4 (Asia/Dubai эквивалент)
     dubai_timezone = dt_timezone(timedelta(hours=4))
-    current_time = datetime.now(dubai_timezone).strftime("%Y-%m-%d %H:%M:%S")
-    
-    # Формируем информацию о пользователе
+    current_time = datetime.now(dubai_timezone).strftime("%H:%M:%S")
+
+    # Формируем информацию о пользователе (с кликабельной ссылкой)
     user_id = user_data.get('user_id', 'N/A')
     username = user_data.get('username', '') or ''
     first_name = user_data.get('first_name', '') or ''
     last_name = user_data.get('last_name', '') or ''
-    
-    user_display = f"{first_name} {last_name}".strip()
-    if username:
-        user_display += f" [@{username}]"
-    user_display += f" [{user_id}]"
-    
-    # Формируем информацию о группе
-    group_title = group_data.get('title')
-    group_username = group_data.get('username') or ''
+
+    # Кликабельная ссылка на пользователя
+    user_display = format_user_link(user_id, first_name, last_name, username)
+
+    # Формируем информацию о группе (с кликабельной ссылкой)
     group_id = group_data.get('chat_id', 'N/A')
-    
-    display_title = group_title or (f"@{group_username}" if group_username else f"ID: {group_id}")
-    
-    if group_username:
-        group_link = f"https://t.me/{group_username}"
-    else:
-        group_link = f"tg://openmessage?chat_id={group_id}"
-    
-    group_display = f"<a href='{html.escape(group_link)}'>{html.escape(display_title)}</a>"
-    if group_username:
-        group_display += f" [@{group_username}]"
-    group_display += f" [{group_id}]"
-    
-    # Определяем цвет статуса
+    group_display = format_group_display(group_data)
+
+    # Определяем эмодзи статуса
     status_emoji = "🟢" if status == "success" else "🔴"
-    
+
     # Формируем сообщение в зависимости от типа события
     if event_type == "ЗАПРОС_НА_ВСТУПЛЕНИЕ":
         message = f"📬 #{event_type} {status_emoji}\n\n"
@@ -510,15 +540,40 @@ async def create_activity_keyboard(
         ])
         
     elif event_type == "НовыйПользователь":
-        # Кнопки для нового пользователя
+        # Кнопки для нового пользователя: Мут 7д, Мут навсегда, Бан
+        user_id = user_data.get('user_id')
+        chat_id = group_data.get('chat_id')
         buttons.append([
             InlineKeyboardButton(
-                text="🔇 Мут",
-                callback_data=f"mute_user_{user_data.get('user_id')}_{group_data.get('chat_id')}"
+                text="🔇 Мут 7д",
+                callback_data=f"mute7d_user_{user_id}_{chat_id}"
+            ),
+            InlineKeyboardButton(
+                text="🔇 Мут ∞",
+                callback_data=f"mute_user_{user_id}_{chat_id}"
             ),
             InlineKeyboardButton(
                 text="🚫 Бан",
-                callback_data=f"ban_user_{user_data.get('user_id')}_{group_data.get('chat_id')}"
+                callback_data=f"ban_user_{user_id}_{chat_id}"
+            )
+        ])
+
+    elif event_type == "пользовательвышел":
+        # Кнопки для вышедшего пользователя: Мут 7д, Мут навсегда, Бан
+        user_id = user_data.get('user_id')
+        chat_id = group_data.get('chat_id')
+        buttons.append([
+            InlineKeyboardButton(
+                text="🔇 Мут 7д",
+                callback_data=f"mute7d_user_{user_id}_{chat_id}"
+            ),
+            InlineKeyboardButton(
+                text="🔇 Мут ∞",
+                callback_data=f"mute_user_{user_id}_{chat_id}"
+            ),
+            InlineKeyboardButton(
+                text="🚫 Бан",
+                callback_data=f"ban_user_{user_id}_{chat_id}"
             )
         ])
     
@@ -624,19 +679,74 @@ async def mute_user_callback(callback):
 
 @bot_activity_journal_router.callback_query(lambda c: c.data.startswith("ban_user_"))
 async def ban_user_callback(callback):
-    """Обработчик кнопки бана пользователя"""
+    """Обработчик кнопки бана пользователя (заглушка)"""
     try:
-        # Извлекаем данные из callback_data
         parts = callback.data.split("_")
         user_id = int(parts[2])
         group_id = int(parts[3])
-        
-        # Здесь можно добавить логику бана пользователя
-        await callback.answer("🚫 Пользователь забанен", show_alert=True)
-        
+
+        # TODO: реализовать бан
+        await callback.answer("🚫 Бан пока не реализован", show_alert=True)
+
     except Exception as e:
         logger.error(f"Ошибка при бане пользователя: {e}")
-        await callback.answer("❌ Ошибка при бане", show_alert=True)
+        await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
+
+
+@bot_activity_journal_router.callback_query(lambda c: c.data.startswith("mute7d_user_"))
+async def mute7d_user_callback(callback):
+    """
+    Обработчик кнопки мута на 7 дней.
+
+    Callback data формат: mute7d_user_{user_id}_{group_id}
+    """
+    try:
+        parts = callback.data.split("_")
+        user_id = int(parts[2])
+        group_id = int(parts[3])
+
+        from aiogram.types import ChatPermissions
+        from datetime import timedelta
+
+        # Мут на 7 дней
+        mute_permissions = ChatPermissions(
+            can_send_messages=False,
+            can_send_media_messages=False,
+            can_send_polls=False,
+            can_send_other_messages=False,
+            can_add_web_page_previews=False,
+            can_change_info=False,
+            can_invite_users=False,
+            can_pin_messages=False,
+        )
+
+        until_date = datetime.now(timezone.utc) + timedelta(days=7)
+
+        await callback.bot.restrict_chat_member(
+            chat_id=group_id,
+            user_id=user_id,
+            permissions=mute_permissions,
+            until_date=until_date
+        )
+
+        await callback.answer("🔇 Мут на 7 дней применён", show_alert=True)
+        logger.info(f"✅ Пользователь {user_id} замучен на 7 дней в группе {group_id}")
+
+        # Обновляем сообщение
+        try:
+            current_text = callback.message.text or callback.message.caption or ""
+            new_text = current_text + "\n\n🔇 <b>МУТ 7 ДНЕЙ</b> применён администратором"
+            await callback.message.edit_text(
+                text=new_text,
+                parse_mode="HTML",
+                reply_markup=None
+            )
+        except Exception as edit_err:
+            logger.warning(f"Не удалось обновить сообщение: {edit_err}")
+
+    except Exception as e:
+        logger.error(f"Ошибка при муте на 7 дней: {e}")
+        await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
 
 
 @bot_activity_journal_router.callback_query(lambda c: c.data.startswith("unmute_user_"))
