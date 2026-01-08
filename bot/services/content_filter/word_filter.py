@@ -142,6 +142,9 @@ class WordFilter:
         # Версия для obfuscated - полная нормализация (l33tspeak → кириллица)
         text_normalized = self._normalizer.normalize(text)
         text_words_normalized = self._normalizer.get_words_from_text(text)
+        # Версия БЕЗ пробелов - для contains/phrase в obfuscated
+        # Чтобы "Alice Demidova" → "алиседемидова" совпадало с паттерном
+        text_normalized_no_spaces = text_normalized.replace(' ', '')
 
         # ─────────────────────────────────────────────────────────
         # ШАГ 4: Проверяем каждое запрещённое слово
@@ -162,11 +165,15 @@ class WordFilter:
                 check_words = text_words_normalized
                 # Для obfuscated слово тоже должно быть нормализовано
                 check_filter_word = fw.normalized
+                # Текст без пробелов для contains/phrase
+                check_text_no_spaces = text_normalized_no_spaces
             else:
                 check_text = text_lower
                 check_words = text_words_lower
                 # Для simple/harmful сравниваем с оригиналом слова (lowercase)
                 check_filter_word = fw.word.lower()
+                # Для harmful/simple не убираем пробелы
+                check_text_no_spaces = None
 
             logger.info(
                 f"[WordFilter] Проверяем: '{fw.word}' (cat={fw.category}, "
@@ -179,7 +186,8 @@ class WordFilter:
                 normalized_text=check_text,
                 text_words=check_words,
                 whitelist=whitelist,
-                check_filter_word=check_filter_word
+                check_filter_word=check_filter_word,
+                text_no_spaces=check_text_no_spaces,
             )
 
             # Если нашли совпадение - возвращаем результат
@@ -205,7 +213,8 @@ class WordFilter:
         normalized_text: str,
         text_words: List[str],
         whitelist: Set[str],
-        check_filter_word: Optional[str] = None
+        check_filter_word: Optional[str] = None,
+        text_no_spaces: Optional[str] = None,
     ) -> bool:
         """
         Проверяет совпадение одного запрещённого слова с текстом.
@@ -218,6 +227,8 @@ class WordFilter:
             check_filter_word: Слово для сравнения (normalized для obfuscated,
                                lowercase для simple/harmful). Если None - используется
                                filter_word.normalized (для обратной совместимости)
+            text_no_spaces: Текст без пробелов (для obfuscated + contains/phrase)
+                           Позволяет "Alice Demidova" матчить "alicedemidova"
 
         Returns:
             True если слово найдено в тексте
@@ -250,29 +261,42 @@ class WordFilter:
                 )
             return False
 
-        elif filter_word.match_type == 'phrase':
+        elif filter_word.match_type in ('phrase', 'contains'):
             # ─────────────────────────────────────────────────────
-            # PHRASE: ищем как подстроку (может быть частью слова)
+            # PHRASE / CONTAINS: ищем как подстроку
             # ─────────────────────────────────────────────────────
-            # Просто проверяем наличие в полном тексте
-            # Важно: text_words не подходит для phrase т.к. split по \W+
-            # удаляет спецсимволы типа + в номерах телефонов
-            is_found = normalized_filter_word in normalized_text
+            # Для obfuscated + contains/phrase используем текст БЕЗ пробелов
+            # чтобы "Alice Demidova" → "алиседемидова" совпадало с паттерном
+            if text_no_spaces is not None:
+                # obfuscated категория — проверяем в тексте без пробелов
+                search_text = text_no_spaces
+                # Паттерн тоже без пробелов для корректного сравнения
+                search_pattern = normalized_filter_word.replace(' ', '')
+            else:
+                # harmful/simple — проверяем в обычном тексте
+                search_text = normalized_text
+                search_pattern = normalized_filter_word
+
+            is_found = search_pattern in search_text
             logger.info(
-                f"[WordFilter] PHRASE check: '{normalized_filter_word}' in text = {is_found}"
+                f"[WordFilter] {filter_word.match_type.upper()} check: "
+                f"'{normalized_filter_word}' in text = {is_found}"
             )
             if is_found:
                 # Для whitelist проверяем полный текст, не отдельные слова
                 # Если искомая фраза есть в whitelist - пропускаем
                 if normalized_filter_word in whitelist:
-                    logger.info(f"[WordFilter] PHRASE '{normalized_filter_word}' в whitelist, пропускаем")
+                    logger.info(
+                        f"[WordFilter] {filter_word.match_type.upper()} "
+                        f"'{normalized_filter_word}' в whitelist, пропускаем"
+                    )
                     return False
                 return True
             return False
 
         else:
             # ─────────────────────────────────────────────────────
-            # WORD (по умолчанию): ищем как отдельное слово
+            # WORD / EXACT (по умолчанию): ищем как отдельное слово
             # ─────────────────────────────────────────────────────
             # Проверяем есть ли слово среди слов текста
             for text_word in text_words:
