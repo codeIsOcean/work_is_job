@@ -239,7 +239,8 @@ class PyrogramService:
                 photos.append({
                     'date': photo_date,  # Дата загрузки фото
                     'age_days': age_days,  # Возраст фото в днях
-                    'file_id': photo.file_id  # ID файла фото
+                    'file_id': photo.file_id,  # ID файла фото (нестабильный)
+                    'file_unique_id': photo.file_unique_id  # Уникальный ID (стабильный, для сравнения)
                 })
 
             # ─────────────────────────────────────────────────────────

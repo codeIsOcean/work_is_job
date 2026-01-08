@@ -662,31 +662,89 @@ async def approve_user_callback(callback):
 
 @bot_activity_journal_router.callback_query(lambda c: c.data.startswith("mute_user_"))
 async def mute_user_callback(callback):
-    """Обработчик кнопки мута пользователя"""
+    """
+    Обработчик кнопки мута пользователя навсегда.
+
+    Callback data формат: mute_user_{user_id}_{group_id}
+    """
     try:
         # Извлекаем данные из callback_data
         parts = callback.data.split("_")
         user_id = int(parts[2])
         group_id = int(parts[3])
-        
-        # Здесь можно добавить логику мута пользователя
-        await callback.answer("🔇 Пользователь заглушен", show_alert=True)
-        
+
+        from aiogram.types import ChatPermissions
+
+        # Мут навсегда (без until_date = бессрочно)
+        mute_permissions = ChatPermissions(
+            can_send_messages=False,
+            can_send_media_messages=False,
+            can_send_polls=False,
+            can_send_other_messages=False,
+            can_add_web_page_previews=False,
+            can_change_info=False,
+            can_invite_users=False,
+            can_pin_messages=False,
+        )
+
+        await callback.bot.restrict_chat_member(
+            chat_id=group_id,
+            user_id=user_id,
+            permissions=mute_permissions,
+        )
+
+        await callback.answer("🔇 Мут навсегда применён", show_alert=True)
+        logger.info(f"✅ Пользователь {user_id} замучен навсегда в группе {group_id}")
+
+        # Обновляем сообщение
+        try:
+            current_text = callback.message.text or callback.message.caption or ""
+            new_text = current_text + "\n\n🔇 <b>МУТ НАВСЕГДА</b> применён администратором"
+            await callback.message.edit_text(
+                text=new_text,
+                parse_mode="HTML",
+                reply_markup=None
+            )
+        except Exception as edit_err:
+            logger.warning(f"Не удалось обновить сообщение: {edit_err}")
+
     except Exception as e:
         logger.error(f"Ошибка при муте пользователя: {e}")
-        await callback.answer("❌ Ошибка при муте", show_alert=True)
+        await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
 
 
 @bot_activity_journal_router.callback_query(lambda c: c.data.startswith("ban_user_"))
 async def ban_user_callback(callback):
-    """Обработчик кнопки бана пользователя (заглушка)"""
+    """
+    Обработчик кнопки бана пользователя.
+
+    Callback data формат: ban_user_{user_id}_{group_id}
+    """
     try:
         parts = callback.data.split("_")
         user_id = int(parts[2])
         group_id = int(parts[3])
 
-        # TODO: реализовать бан
-        await callback.answer("🚫 Бан пока не реализован", show_alert=True)
+        # Баним пользователя
+        await callback.bot.ban_chat_member(
+            chat_id=group_id,
+            user_id=user_id,
+        )
+
+        await callback.answer("🚫 Пользователь забанен", show_alert=True)
+        logger.info(f"🚫 Пользователь {user_id} забанен в группе {group_id}")
+
+        # Обновляем сообщение
+        try:
+            current_text = callback.message.text or callback.message.caption or ""
+            new_text = current_text + "\n\n🚫 <b>БАН</b> применён администратором"
+            await callback.message.edit_text(
+                text=new_text,
+                parse_mode="HTML",
+                reply_markup=None
+            )
+        except Exception as edit_err:
+            logger.warning(f"Не удалось обновить сообщение: {edit_err}")
 
     except Exception as e:
         logger.error(f"Ошибка при бане пользователя: {e}")
