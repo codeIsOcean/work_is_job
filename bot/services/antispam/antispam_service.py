@@ -999,6 +999,27 @@ async def check_message_for_spam(
     # Получаем ID чата
     chat_id = message.chat.id
 
+    # ============================================================
+    # ИСКЛЮЧЕНИЕ: Telegram (user_id 777000)
+    # ============================================================
+    # User ID 777000 — это официальный аккаунт Telegram, который
+    # пересылает сообщения из СВЯЗАННОГО канала в группу.
+    # Это НЕ спам — это легитимная функция Telegram!
+    # Пропускаем такие сообщения без проверки.
+    if message.from_user and message.from_user.id == 777000:
+        logger.debug(
+            f"[Antispam] Пропускаем сообщение от Telegram (777000) — "
+            f"это пересылка из связанного канала"
+        )
+        return AntiSpamDecision(
+            is_spam=False,
+            delete_message=False,
+            action=ActionType.OFF,
+            restrict_minutes=None,
+            triggered_rule_type=None,
+            reason=None,
+        )
+
     # Инициализируем переменные для результата
     # По умолчанию - не спам
     is_spam = False
