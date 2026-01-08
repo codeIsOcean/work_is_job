@@ -1399,6 +1399,11 @@ async def _send_photo_filter_to_journal(
     except Exception:
         group_link = f"Группа {chat_id}"
 
+    # Получаем hash_id для возможности удаления
+    hash_id = match_result.get("hash_id", "?")
+    distance = match_result.get("distance", "?")
+    description = match_result.get("description", "")
+
     # Формируем текст
     text = (
         f"🖼 <b>Запрещённое фото профиля</b>\n\n"
@@ -1407,14 +1412,22 @@ async def _send_photo_filter_to_journal(
         f"🏢 Группа: {group_link}\n\n"
         f"<b>Причина:</b>\n"
         f"{reason}\n\n"
-        f"<b>Действие:</b>\n"
+        f"<b>Совпавший хеш:</b>\n"
+        f"  • ID: <code>{hash_id}</code>\n"
+        f"  • Distance: {distance}\n"
+    )
+    if description:
+        text += f"  • Описание: {description}\n"
+
+    text += (
+        f"\n<b>Действие:</b>\n"
         f"  • Мут навсегда\n"
     )
 
     if deleted_count > 0:
         text += f"  • Удалено {deleted_count} сообщений\n"
 
-    text += "\n#photo_filter #scam_media"
+    text += f"\n#photo_filter #scam_media #hash_{hash_id}"
 
     # Отправляем в журнал с кнопками
     await send_journal_event(
