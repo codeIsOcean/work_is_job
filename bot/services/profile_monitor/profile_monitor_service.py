@@ -323,6 +323,8 @@ async def create_snapshot_on_join(
         profile_data = await get_user_profile_data(user_id)
         # Извлекаем данные о фото профиля
         has_photo = profile_data.get("has_photo", False)
+        # Извлекаем photo_id для отслеживания смены фото
+        photo_id = profile_data.get("photo_id")
         # Извлекаем возраст аккаунта в днях
         account_age_days = profile_data.get("account_age_days")
         # Извлекаем возраст самого свежего фото в днях (для критериев 4,5)
@@ -339,6 +341,7 @@ async def create_snapshot_on_join(
             last_name=last_name,
             username=username,
             has_photo=has_photo,
+            photo_id=photo_id,
             account_age_days=account_age_days,
             is_premium=is_premium,
             # Передаём возраст фото для критериев 4,5
@@ -977,6 +980,13 @@ async def get_user_profile_data(
         # Используем youngest_photo_days из pyrogram_service
         # Если фото нет - photo_age_days будет None
         result["photo_age_days"] = photos_info.get("youngest_photo_days")
+
+        # Получаем photo_id первого (текущего) фото для отслеживания смены фото
+        if result["has_photo"]:
+            photos = await pyrogram_service.get_profile_photos_dates(user_id)
+            if photos and len(photos) > 0:
+                # Берём file_id первого (текущего) фото
+                result["photo_id"] = photos[0].get("file_id")
 
         # Получаем возраст аккаунта
         age_info = await pyrogram_service.get_account_age(user_id)

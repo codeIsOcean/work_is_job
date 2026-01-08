@@ -117,6 +117,74 @@ def get_auto_mute_kb(
 
 
 # ============================================================
+# КЛАВИАТУРА: CRITERION_6 (ЗАПРЕЩЁННЫЙ КОНТЕНТ В ПРОФИЛЕ)
+# ============================================================
+def get_criterion6_kb(
+    chat_id: int,
+    user_id: int,
+    log_id: int,
+) -> InlineKeyboardMarkup:
+    """
+    Клавиатура для журнала при срабатывании CRITERION_6.
+
+    CRITERION_6 срабатывает когда в имени или bio пользователя
+    обнаружено запрещённое слово (harmful/obfuscated категории).
+
+    Кнопки:
+    - Анмут | Мут 7д | Мут ∞
+    - Бан (заглушка) | Анбан (заглушка) | ОК
+
+    Args:
+        chat_id: ID группы где сработал критерий
+        user_id: ID пользователя с запрещённым контентом
+        log_id: ID записи в журнале (для отслеживания действий)
+
+    Returns:
+        InlineKeyboardMarkup с кнопками модерации
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            # Первая строка: Управление мутом
+            [
+                # Кнопка размута - снимает ограничения с пользователя
+                InlineKeyboardButton(
+                    text="🔊 Анмут",
+                    callback_data=f"pm_unmute:{chat_id}:{user_id}:{log_id}"
+                ),
+                # Кнопка мута на 7 дней
+                InlineKeyboardButton(
+                    text="🔇 Мут 7д",
+                    callback_data=f"pm_mute7d:{chat_id}:{user_id}:{log_id}"
+                ),
+                # Кнопка мута навсегда
+                InlineKeyboardButton(
+                    text="🔇 Мут ∞",
+                    callback_data=f"pm_mute_forever:{chat_id}:{user_id}:{log_id}"
+                ),
+            ],
+            # Вторая строка: Бан/Анбан (заглушки) и подтверждение
+            [
+                # Кнопка бана - пока заглушка
+                InlineKeyboardButton(
+                    text="🚫 Бан",
+                    callback_data=f"pm_ban:{chat_id}:{user_id}:{log_id}"
+                ),
+                # Кнопка разбана - пока заглушка
+                InlineKeyboardButton(
+                    text="🔓 Анбан",
+                    callback_data=f"pm_unban:{chat_id}:{user_id}:{log_id}"
+                ),
+                # Кнопка подтверждения - просто убирает кнопки
+                InlineKeyboardButton(
+                    text="✅ ОК",
+                    callback_data=f"pm_ok:{chat_id}:{user_id}:{log_id}"
+                ),
+            ],
+        ]
+    )
+
+
+# ============================================================
 # КЛАВИАТУРА: НАСТРОЙКИ МОДУЛЯ В ЛС
 # ============================================================
 def get_settings_main_kb(
@@ -264,6 +332,7 @@ def get_mute_settings_kb(
     account_age_days: int,
     photo_freshness_threshold_days: int = 1,
     auto_mute_forbidden_content: bool = False,
+    check_profile_photo_filter: bool = False,
 ) -> InlineKeyboardMarkup:
     """
     Клавиатура настроек автомута.
@@ -276,6 +345,7 @@ def get_mute_settings_kb(
         account_age_days: Порог возраста аккаунта
         photo_freshness_threshold_days: Порог свежести фото для критериев 4,5
         auto_mute_forbidden_content: Автомут за запрещённый контент в имени/bio
+        check_profile_photo_filter: Проверка фото профиля через Scam Media Filter
 
     Returns:
         InlineKeyboardMarkup
@@ -285,6 +355,8 @@ def get_mute_settings_kb(
     name_icon = "✅" if auto_mute_name_change else "❌"
     delete_icon = "✅" if delete_messages else "❌"
     content_icon = "✅" if auto_mute_forbidden_content else "❌"
+    # Иконка для проверки фото профиля
+    photo_filter_icon = "✅" if check_profile_photo_filter else "❌"
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -328,6 +400,13 @@ def get_mute_settings_kb(
                 InlineKeyboardButton(
                     text=f"{content_icon} Мут: запрещённый контент в имени/bio",
                     callback_data=f"pm_mute_content:{'off' if auto_mute_forbidden_content else 'on'}:{chat_id}"
+                ),
+            ],
+            # Проверка фото профиля через Scam Media Filter
+            [
+                InlineKeyboardButton(
+                    text=f"{photo_filter_icon} Проверка фото на скам-фильтр",
+                    callback_data=f"pm_photo_filter:{'off' if check_profile_photo_filter else 'on'}:{chat_id}"
                 ),
             ],
             # Кнопка назад

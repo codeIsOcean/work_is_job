@@ -444,6 +444,8 @@ async def callback_mute_settings(
             photo_freshness_threshold_days=settings.photo_freshness_threshold_days,
             # Критерий 6: запрещённый контент в имени/bio
             auto_mute_forbidden_content=settings.auto_mute_forbidden_content,
+            # Проверка фото профиля через Scam Media Filter
+            check_profile_photo_filter=settings.check_profile_photo_filter,
         ),
         parse_mode="HTML",
     )
@@ -485,6 +487,7 @@ async def callback_toggle_mute_young(
             account_age_days=settings.auto_mute_account_age_days,
             photo_freshness_threshold_days=settings.photo_freshness_threshold_days,
             auto_mute_forbidden_content=settings.auto_mute_forbidden_content,
+            check_profile_photo_filter=settings.check_profile_photo_filter,
         ),
     )
     await callback.answer(f"Автомут молодых аккаунтов {'включён' if enabled else 'выключен'}")
@@ -525,6 +528,7 @@ async def callback_toggle_mute_name_change(
             account_age_days=settings.auto_mute_account_age_days,
             photo_freshness_threshold_days=settings.photo_freshness_threshold_days,
             auto_mute_forbidden_content=settings.auto_mute_forbidden_content,
+            check_profile_photo_filter=settings.check_profile_photo_filter,
         ),
     )
     await callback.answer(f"Автомут при смене имени {'включён' if enabled else 'выключен'}")
@@ -565,6 +569,7 @@ async def callback_toggle_delete_messages(
             account_age_days=settings.auto_mute_account_age_days,
             photo_freshness_threshold_days=settings.photo_freshness_threshold_days,
             auto_mute_forbidden_content=settings.auto_mute_forbidden_content,
+            check_profile_photo_filter=settings.check_profile_photo_filter,
         ),
     )
     await callback.answer(f"Удаление сообщений {'включено' if enabled else 'выключено'}")
@@ -800,8 +805,90 @@ async def callback_toggle_mute_forbidden_content(
             account_age_days=settings.auto_mute_account_age_days,
             photo_freshness_threshold_days=settings.photo_freshness_threshold_days,
             auto_mute_forbidden_content=settings.auto_mute_forbidden_content,
+            check_profile_photo_filter=settings.check_profile_photo_filter,
         ),
     )
     await callback.answer(
         f"Мут за запрещённый контент {'включён' if enabled else 'выключен'}"
+    )
+
+
+# ============================================================
+# CALLBACK: ПЕРЕКЛЮЧЕНИЕ ПРОВЕРКИ ФОТО ПРОФИЛЯ
+# ============================================================
+@router.callback_query(F.data.startswith("pm_photo_filter:"))
+async def callback_toggle_photo_filter(
+    callback: CallbackQuery,
+    session: AsyncSession,
+) -> None:
+    """
+    Переключает проверку фото профиля через Scam Media Filter.
+
+    Когда включено: при входе пользователя в группу его аватарка
+    проверяется против базы скам-изображений (по perceptual hash).
+    Если совпадение найдено — применяется действие из настроек.
+
+    Формат callback_data: pm_photo_filter:on|off:chat_id
+    """
+    # Разбираем callback_data на части
+    parts = callback.data.split(":")
+    # Проверяем корректность формата (должно быть 3 части)
+    if len(parts) != 3:
+        await callback.answer("Ошибка: неверный формат данных")
+        return
+
+    # Извлекаем действие (on/off) и chat_id
+    _, action, chat_id_str = parts
+    chat_id = int(chat_id_str)
+    # Определяем новое значение настройки
+    enabled = action == "on"
+
+    # Обновляем настройку check_profile_photo_filter в базе данных
+    settings = await create_or_update_settings(
+        session, chat_id, check_profile_photo_filter=enabled
+    )
+
+    # Логируем изменение настройки
+    logger.info(
+        f"[PROFILE_MONITOR] Profile photo filter "
+        f"{'enabled' if enabled else 'disabled'}: "
+        f"chat={chat_id} by admin={callback.from_user.id}"
+    )
+
+    # Формируем текст с описанием работы модуля
+    status_emoji = "✅" if enabled else "❌"
+    status_text = "включена" if enabled else "выключена"
+
+    description_text = (
+        f"🖼 <b>Проверка фото профиля через Scam Filter</b>\n\n"
+        f"Статус: {status_emoji} {status_text}\n\n"
+        f"<b>Как работает:</b>\n"
+        f"• Скаммер зашёл с скам-фото → первое сообщение → ловим\n"
+        f"• Скаммер зашёл чисто, потом сменил фото → ловим\n"
+        f"• Старый участник написал после включения → ловим\n\n"
+        f"<b>Действие при совпадении:</b>\n"
+        f"• Мут навсегда\n"
+        f"• Удаление всех сообщений скаммера\n"
+        f"• Уведомление в журнал\n\n"
+        f"<i>Используется база запрещённых изображений (Scam Media Filter)</i>"
+    )
+
+    # Обновляем текст и клавиатуру
+    await callback.message.edit_text(
+        text=description_text,
+        parse_mode="HTML",
+        reply_markup=get_mute_settings_kb(
+            chat_id=chat_id,
+            auto_mute_young=settings.auto_mute_no_photo_young,
+            auto_mute_name_change=settings.auto_mute_name_change_fast_msg,
+            delete_messages=settings.auto_mute_delete_messages,
+            account_age_days=settings.auto_mute_account_age_days,
+            photo_freshness_threshold_days=settings.photo_freshness_threshold_days,
+            auto_mute_forbidden_content=settings.auto_mute_forbidden_content,
+            check_profile_photo_filter=settings.check_profile_photo_filter,
+        ),
+    )
+    # Показываем уведомление админу
+    await callback.answer(
+        f"Проверка фото на скам-фильтр {status_text}"
     )

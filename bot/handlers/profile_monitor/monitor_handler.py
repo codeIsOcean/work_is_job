@@ -45,7 +45,16 @@ from bot.services.group_journal_service import send_journal_event
 from bot.keyboards.profile_monitor_kb import (
     get_journal_action_kb,
     get_auto_mute_kb,
+    get_criterion6_kb,
 )
+# Импорт для проверки фото профиля через Scam Media Filter
+from bot.services.scam_media import (
+    compute_image_hash,
+    compare_hashes,
+    BannedHashService,
+    SettingsService as ScamMediaSettingsService,
+)
+from bot.services.pyrogram_client import pyrogram_service
 
 # Логгер модуля
 logger = logging.getLogger(__name__)
@@ -130,7 +139,8 @@ async def process_message_profile_check(
     # ─────────────────────────────────────────────────────────
     # ШАГ 3: Обновляем время первого сообщения (если не установлено)
     # ─────────────────────────────────────────────────────────
-    if snapshot.first_message_at is None:
+    is_first_message = snapshot.first_message_at is None
+    if is_first_message:
         from datetime import timezone
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         snapshot = await update_profile_snapshot(
@@ -143,11 +153,42 @@ async def process_message_profile_check(
         )
 
     # ─────────────────────────────────────────────────────────
+    # ШАГ 3.1: ПРОВЕРКА ФОТО ПРИ ПЕРВОМ СООБЩЕНИИ
+    # Если снапшот был создан при JOIN и это первое сообщение - проверяем фото
+    # ─────────────────────────────────────────────────────────
+    if is_first_message and snapshot.has_photo and settings.check_profile_photo_filter:
+        logger.info(
+            f"[PHOTO_FILTER] First message (snapshot exists), checking profile photo: "
+            f"user={user_id} chat={chat_id}"
+        )
+        # Проверяем фото профиля
+        match_result = await check_profile_photo_scam(
+            session=session,
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+        )
+
+        # Если найдено совпадение - применяем действие (мут + удаление сообщений)
+        if match_result and match_result.get("matched"):
+            return await apply_photo_filter_action(
+                bot=bot,
+                session=session,
+                chat_id=chat_id,
+                user_id=user_id,
+                user=user,
+                match_result=match_result,
+                settings=settings,
+            )
+
+    # ─────────────────────────────────────────────────────────
     # ШАГ 4: Получаем текущие данные профиля
     # ─────────────────────────────────────────────────────────
     # Проверяем фото через Pyrogram (если доступен)
     profile_data = await get_user_profile_data(user_id)
     current_has_photo = profile_data.get("has_photo", False)
+    # Получаем ID текущего фото (для определения смены фото)
+    current_photo_id = profile_data.get("photo_id")
     # Получаем возраст текущего фото (для критериев 4 и 5)
     current_photo_age_days = profile_data.get("photo_age_days")
 
@@ -198,6 +239,19 @@ async def process_message_profile_check(
                 if settings.auto_mute_delete_messages:
                     await delete_user_messages(bot, chat_id, user_id)
 
+                # ─── ОТПРАВКА В ЖУРНАЛ ДЛЯ CRITERION_6 ───
+                # Отправляем уведомление в журнал группы если настройка включена
+                if settings.send_to_journal:
+                    await _send_criterion6_to_journal(
+                        bot=bot,
+                        session=session,
+                        chat_id=chat_id,
+                        user=user,
+                        reason=content_result.reason,
+                        action=content_result.action,
+                        matched_word=content_result.matched_word or "",
+                    )
+
                 return {
                     "action_taken": f"criterion_6_{content_result.action}",
                     "reason": content_result.reason,
@@ -215,6 +269,7 @@ async def process_message_profile_check(
         current_last_name=current_last_name,
         current_username=current_username,
         current_has_photo=current_has_photo,
+        current_photo_id=current_photo_id,
     )
 
     # ─────────────────────────────────────────────────────────
@@ -229,6 +284,8 @@ async def process_message_profile_check(
             snapshot=snapshot,
             changes=changes,
             current_has_photo=current_has_photo,
+            # Передаём ID фото для обновления снапшота
+            current_photo_id=current_photo_id,
             # Передаём возраст фото для критериев 4 и 5
             current_photo_age_days=current_photo_age_days,
         )
@@ -281,6 +338,7 @@ async def _handle_first_message(
     # Получаем данные профиля через Pyrogram
     profile_data = await get_user_profile_data(user_id)
     has_photo = profile_data.get("has_photo", False)
+    photo_id = profile_data.get("photo_id")
     account_age_days = profile_data.get("account_age_days")
 
     # Создаём снимок профиля
@@ -295,6 +353,7 @@ async def _handle_first_message(
         last_name=user.last_name,
         username=user.username,
         has_photo=has_photo,
+        photo_id=photo_id,
         account_age_days=account_age_days,
         is_premium=user.is_premium or False,
     )
@@ -305,6 +364,35 @@ async def _handle_first_message(
         snapshot=snapshot,
         first_message_at=now,
     )
+
+    # ─────────────────────────────────────────────────────────
+    # ПРОВЕРКА ФОТО ПРОФИЛЯ ПРИ ПЕРВОМ СООБЩЕНИИ
+    # Если у пользователя есть фото и включена проверка - проверяем
+    # ─────────────────────────────────────────────────────────
+    if has_photo and settings.check_profile_photo_filter:
+        logger.info(
+            f"[PHOTO_FILTER] First message, checking profile photo: "
+            f"user={user_id} chat={chat_id}"
+        )
+        # Проверяем фото профиля
+        match_result = await check_profile_photo_scam(
+            session=session,
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+        )
+
+        # Если найдено совпадение - применяем действие (мут + удаление сообщений)
+        if match_result and match_result.get("matched"):
+            return await apply_photo_filter_action(
+                bot=bot,
+                session=session,
+                chat_id=chat_id,
+                user_id=user_id,
+                user=user,
+                match_result=match_result,
+                settings=settings,
+            )
 
     # ─────────────────────────────────────────────────────────
     # КРИТЕРИЙ 6: Запрещённый контент в имени/bio (ПРОВЕРЯЕМ ПЕРВЫМ!)
@@ -342,6 +430,20 @@ async def _handle_first_message(
             if action_applied:
                 if settings.auto_mute_delete_messages:
                     await delete_user_messages(bot, chat_id, user_id)
+
+                # ─── ОТПРАВКА В ЖУРНАЛ ДЛЯ CRITERION_6 (first message) ───
+                # Отправляем уведомление в журнал группы если настройка включена
+                if settings.send_to_journal:
+                    await _send_criterion6_to_journal(
+                        bot=bot,
+                        session=session,
+                        chat_id=chat_id,
+                        user=user,
+                        reason=content_result.reason,
+                        action=content_result.action,
+                        matched_word=content_result.matched_word or "",
+                    )
+
                 return {
                     "action_taken": f"criterion_6_{content_result.action}",
                     "reason": content_result.reason,
@@ -382,6 +484,7 @@ async def _handle_profile_changes(
     snapshot: ProfileSnapshot,
     changes: list,
     current_has_photo: bool,
+    current_photo_id: Optional[str] = None,
     current_photo_age_days: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
@@ -441,7 +544,7 @@ async def _handle_profile_changes(
         )
         log_entries.append(entry)
 
-    # Обновляем снимок профиля
+    # Обновляем снимок профиля (включая photo_id для определения смены фото)
     current_full_name = " ".join(filter(None, [user.first_name, user.last_name]))
     await update_profile_snapshot(
         session=session,
@@ -451,6 +554,7 @@ async def _handle_profile_changes(
         full_name=current_full_name,
         username=user.username,
         has_photo=current_has_photo,
+        photo_id=current_photo_id,
     )
 
     # ─────────────────────────────────────────────────────────
@@ -461,6 +565,35 @@ async def _handle_profile_changes(
 
     # Проверяем есть ли смена фото среди изменений
     photo_changed = any(c["type"].startswith("photo") for c in changes)
+
+    # ─────────────────────────────────────────────────────────
+    # ПРОВЕРКА ФОТО ПРОФИЛЯ ЧЕРЕЗ SCAM MEDIA FILTER
+    # Срабатывает при ИЗМЕНЕНИИ фото если настройка включена
+    # ─────────────────────────────────────────────────────────
+    if photo_changed and settings.check_profile_photo_filter:
+        logger.info(
+            f"[PHOTO_FILTER] Photo changed, checking against scam filter: "
+            f"user={user_id} chat={chat_id}"
+        )
+        # Проверяем фото профиля
+        match_result = await check_profile_photo_scam(
+            session=session,
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+        )
+
+        # Если найдено совпадение - применяем действие (мут + удаление сообщений)
+        if match_result and match_result.get("matched"):
+            return await apply_photo_filter_action(
+                bot=bot,
+                session=session,
+                chat_id=chat_id,
+                user_id=user_id,
+                user=user,
+                match_result=match_result,
+                settings=settings,
+            )
 
     # Если была смена имени ИЛИ смена фото - проверяем критерии автомута
     if name_changed or photo_changed:
@@ -866,3 +999,432 @@ async def _send_changes_to_group(
     except Exception as e:
         # Логируем ошибку но не падаем
         logger.error(f"[PROFILE_MONITOR] Failed to send to group: {e}")
+
+
+# ============================================================
+# ФУНКЦИЯ: ОТПРАВКА CRITERION_6 В ЖУРНАЛ
+# ============================================================
+async def _send_criterion6_to_journal(
+    bot: Bot,
+    session: AsyncSession,
+    chat_id: int,
+    user: User,
+    reason: str,
+    action: str,
+    matched_word: str,
+) -> None:
+    """
+    Отправляет уведомление о срабатывании CRITERION_6 в журнал группы.
+
+    CRITERION_6 срабатывает когда в имени или bio пользователя
+    обнаружено запрещённое слово из категорий harmful/obfuscated.
+
+    Args:
+        bot: Bot instance для отправки сообщений
+        session: AsyncSession для работы с БД
+        chat_id: ID группы где сработал критерий
+        user: Пользователь с запрещённым контентом
+        reason: Причина срабатывания (например "Запрещённое слово в имени: кокс")
+        action: Применённое действие (mute/ban/kick)
+        matched_word: Какое слово сработало
+    """
+    # ─────────────────────────────────────────────────────────
+    # Формируем кликабельную ссылку на пользователя
+    # ─────────────────────────────────────────────────────────
+    # Имя пользователя для отображения
+    user_full_name = user.full_name or "Без имени"
+    # Создаём ссылку вида tg://user?id=123 которая откроет профиль при клике
+    user_link = f'<a href="tg://user?id={user.id}">{user_full_name}</a>'
+    # Добавляем @username если есть
+    username_str = f" (@{user.username})" if user.username else ""
+
+    # ─────────────────────────────────────────────────────────
+    # Формируем кликабельную ссылку на группу
+    # ─────────────────────────────────────────────────────────
+    try:
+        # Получаем информацию о группе
+        chat = await bot.get_chat(chat_id)
+        # Название группы для отображения
+        group_title = chat.title or f"Группа {chat_id}"
+        # Формируем ссылку на группу
+        if chat.username:
+            # Публичная группа — ссылка через @username
+            group_link = f'<a href="https://t.me/{chat.username}">{group_title}</a>'
+        else:
+            # Приватная группа — ссылка через tg://openmessage
+            # Убираем -100 префикс для формирования ссылки
+            clean_chat_id = str(chat_id).replace("-100", "")
+            group_link = f'<a href="tg://openmessage?chat_id={clean_chat_id}">{group_title}</a>'
+    except Exception as e:
+        # Если не удалось получить информацию о группе — используем ID
+        logger.warning(f"[CRITERION_6] Cannot get chat info: {e}")
+        group_link = f"Группа {chat_id}"
+
+    # ─────────────────────────────────────────────────────────
+    # Форматируем текст действия
+    # ─────────────────────────────────────────────────────────
+    # Словарь для перевода действий в читаемый формат
+    action_map = {
+        "mute": "Мут навсегда",
+        "ban": "Бан",
+        "kick": "Кик",
+        "warn": "Предупреждение",
+    }
+    # Получаем читаемое название действия
+    action_text = action_map.get(action, action)
+
+    # ─────────────────────────────────────────────────────────
+    # Формируем сообщение для журнала
+    # ─────────────────────────────────────────────────────────
+    text = (
+        f"🚫 <b>Запрещённый контент в профиле</b>\n\n"
+        f"👤 {user_link}{username_str}\n"
+        f"🆔 ID: <code>{user.id}</code>\n\n"
+        f"🏢 Группа: {group_link}\n\n"
+        f"<b>Причина:</b>\n"
+        f"{reason}\n\n"
+        f"<b>Действие:</b>\n"
+        f"  • {action_text}\n\n"
+        f"#criterion6 #profile_filter"
+    )
+
+    # ─────────────────────────────────────────────────────────
+    # Отправляем в журнал группы с кнопками
+    # ─────────────────────────────────────────────────────────
+    # log_id = 0 т.к. для CRITERION_6 не создаём запись в profile_changes
+    await send_journal_event(
+        bot=bot,
+        session=session,
+        group_id=chat_id,
+        message_text=text,
+        reply_markup=get_criterion6_kb(
+            chat_id=chat_id,
+            user_id=user.id,
+            log_id=0,  # Нет записи в журнале изменений профиля
+        ),
+    )
+
+    # Логируем успешную отправку
+    logger.info(
+        f"[CRITERION_6] Sent to journal: chat={chat_id} user={user.id} "
+        f"word={matched_word} action={action}"
+    )
+
+
+# ============================================================
+# ФУНКЦИЯ: ПРОВЕРКА ФОТО ПРОФИЛЯ ЧЕРЕЗ SCAM MEDIA FILTER
+# ============================================================
+async def check_profile_photo_scam(
+    session: AsyncSession,
+    bot: Bot,
+    chat_id: int,
+    user_id: int,
+) -> Optional[Dict[str, Any]]:
+    """
+    Проверяет фото профиля пользователя на совпадение с banned хешами.
+
+    Логика:
+    1. Получаем фото профиля через Pyrogram
+    2. Скачиваем фото в байты
+    3. Вычисляем perceptual hash
+    4. Сравниваем с banned хешами в БД
+    5. Возвращаем результат совпадения
+
+    Args:
+        session: AsyncSession для БД
+        bot: Bot instance
+        chat_id: ID группы
+        user_id: ID пользователя
+
+    Returns:
+        Dict с результатом или None если не найдено совпадение
+        {
+            "matched": True,
+            "hash_id": int,
+            "distance": int,
+            "description": str | None,
+        }
+    """
+    # ─────────────────────────────────────────────────────────
+    # ШАГ 1: Проверяем доступность Pyrogram
+    # ─────────────────────────────────────────────────────────
+    if not pyrogram_service.is_available():
+        logger.debug("[PHOTO_FILTER] Pyrogram not available, skip photo check")
+        return None
+
+    # ─────────────────────────────────────────────────────────
+    # ШАГ 2: Получаем фото профиля через Pyrogram
+    # ─────────────────────────────────────────────────────────
+    try:
+        photos = await pyrogram_service.get_profile_photos_dates(user_id)
+        if not photos:
+            logger.debug(f"[PHOTO_FILTER] No profile photos for user={user_id}")
+            return None
+
+        # Берём первое (текущее) фото
+        current_photo = photos[0]
+        file_id = current_photo.get("file_id")
+        if not file_id:
+            logger.debug(f"[PHOTO_FILTER] No file_id for user={user_id}")
+            return None
+
+    except Exception as e:
+        logger.warning(f"[PHOTO_FILTER] Error getting photos for user={user_id}: {e}")
+        return None
+
+    # ─────────────────────────────────────────────────────────
+    # ШАГ 3: Скачиваем фото через Pyrogram
+    # ─────────────────────────────────────────────────────────
+    try:
+        # Скачиваем фото в память - in_memory=True возвращает BytesIO объект
+        buffer = await pyrogram_service.client.download_media(
+            file_id,
+            in_memory=True,
+        )
+
+        if buffer is None:
+            logger.warning(f"[PHOTO_FILTER] download_media returned None for user={user_id}")
+            return None
+
+        image_data = buffer.getvalue()
+
+        if not image_data or len(image_data) < 100:
+            logger.warning(f"[PHOTO_FILTER] Empty or too small photo for user={user_id}")
+            return None
+
+        logger.info(f"[PHOTO_FILTER] Downloaded photo for user={user_id}, size={len(image_data)}")
+
+    except Exception as e:
+        logger.warning(f"[PHOTO_FILTER] Error downloading photo for user={user_id}: {e}")
+        return None
+
+    # ─────────────────────────────────────────────────────────
+    # ШАГ 4: Вычисляем хеш изображения
+    # ─────────────────────────────────────────────────────────
+    image_hashes = compute_image_hash(image_data)
+    if image_hashes is None:
+        logger.warning(f"[PHOTO_FILTER] Failed to compute hash for user={user_id}")
+        return None
+
+    logger.debug(
+        f"[PHOTO_FILTER] Computed hash for user={user_id}: "
+        f"phash={image_hashes.phash}, dhash={image_hashes.dhash}"
+    )
+
+    # ─────────────────────────────────────────────────────────
+    # ШАГ 5: Получаем настройки Scam Media Filter для порога
+    # ─────────────────────────────────────────────────────────
+    scam_settings = await ScamMediaSettingsService.get_settings(session, chat_id)
+    # Если настроек нет - используем дефолтный порог 10
+    threshold = scam_settings.threshold if scam_settings else 10
+    include_global = scam_settings.use_global_hashes if scam_settings else True
+
+    # ─────────────────────────────────────────────────────────
+    # ШАГ 6: Получаем banned хеши для сравнения
+    # ─────────────────────────────────────────────────────────
+    banned_hashes = await BannedHashService.get_hashes_for_group(
+        session, chat_id, include_global
+    )
+
+    if not banned_hashes:
+        logger.debug(f"[PHOTO_FILTER] No banned hashes for chat={chat_id}")
+        return None
+
+    logger.debug(f"[PHOTO_FILTER] Checking against {len(banned_hashes)} banned hashes")
+
+    # ─────────────────────────────────────────────────────────
+    # ШАГ 7: Сравниваем с каждым banned хешем
+    # ─────────────────────────────────────────────────────────
+    best_match = None
+    best_distance = 64  # Максимальное расстояние
+
+    for banned_hash in banned_hashes:
+        # Сравниваем pHash
+        distance = compare_hashes(image_hashes.phash, banned_hash.phash)
+
+        if distance < best_distance:
+            best_distance = distance
+            if distance <= threshold:
+                best_match = banned_hash
+
+    # ─────────────────────────────────────────────────────────
+    # ШАГ 8: Возвращаем результат
+    # ─────────────────────────────────────────────────────────
+    if best_match:
+        logger.warning(
+            f"[PHOTO_FILTER] MATCH FOUND! user={user_id} chat={chat_id} "
+            f"hash_id={best_match.id} distance={best_distance} "
+            f"description={best_match.description}"
+        )
+        return {
+            "matched": True,
+            "hash_id": best_match.id,
+            "distance": best_distance,
+            "description": best_match.description,
+        }
+
+    logger.debug(
+        f"[PHOTO_FILTER] No match for user={user_id}, best_distance={best_distance}"
+    )
+    return None
+
+
+# ============================================================
+# ФУНКЦИЯ: ПРИМЕНЕНИЕ ДЕЙСТВИЯ ПРИ СОВПАДЕНИИ ФОТО ПРОФИЛЯ
+# ============================================================
+async def apply_photo_filter_action(
+    bot: Bot,
+    session: AsyncSession,
+    chat_id: int,
+    user_id: int,
+    user: User,
+    match_result: Dict[str, Any],
+    settings: ProfileMonitorSettings,
+) -> Dict[str, Any]:
+    """
+    Применяет действие при совпадении фото профиля с banned хешем.
+
+    Действия: мут навсегда + удаление всех сообщений скаммера.
+
+    Args:
+        bot: Bot instance
+        session: AsyncSession
+        chat_id: ID группы
+        user_id: ID пользователя
+        user: User объект
+        match_result: Результат проверки из check_profile_photo_scam()
+        settings: Настройки Profile Monitor
+
+    Returns:
+        Dict с результатом применения действия
+    """
+    reason = (
+        f"Фото профиля совпало с запрещённым изображением "
+        f"(distance={match_result['distance']})"
+    )
+    if match_result.get("description"):
+        reason += f": {match_result['description']}"
+
+    logger.warning(
+        f"[PHOTO_FILTER] Applying action: user={user_id} chat={chat_id} "
+        f"reason={reason}"
+    )
+
+    # ─────────────────────────────────────────────────────────
+    # Применяем мут навсегда
+    # ─────────────────────────────────────────────────────────
+    mute_success = await apply_auto_mute(
+        bot=bot,
+        session=session,
+        chat_id=chat_id,
+        user_id=user_id,
+        reason=reason,
+    )
+
+    # ─────────────────────────────────────────────────────────
+    # Удаляем все сообщения скаммера
+    # ─────────────────────────────────────────────────────────
+    deleted_count = 0
+    if mute_success:
+        deleted_count = await delete_user_messages(
+            bot=bot,
+            chat_id=chat_id,
+            user_id=user_id,
+        )
+
+    # ─────────────────────────────────────────────────────────
+    # Увеличиваем счётчик срабатываний хеша
+    # ─────────────────────────────────────────────────────────
+    await BannedHashService.increment_match_count(session, match_result["hash_id"])
+
+    # ─────────────────────────────────────────────────────────
+    # Отправляем в журнал если настроено
+    # ─────────────────────────────────────────────────────────
+    if settings.send_to_journal:
+        await _send_photo_filter_to_journal(
+            bot=bot,
+            session=session,
+            chat_id=chat_id,
+            user=user,
+            reason=reason,
+            deleted_count=deleted_count,
+            match_result=match_result,
+        )
+
+    return {
+        "action_taken": "photo_filter_mute",
+        "reason": reason,
+        "changes": None,
+    }
+
+
+# ============================================================
+# ФУНКЦИЯ: ОТПРАВКА PHOTO FILTER В ЖУРНАЛ
+# ============================================================
+async def _send_photo_filter_to_journal(
+    bot: Bot,
+    session: AsyncSession,
+    chat_id: int,
+    user: User,
+    reason: str,
+    deleted_count: int,
+    match_result: Dict[str, Any],
+) -> None:
+    """
+    Отправляет уведомление о срабатывании Photo Filter в журнал.
+
+    Args:
+        bot: Bot instance
+        session: AsyncSession
+        chat_id: ID группы
+        user: Пользователь
+        reason: Причина
+        deleted_count: Количество удалённых сообщений
+        match_result: Результат совпадения
+    """
+    # Формируем ссылку на пользователя
+    user_full_name = user.full_name or "Без имени"
+    user_link = f'<a href="tg://user?id={user.id}">{user_full_name}</a>'
+    username_str = f" (@{user.username})" if user.username else ""
+
+    # Формируем ссылку на группу
+    try:
+        chat = await bot.get_chat(chat_id)
+        group_title = chat.title or f"Группа {chat_id}"
+        if chat.username:
+            group_link = f'<a href="https://t.me/{chat.username}">{group_title}</a>'
+        else:
+            clean_chat_id = str(chat_id).replace("-100", "")
+            group_link = f'<a href="tg://openmessage?chat_id={clean_chat_id}">{group_title}</a>'
+    except Exception:
+        group_link = f"Группа {chat_id}"
+
+    # Формируем текст
+    text = (
+        f"🖼 <b>Запрещённое фото профиля</b>\n\n"
+        f"👤 {user_link}{username_str}\n"
+        f"🆔 ID: <code>{user.id}</code>\n\n"
+        f"🏢 Группа: {group_link}\n\n"
+        f"<b>Причина:</b>\n"
+        f"{reason}\n\n"
+        f"<b>Действие:</b>\n"
+        f"  • Мут навсегда\n"
+    )
+
+    if deleted_count > 0:
+        text += f"  • Удалено {deleted_count} сообщений\n"
+
+    text += "\n#photo_filter #scam_media"
+
+    # Отправляем в журнал с кнопками
+    await send_journal_event(
+        bot=bot,
+        session=session,
+        group_id=chat_id,
+        message_text=text,
+        reply_markup=get_criterion6_kb(
+            chat_id=chat_id,
+            user_id=user.id,
+            log_id=0,
+        ),
+    )

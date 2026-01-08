@@ -439,3 +439,204 @@ async def _mark_sent_to_group(
             await session.commit()
     except Exception as e:
         logger.error(f"[PROFILE_MONITOR] Failed to mark sent to group: {e}")
+
+
+# ============================================================
+# CALLBACK: МУТ НА 7 ДНЕЙ (для CRITERION_6)
+# ============================================================
+@router.callback_query(F.data.startswith("pm_mute7d:"))
+async def callback_mute7d_user(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    bot: Bot,
+) -> None:
+    """
+    Обработка кнопки "Мут 7д" - мут на 7 дней.
+
+    Формат callback_data: pm_mute7d:chat_id:user_id:log_id
+    Используется в клавиатуре CRITERION_6.
+    """
+    # Парсим данные из callback
+    parts = callback.data.split(":")
+    if len(parts) != 4:
+        await callback.answer("Ошибка: неверный формат данных")
+        return
+
+    # Извлекаем chat_id, user_id, log_id из callback_data
+    _, chat_id_str, user_id_str, log_id_str = parts
+    chat_id = int(chat_id_str)
+    user_id = int(user_id_str)
+    log_id = int(log_id_str)
+
+    # Логируем действие администратора
+    logger.info(
+        f"[PROFILE_MONITOR] Callback mute7d: chat={chat_id} user={user_id} "
+        f"by admin={callback.from_user.id}"
+    )
+
+    try:
+        # Импортируем datetime для вычисления until_date
+        from datetime import datetime, timedelta
+
+        # Вычисляем дату окончания мута (7 дней от текущего момента)
+        until_date = datetime.now() + timedelta(days=7)
+
+        # Создаём ограничения - запрещаем отправку сообщений
+        permissions = ChatPermissions(
+            can_send_messages=False,
+            can_send_audios=False,
+            can_send_documents=False,
+            can_send_photos=False,
+            can_send_videos=False,
+            can_send_video_notes=False,
+            can_send_voice_notes=False,
+            can_send_polls=False,
+            can_send_other_messages=False,
+            can_add_web_page_previews=False,
+        )
+
+        # Применяем мут на 7 дней
+        await bot.restrict_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            permissions=permissions,
+            until_date=until_date,
+        )
+
+        # Сохраняем ограничение в БД для отслеживания
+        await save_restriction(
+            session=session,
+            chat_id=chat_id,
+            user_id=user_id,
+            restriction_type="mute",
+            reason="criterion_6_manual_7d",
+            restricted_by=callback.from_user.id,
+            until_date=until_date,
+        )
+
+        # Обновляем запись в журнале если есть
+        if log_id:
+            await _update_log_action(session, log_id, "manual_mute_7d")
+
+        # Обновляем сообщение в журнале — показываем кто замутил
+        await callback.message.edit_text(
+            callback.message.text + f"\n\n🔇 <b>Мут 7 дней</b> админом {callback.from_user.full_name}",
+            parse_mode="HTML",
+        )
+        await callback.answer("Мут на 7 дней применён")
+
+    except Exception as e:
+        # Логируем ошибку
+        logger.error(f"[PROFILE_MONITOR] Mute 7d failed: {e}")
+        await callback.answer(f"Ошибка: {e}", show_alert=True)
+
+
+# ============================================================
+# CALLBACK: МУТ НАВСЕГДА (для CRITERION_6)
+# ============================================================
+@router.callback_query(F.data.startswith("pm_mute_forever:"))
+async def callback_mute_forever_user(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    bot: Bot,
+) -> None:
+    """
+    Обработка кнопки "Мут ∞" - мут навсегда.
+
+    Формат callback_data: pm_mute_forever:chat_id:user_id:log_id
+    Используется в клавиатуре CRITERION_6.
+    """
+    # Парсим данные из callback
+    parts = callback.data.split(":")
+    if len(parts) != 4:
+        await callback.answer("Ошибка: неверный формат данных")
+        return
+
+    # Извлекаем chat_id, user_id, log_id из callback_data
+    _, chat_id_str, user_id_str, log_id_str = parts
+    chat_id = int(chat_id_str)
+    user_id = int(user_id_str)
+    log_id = int(log_id_str)
+
+    # Логируем действие администратора
+    logger.info(
+        f"[PROFILE_MONITOR] Callback mute_forever: chat={chat_id} user={user_id} "
+        f"by admin={callback.from_user.id}"
+    )
+
+    try:
+        # Создаём ограничения - запрещаем отправку сообщений
+        permissions = ChatPermissions(
+            can_send_messages=False,
+            can_send_audios=False,
+            can_send_documents=False,
+            can_send_photos=False,
+            can_send_videos=False,
+            can_send_video_notes=False,
+            can_send_voice_notes=False,
+            can_send_polls=False,
+            can_send_other_messages=False,
+            can_add_web_page_previews=False,
+        )
+
+        # Применяем мут навсегда (until_date=None)
+        await bot.restrict_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            permissions=permissions,
+            until_date=None,
+        )
+
+        # Сохраняем ограничение в БД
+        await save_restriction(
+            session=session,
+            chat_id=chat_id,
+            user_id=user_id,
+            restriction_type="mute",
+            reason="criterion_6_manual_forever",
+            restricted_by=callback.from_user.id,
+            until_date=None,
+        )
+
+        # Обновляем запись в журнале
+        if log_id:
+            await _update_log_action(session, log_id, "manual_mute_forever")
+
+        # Обновляем сообщение в журнале
+        await callback.message.edit_text(
+            callback.message.text + f"\n\n🔇 <b>Мут навсегда</b> админом {callback.from_user.full_name}",
+            parse_mode="HTML",
+        )
+        await callback.answer("Мут навсегда применён")
+
+    except Exception as e:
+        # Логируем ошибку
+        logger.error(f"[PROFILE_MONITOR] Mute forever failed: {e}")
+        await callback.answer(f"Ошибка: {e}", show_alert=True)
+
+
+# ============================================================
+# CALLBACK: РАЗБАНИТЬ ПОЛЬЗОВАТЕЛЯ (ЗАГЛУШКА)
+# ============================================================
+@router.callback_query(F.data.startswith("pm_unban:"))
+async def callback_unban_user(
+    callback: CallbackQuery,
+) -> None:
+    """
+    Обработка кнопки "Анбан" - ЗАГЛУШКА.
+
+    Формат callback_data: pm_unban:chat_id:user_id:log_id
+
+    TODO: Реализовать разбан пользователя.
+    Сейчас просто показывает сообщение что функция не реализована.
+    """
+    # Логируем попытку использования
+    logger.info(
+        f"[PROFILE_MONITOR] Callback unban (stub): by admin={callback.from_user.id}"
+    )
+
+    # Показываем уведомление что функция ещё не реализована
+    await callback.answer(
+        "🚧 Разбан пока не реализован",
+        show_alert=True,
+    )
