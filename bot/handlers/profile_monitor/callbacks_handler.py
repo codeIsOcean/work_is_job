@@ -106,8 +106,9 @@ async def callback_mute_user(
             await _update_log_action(session, log_id, "manual_mute")
 
         # Обновляем сообщение в журнале
+        # ВАЖНО: используем html_text чтобы сохранить оригинальное HTML форматирование
         await callback.message.edit_text(
-            callback.message.text + f"\n\n✅ <b>Замучен</b> админом {callback.from_user.full_name}",
+            callback.message.html_text + f"\n\n✅ <b>Замучен</b> админом {callback.from_user.full_name}",
             parse_mode="HTML",
         )
         await callback.answer("Пользователь замучен")
@@ -169,8 +170,9 @@ async def callback_ban_user(
             await _update_log_action(session, log_id, "manual_ban")
 
         # Обновляем сообщение
+        # ВАЖНО: используем html_text чтобы сохранить оригинальное HTML форматирование
         await callback.message.edit_text(
-            callback.message.text + f"\n\n🚫 <b>Забанен</b> админом {callback.from_user.full_name}",
+            callback.message.html_text + f"\n\n🚫 <b>Забанен</b> админом {callback.from_user.full_name}",
             parse_mode="HTML",
         )
         await callback.answer("Пользователь забанен")
@@ -219,8 +221,9 @@ async def callback_kick_user(
             await _update_log_action(session, log_id, "manual_kick")
 
         # Обновляем сообщение
+        # ВАЖНО: используем html_text чтобы сохранить оригинальное HTML форматирование
         await callback.message.edit_text(
-            callback.message.text + f"\n\n👢 <b>Кикнут</b> админом {callback.from_user.full_name}",
+            callback.message.html_text + f"\n\n👢 <b>Кикнут</b> админом {callback.from_user.full_name}",
             parse_mode="HTML",
         )
         await callback.answer("Пользователь кикнут")
@@ -285,8 +288,9 @@ async def callback_unmute_user(
         await deactivate_restriction(session, chat_id, user_id)
 
         # Обновляем сообщение
+        # ВАЖНО: используем html_text чтобы сохранить оригинальное HTML форматирование
         await callback.message.edit_text(
-            callback.message.text + f"\n\n🔊 <b>Размучен</b> админом {callback.from_user.full_name}",
+            callback.message.html_text + f"\n\n🔊 <b>Размучен</b> админом {callback.from_user.full_name}",
             parse_mode="HTML",
         )
         await callback.answer("Пользователь размучен")
@@ -519,8 +523,9 @@ async def callback_mute7d_user(
             await _update_log_action(session, log_id, "manual_mute_7d")
 
         # Обновляем сообщение в журнале — показываем кто замутил
+        # ВАЖНО: используем html_text чтобы сохранить оригинальное HTML форматирование
         await callback.message.edit_text(
-            callback.message.text + f"\n\n🔇 <b>Мут 7 дней</b> админом {callback.from_user.full_name}",
+            callback.message.html_text + f"\n\n🔇 <b>Мут 7 дней</b> админом {callback.from_user.full_name}",
             parse_mode="HTML",
         )
         await callback.answer("Мут на 7 дней применён")
@@ -603,8 +608,9 @@ async def callback_mute_forever_user(
             await _update_log_action(session, log_id, "manual_mute_forever")
 
         # Обновляем сообщение в журнале
+        # ВАЖНО: используем html_text чтобы сохранить оригинальное HTML форматирование
         await callback.message.edit_text(
-            callback.message.text + f"\n\n🔇 <b>Мут навсегда</b> админом {callback.from_user.full_name}",
+            callback.message.html_text + f"\n\n🔇 <b>Мут навсегда</b> админом {callback.from_user.full_name}",
             parse_mode="HTML",
         )
         await callback.answer("Мут навсегда применён")
