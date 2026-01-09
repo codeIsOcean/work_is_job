@@ -17,6 +17,8 @@ from bot.services.groups_settings_in_private_logic import (
     get_reaction_mute_settings,
     set_reaction_mute_enabled,
     set_reaction_mute_announce_enabled,
+    # Функция для получения списка привязанных журналов
+    get_linked_journals,
 )
 from bot.services.group_display import build_group_header
 from types import SimpleNamespace
@@ -72,6 +74,61 @@ async def settings_command(message: types.Message, session: AsyncSession):
     except Exception as e:
         logger.error(f"Ошибка при обработке команды /settings: {e}")
         await message.answer("❌ Произошла ошибка при получении ваших групп.")
+
+
+@group_settings_router.message(Command("linkedjournals"))
+async def linkedjournals_command(message: types.Message, session: AsyncSession):
+    """Обработчик команды /linkedjournals - показывает список привязанных журналов"""
+    user_id = message.from_user.id
+    logger.info(f"Получена команда /linkedjournals от пользователя {user_id}")
+
+    # Проверяем разрешение: по ID или username из единого списка доступа
+    username_norm = (message.from_user.username or "").lstrip("@").lower()
+    if (user_id not in ALLOWED_USER_IDS) and (username_norm not in ALLOWED_USERNAMES):
+        await message.answer(
+            "🚫 <b>Доступ запрещен</b>\n\n"
+            "Вы не разработчик, пока не можем вам дать права.\n"
+            "Обратитесь к @texas_dev для получения доступа.",
+            parse_mode="HTML"
+        )
+        return
+
+    try:
+        # Получаем список привязанных журналов
+        journals = await get_linked_journals(session)
+
+        # Формируем текст для отображения
+        if not journals:
+            # Если журналов нет - показываем соответствующее сообщение
+            text = (
+                "📋 <b>Привязанные журналы</b>\n\n"
+                "У вас пока нет привязанных журналов.\n\n"
+                "Чтобы привязать журнал к группе, используйте команду "
+                "<code>/setjournal</code> в нужной группе."
+            )
+        else:
+            # Если журналы есть - формируем список
+            text = "📋 <b>Привязанные журналы</b>\n\n"
+
+            # Перебираем журналы и формируем текст
+            for journal in journals:
+                # Получаем название группы (или ID если название недоступно)
+                group_name = journal.get('group_title') or f"ID: {journal.get('group_id')}"
+                # Получаем название журнала (ключ journal_id согласно get_linked_journals())
+                journal_name = journal.get('journal_title') or f"ID: {journal.get('journal_id')}"
+                # Проверяем статус активности
+                is_active = journal.get('is_active', True)
+                status_emoji = "✅" if is_active else "❌"
+
+                # Добавляем строку для каждого журнала
+                text += f"{status_emoji} <b>{group_name}</b>\n"
+                text += f"   └ 📝 {journal_name}\n\n"
+
+        await message.answer(text, parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Ошибка при обработке команды /linkedjournals: {e}")
+        await message.answer("❌ Произошла ошибка при получении списка журналов.")
 
 
 @group_settings_router.message(Command("bot_access"))
@@ -550,6 +607,18 @@ def create_groups_keyboard(groups):
     keyboard.inline_keyboard.append([global_mute_button])
     logger.info(f"🔍 [GROUP_SETTINGS] Создана кнопка глобального мута")
 
+    # ─────────────────────────────────────────────────────────────────────
+    # Кнопка для просмотра привязанных журналов
+    # Журналы отделены от групп и показываются в отдельном меню
+    # ─────────────────────────────────────────────────────────────────────
+    journals_button = InlineKeyboardButton(
+        text="📋 Привязанные журналы",
+        callback_data="settings:journals"
+    )
+    # Добавляем кнопку журналов после глобального мута
+    keyboard.inline_keyboard.append([journals_button])
+    logger.info(f"🔍 [GROUP_SETTINGS] Создана кнопка привязанных журналов")
+
     for group in groups:
         callback_data = f"manage_group_{group.chat_id}"
         button = InlineKeyboardButton(
@@ -903,6 +972,58 @@ async def toggle_global_mute_callback(callback: types.CallbackQuery, session: As
     except Exception as e:
         logger.error(f"Ошибка при переключении глобального мута: {e}")
         await callback.answer("❌ Произошла ошибка", show_alert=True)
+
+
+@group_settings_router.callback_query(F.data == "settings:journals")
+async def show_linked_journals_callback(callback: types.CallbackQuery, session: AsyncSession):
+    """Обработчик кнопки 'Привязанные журналы' - показывает список журналов"""
+    try:
+        # Получаем список привязанных журналов
+        journals = await get_linked_journals(session)
+
+        # Формируем текст для отображения
+        if not journals:
+            # Если журналов нет - показываем соответствующее сообщение
+            text = (
+                "📋 <b>Привязанные журналы</b>\n\n"
+                "У вас пока нет привязанных журналов.\n\n"
+                "Чтобы привязать журнал к группе, используйте команду "
+                "<code>/setjournal</code> в нужной группе."
+            )
+        else:
+            # Если журналы есть - формируем список
+            text = "📋 <b>Привязанные журналы</b>\n\n"
+
+            # Группируем журналы по группам для удобного отображения
+            for journal in journals:
+                # Получаем название группы (или ID если название недоступно)
+                group_name = journal.get('group_title') or f"ID: {journal.get('group_id')}"
+                # Получаем название журнала (ключ journal_id согласно get_linked_journals())
+                journal_name = journal.get('journal_title') or f"ID: {journal.get('journal_id')}"
+                # Проверяем статус активности
+                is_active = journal.get('is_active', True)
+                status_emoji = "✅" if is_active else "❌"
+
+                # Добавляем строку для каждого журнала
+                text += f"{status_emoji} <b>{group_name}</b>\n"
+                text += f"   └ 📝 {journal_name}\n\n"
+
+        # Создаем клавиатуру с кнопкой "Назад"
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="🔙 Назад к списку групп",
+                callback_data="back_to_groups"
+            )]
+        ])
+
+        # Редактируем сообщение
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        await callback.answer()
+
+    except Exception as e:
+        # Логируем ошибку
+        logger.error(f"Ошибка при отображении списка журналов: {e}")
+        await callback.answer("❌ Произошла ошибка при загрузке журналов", show_alert=True)
 
 
 def create_global_mute_keyboard(current_status: bool):

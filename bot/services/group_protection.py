@@ -44,6 +44,13 @@ BACKUP_TTL_SECONDS = 7 * 24 * 60 * 60
 FILE_BACKUP_DIR = Path("/app/backup") if os.path.exists("/app") else Path("backup")
 FILE_BACKUP_PATH = FILE_BACKUP_DIR / "groups_backup.json"
 
+# Количество ротируемых бэкапов (хранить последние N версий)
+MAX_BACKUP_ROTATIONS = 10
+
+# Минимальный порог для перезаписи бэкапа (защита от потери данных)
+# Если групп стало меньше чем MIN_GROUPS_THRESHOLD от предыдущего бэкапа - НЕ перезаписываем
+MIN_GROUPS_RATIO = 0.5  # 50% - если групп стало меньше половины, что-то не так
+
 # Фейковые тестовые chat_id которые НЕ должны бэкапиться/восстанавливаться
 # Это ID используемые в юнит-тестах
 FAKE_TEST_CHAT_IDS = {
@@ -376,27 +383,129 @@ def _ensure_backup_dir():
         return False
 
 
+def _rotate_backups() -> None:
+    """
+    Ротация бэкапов - сохраняет последние MAX_BACKUP_ROTATIONS версий.
+
+    Файлы именуются: groups_backup.json, groups_backup.1.json, ..., groups_backup.9.json
+    При ротации: .9 удаляется, .8 -> .9, .7 -> .8, ..., основной -> .1
+    """
+    try:
+        if not FILE_BACKUP_PATH.exists():
+            return
+
+        # Удаляем самый старый бэкап если есть
+        oldest = FILE_BACKUP_DIR / f"groups_backup.{MAX_BACKUP_ROTATIONS - 1}.json"
+        if oldest.exists():
+            oldest.unlink()
+            logger.info(f"🗑️ [GROUP_PROTECTION] Удалён старый бэкап: {oldest.name}")
+
+        # Сдвигаем все бэкапы на 1
+        for i in range(MAX_BACKUP_ROTATIONS - 2, 0, -1):
+            old_path = FILE_BACKUP_DIR / f"groups_backup.{i}.json"
+            new_path = FILE_BACKUP_DIR / f"groups_backup.{i + 1}.json"
+            if old_path.exists():
+                old_path.rename(new_path)
+
+        # Перемещаем текущий бэкап в .1
+        backup_1 = FILE_BACKUP_DIR / "groups_backup.1.json"
+        FILE_BACKUP_PATH.rename(backup_1)
+        logger.info(f"📦 [GROUP_PROTECTION] Бэкап ротирован: {FILE_BACKUP_PATH.name} -> {backup_1.name}")
+
+    except Exception as e:
+        logger.error(f"❌ [GROUP_PROTECTION] Ошибка ротации бэкапов: {e}")
+
+
+def _validate_backup_safety(new_count: int) -> bool:
+    """
+    Проверяет безопасность перезаписи бэкапа.
+
+    Защита от случая когда тесты или ошибка удалили группы из БД,
+    и новый "бэкап" с 0-1 группами перезапишет хороший бэкап.
+
+    Returns:
+        True если безопасно перезаписывать, False если нужно сохранить старый
+    """
+    try:
+        # Загружаем текущий бэкап
+        current_backup = load_backup_from_file()
+        if not current_backup:
+            # Нет текущего бэкапа - можно создавать новый
+            return True
+
+        old_count = current_backup.get("count", 0)
+
+        if old_count == 0:
+            # Старый бэкап пустой - можно перезаписывать
+            return True
+
+        if new_count == 0:
+            # Новый бэкап пустой - ОПАСНО! Не перезаписываем
+            logger.warning(
+                f"⛔ [GROUP_PROTECTION] БЛОКИРОВКА БЭКАПА: новый бэкап пуст (0 групп), "
+                f"старый содержит {old_count} групп. Перезапись запрещена!"
+            )
+            return False
+
+        # Проверяем соотношение
+        ratio = new_count / old_count
+
+        if ratio < MIN_GROUPS_RATIO:
+            # Групп стало значительно меньше - подозрительно!
+            logger.warning(
+                f"⛔ [GROUP_PROTECTION] БЛОКИРОВКА БЭКАПА: групп стало {new_count} "
+                f"(было {old_count}, соотношение {ratio:.1%} < {MIN_GROUPS_RATIO:.0%}). "
+                f"Возможна потеря данных! Перезапись запрещена."
+            )
+            return False
+
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ [GROUP_PROTECTION] Ошибка валидации бэкапа: {e}")
+        # При ошибке лучше не перезаписывать
+        return False
+
+
 def save_backup_to_file(backup_data: List[Dict], timestamp: str) -> bool:
     """
-    Сохраняет бэкап групп в файл на хосте.
+    Сохраняет бэкап групп в файл на хосте с ротацией и валидацией.
 
     ВАЖНО: Этот файл НЕ удаляется при docker-compose down -v
     потому что папка backup монтируется с хоста.
+
+    Защиты:
+    1. Валидация - не перезаписываем если групп стало значительно меньше
+    2. Ротация - храним последние 10 версий бэкапа
     """
     if not _ensure_backup_dir():
         return False
 
     try:
+        new_count = len(backup_data)
+
+        # ЗАЩИТА: Проверяем безопасность перезаписи
+        if not _validate_backup_safety(new_count):
+            logger.warning(
+                f"⚠️ [GROUP_PROTECTION] Бэкап НЕ сохранён из-за подозрительного уменьшения групп. "
+                f"Старый бэкап сохранён для безопасности."
+            )
+            return False
+
+        # РОТАЦИЯ: Сохраняем предыдущие версии
+        _rotate_backups()
+
+        # Сохраняем новый бэкап
         file_data = {
             "timestamp": timestamp,
-            "count": len(backup_data),
+            "count": new_count,
             "groups": backup_data
         }
 
         with open(FILE_BACKUP_PATH, 'w', encoding='utf-8') as f:
             json.dump(file_data, f, ensure_ascii=False, indent=2)
 
-        logger.info(f"✅ [GROUP_PROTECTION] Файловый бэкап сохранён: {FILE_BACKUP_PATH}")
+        logger.info(f"✅ [GROUP_PROTECTION] Файловый бэкап сохранён: {FILE_BACKUP_PATH} ({new_count} групп)")
         return True
     except Exception as e:
         logger.error(f"❌ [GROUP_PROTECTION] Ошибка сохранения файлового бэкапа: {e}")

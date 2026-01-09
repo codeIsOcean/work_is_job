@@ -13,15 +13,25 @@ import pytest
 
 # КРИТИЧНО: Устанавливаем DATABASE_URL ДО импорта bot.config
 # чтобы избежать ошибки "DATABASE_URL не установлен!"
-if not os.getenv("DATABASE_URL"):
-    # Используем переменные из окружения или значения по умолчанию
-    host = os.getenv("POSTGRES_HOST", "127.0.0.1")
-    port = os.getenv("POSTGRES_PORT", "5432")
-    db_name = os.getenv("POSTGRES_DB", "testdb")
-    user = os.getenv("POSTGRES_USER", "testuser")
-    password = os.getenv("POSTGRES_PASSWORD", "testpass")
-    database_url = f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{db_name}"
-    os.environ["DATABASE_URL"] = database_url
+# ВАЖНО: Используем postgres_unit_tests (порт 5434), НЕ postgres_test (порт 5433)!
+#
+# Проблема: bot/config.py загружает .env файл при импорте и перезаписывает DATABASE_URL
+# Решение: Устанавливаем TEST_DATABASE_URL который имеет приоритет в _build_database_url()
+#
+# Настройки для postgres_unit_tests из docker-compose.test.yml
+_test_host = os.getenv("POSTGRES_HOST", "127.0.0.1")
+_test_port = "5434"  # Порт 5434 - postgres_unit_tests (НЕ 5433!)
+_test_db = "unit_tests"  # БД unit_tests
+_test_user = "test_runner"
+_test_pass = "test_runner_pass"
+_test_database_url = f"postgresql+asyncpg://{_test_user}:{_test_pass}@{_test_host}:{_test_port}/{_test_db}"
+
+# Устанавливаем TEST_DATABASE_URL который используется в _build_database_url()
+os.environ["TEST_DATABASE_URL"] = _test_database_url
+
+# Также устанавливаем DATABASE_URL для bot.config (чтобы не было ошибки при импорте)
+# Но реальное подключение будет к TEST_DATABASE_URL
+os.environ["DATABASE_URL"] = _test_database_url
 
 # Гарантируем, что пакет bot доступен для импортов из тестов
 # (добавляем корень проекта в sys.path независимо от того, откуда запущен pytest).
@@ -50,17 +60,84 @@ import bot.database.models_scam_media  # noqa: F401
 
 
 def _build_database_url() -> str:
+    """
+    Строит URL для подключения к тестовой БД.
+
+    ВАЖНО: По умолчанию использует postgres_unit_tests на порту 5434!
+    Это ОТДЕЛЬНАЯ БД только для pytest, не связанная с bot_test.
+
+    Запуск БД: docker-compose -f docker-compose.test.yml up -d postgres_unit_tests
+    """
     explicit = os.getenv("TEST_DATABASE_URL")
     if explicit:
         return explicit
 
+    # Настройки для postgres_unit_tests из docker-compose.test.yml
     host = os.getenv("POSTGRES_HOST", "127.0.0.1")
-    port = os.getenv("POSTGRES_PORT", "5433")
-    db_name = os.getenv("POSTGRES_DB", "testdb")
-    user = os.getenv("POSTGRES_USER", "testuser")
-    password = os.getenv("POSTGRES_PASSWORD", "testpass")
+    port = os.getenv("POSTGRES_PORT", "5434")  # Порт 5434 - postgres_unit_tests
+    db_name = os.getenv("POSTGRES_DB", "unit_tests")  # БД unit_tests
+    user = os.getenv("POSTGRES_USER", "test_runner")
+    password = os.getenv("POSTGRES_PASSWORD", "test_runner_pass")
 
     return f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{db_name}"
+
+
+# ========== ЗАЩИТА ОТ ПОДКЛЮЧЕНИЯ К БОЕВОЙ БД ==========
+# Список запрещённых имён БД (боевые базы данных)
+FORBIDDEN_DB_NAMES = [
+    "jobs_inDubai_testBot",  # Тестовый бот (локальный)
+    "bot_prod",              # Продакшн бот
+    "kvd_moder_bot",         # Любые вариации имени бота
+]
+
+def _validate_database_url(database_url: str) -> None:
+    """
+    Проверяет что тесты НЕ подключаются к боевой БД.
+    Вызывает RuntimeError если обнаружена попытка подключения к запрещённой БД.
+    """
+    # Извлекаем имя БД из URL
+    # Формат: postgresql+asyncpg://user:pass@host:port/db_name
+    if "/" in database_url:
+        db_name = database_url.rsplit("/", 1)[-1]
+        # Убираем query параметры если есть
+        if "?" in db_name:
+            db_name = db_name.split("?")[0]
+
+        # Проверяем на запрещённые имена
+        for forbidden in FORBIDDEN_DB_NAMES:
+            if forbidden.lower() in db_name.lower():
+                raise RuntimeError(
+                    f"\n\n"
+                    f"╔══════════════════════════════════════════════════════════════╗\n"
+                    f"║  ⛔ КРИТИЧЕСКАЯ ОШИБКА: ПОПЫТКА ПОДКЛЮЧЕНИЯ К БОЕВОЙ БД!    ║\n"
+                    f"╠══════════════════════════════════════════════════════════════╣\n"
+                    f"║  БД: {db_name:<54} ║\n"
+                    f"║  Запрещено: {forbidden:<47} ║\n"
+                    f"╠══════════════════════════════════════════════════════════════╣\n"
+                    f"║  Тесты удаляют ВСЕ данные из БД!                            ║\n"
+                    f"║  Используйте отдельную тестовую БД.                         ║\n"
+                    f"║                                                              ║\n"
+                    f"║  Решение: установите TEST_DATABASE_URL или используйте      ║\n"
+                    f"║  БД с именем 'testdb' на порту 5433                         ║\n"
+                    f"╚══════════════════════════════════════════════════════════════╝\n"
+                )
+
+    # Дополнительная проверка: имя БД должно содержать "test"
+    # (кроме явно разрешённых случаев)
+    if "/" in database_url:
+        db_name = database_url.rsplit("/", 1)[-1].split("?")[0]
+        if "test" not in db_name.lower() and db_name != "testdb":
+            raise RuntimeError(
+                f"\n\n"
+                f"╔══════════════════════════════════════════════════════════════╗\n"
+                f"║  ⚠️ ПРЕДУПРЕЖДЕНИЕ: Имя БД не содержит 'test'               ║\n"
+                f"╠══════════════════════════════════════════════════════════════╣\n"
+                f"║  БД: {db_name:<54} ║\n"
+                f"╠══════════════════════════════════════════════════════════════╣\n"
+                f"║  Для безопасности имя тестовой БД должно содержать 'test'   ║\n"
+                f"║  Установите TEST_DATABASE_URL с правильным именем БД        ║\n"
+                f"╚══════════════════════════════════════════════════════════════╝\n"
+            )
 
 
 @pytest.fixture(scope="session")
@@ -131,6 +208,10 @@ async def _setup_test_database():
         return engine
 
     database_url = _build_database_url()
+
+    # КРИТИЧНО: Проверяем что не подключаемся к боевой БД!
+    _validate_database_url(database_url)
+
     engine = None
     try:
         engine = await init_engine(database_url)

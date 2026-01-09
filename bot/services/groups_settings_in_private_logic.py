@@ -3,7 +3,8 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, delete
-from bot.database.models import Group, UserGroup, CaptchaSettings, ChatSettings
+# Импортируем модели для работы с группами и журналами
+from bot.database.models import Group, UserGroup, CaptchaSettings, ChatSettings, GroupJournalChannel
 import logging
 import inspect
 
@@ -121,14 +122,39 @@ async def get_admin_groups(user_id: int, session: AsyncSession, bot: Bot = None)
     чтобы восстановить связи если пользователь снова стал админом.
     """
     try:
+        # ─────────────────────────────────────────────────────────────────────
+        # ФИЛЬТРАЦИЯ ЖУРНАЛОВ: Получаем ID всех каналов-журналов чтобы
+        # исключить их из списка групп в /settings. Журналы показываются
+        # отдельно через кнопку "Привязанные журналы" или команду /linkedjournals
+        # ─────────────────────────────────────────────────────────────────────
+        # Запрашиваем все journal_channel_id из таблицы привязок журналов
+        journal_query = select(GroupJournalChannel.journal_channel_id)
+        # Выполняем запрос к БД
+        journal_result = await session.execute(journal_query)
+        # Собираем ID журналов в множество для быстрой проверки O(1)
+        journal_channel_ids = {row[0] for row in journal_result.fetchall()}
+        # Логируем количество найденных журналов для отладки
+        logger.info(f"Найдено {len(journal_channel_ids)} каналов-журналов для исключения из списка групп")
+
         # ФИКС: Получаем ВСЕ группы из БД (где бот состоит), а не только из UserGroup
         # Это решает проблему "исчезающих групп" когда UserGroup был удалён,
         # но пользователь снова стал админом
-        all_groups_query = select(Group).where(Group.chat_id != 0)  # исключаем глобальные настройки
+        # НОВОЕ: Исключаем каналы-журналы из списка групп
+        if journal_channel_ids:
+            # Если есть журналы — исключаем их из выборки
+            all_groups_query = select(Group).where(
+                Group.chat_id != 0,  # исключаем глобальные настройки (chat_id=0)
+                ~Group.chat_id.in_(journal_channel_ids)  # исключаем каналы-журналы
+            )
+        else:
+            # Если журналов нет — просто исключаем глобальные настройки
+            all_groups_query = select(Group).where(Group.chat_id != 0)
+        # Выполняем запрос и получаем список групп
         all_groups_result = await session.execute(all_groups_query)
+        # Преобразуем результат в список объектов Group
         all_groups = all_groups_result.scalars().all()
 
-        logger.info(f"Найдено {len(all_groups)} групп в БД для проверки")
+        logger.info(f"Найдено {len(all_groups)} групп в БД для проверки (без журналов)")
 
         if not all_groups:
             return []
@@ -829,3 +855,75 @@ async def toggle_global_mute(session: AsyncSession) -> bool:
     except Exception as e:
         logger.error(f"Ошибка при переключении глобального мута: {e}")
         return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ФУНКЦИИ ДЛЯ РАБОТЫ С ПРИВЯЗАННЫМИ ЖУРНАЛАМИ
+# Журналы — это каналы куда бот отправляет логи действий для каждой группы
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def get_linked_journals(session: AsyncSession) -> List[dict]:
+    """
+    Возвращает список всех привязанных журналов с информацией о группах.
+
+    Используется для отображения в UI (/settings → "Привязанные журналы")
+    и команды /linkedjournals.
+
+    Args:
+        session: Асинхронная сессия БД
+
+    Returns:
+        Список словарей с информацией о журналах:
+        [
+            {
+                "group_id": -100123456789,
+                "group_title": "Название группы",
+                "journal_id": -100987654321,
+                "journal_title": "Название журнала",
+                "is_active": True
+            },
+            ...
+        ]
+    """
+    try:
+        # Запрашиваем все привязки журналов с информацией о группах
+        # Используем LEFT JOIN чтобы получить названия групп из таблицы groups
+        journal_query = select(
+            GroupJournalChannel.group_id,
+            GroupJournalChannel.journal_channel_id,
+            GroupJournalChannel.journal_title,
+            GroupJournalChannel.is_active,
+            Group.title.label('group_title')
+        ).outerjoin(
+            # Соединяем с таблицей groups по group_id
+            Group, GroupJournalChannel.group_id == Group.chat_id
+        ).order_by(
+            # Сортируем по названию группы для удобства
+            Group.title
+        )
+
+        # Выполняем запрос
+        result = await session.execute(journal_query)
+        # Получаем все строки результата
+        rows = result.fetchall()
+
+        # Преобразуем в список словарей для удобства использования в UI
+        journals = []
+        for row in rows:
+            journals.append({
+                "group_id": row.group_id,
+                "group_title": row.group_title or f"Группа {row.group_id}",
+                "journal_id": row.journal_channel_id,
+                "journal_title": row.journal_title or f"Журнал {row.journal_channel_id}",
+                "is_active": row.is_active
+            })
+
+        # Логируем количество найденных журналов
+        logger.info(f"Найдено {len(journals)} привязанных журналов")
+
+        return journals
+
+    except Exception as e:
+        # При ошибке логируем и возвращаем пустой список
+        logger.error(f"Ошибка при получении списка журналов: {e}")
+        return []

@@ -4,6 +4,7 @@ from bot.database.models import (
     CaptchaSettings,
     ChatSettings,
     Group,
+    GroupJournalChannel,
     User,
     UserGroup,
 )
@@ -79,4 +80,108 @@ async def test_get_global_mute_status(fake_redis, db_session):
     result = await group_settings_logic.get_global_mute_status(db_session)
     assert result is True
     assert await fake_redis.get("global_mute_enabled") == "1"
+
+
+@pytest.mark.asyncio
+async def test_get_admin_groups_filters_journals(db_session):
+    """Тест что get_admin_groups() фильтрует журналы-каналы из списка групп"""
+    # Создаём пользователя
+    user = User(user_id=125, first_name="Admin3")
+
+    # Создаём группу (обычная группа - должна быть в списке)
+    group = Group(chat_id=-3005, title="Normal group")
+
+    # Создаём журнал-канал (должен быть отфильтрован)
+    journal = Group(chat_id=-1001234567890, title="Journal channel")
+
+    # Связываем пользователя с обеими группами
+    link_group = UserGroup(user_id=user.user_id, group_id=group.chat_id)
+    link_journal = UserGroup(user_id=user.user_id, group_id=journal.chat_id)
+
+    # Создаём запись о привязке журнала к группе
+    journal_link = GroupJournalChannel(
+        group_id=group.chat_id,
+        journal_channel_id=journal.chat_id,
+        journal_title="Journal channel",
+        is_active=True
+    )
+
+    # Добавляем все объекты в базу
+    db_session.add_all([user, group, journal, link_group, link_journal, journal_link])
+    await db_session.commit()
+
+    # Получаем список групп (без bot параметра для упрощения теста)
+    groups = await group_settings_logic.get_admin_groups(user.user_id, db_session)
+
+    # Проверяем что в списке только одна группа (журнал отфильтрован)
+    assert len(groups) == 1
+    assert groups[0].chat_id == group.chat_id
+    assert groups[0].title == "Normal group"
+
+
+@pytest.mark.asyncio
+async def test_get_linked_journals_returns_empty_list(db_session):
+    """Тест что get_linked_journals() возвращает пустой список когда журналов нет"""
+    # Получаем список журналов (должен быть пустым)
+    journals = await group_settings_logic.get_linked_journals(db_session)
+
+    # Проверяем что список пустой
+    assert journals == []
+
+
+@pytest.mark.asyncio
+async def test_get_linked_journals_returns_journals_list(db_session):
+    """Тест что get_linked_journals() возвращает список привязанных журналов"""
+    # Создаём группу
+    group = Group(chat_id=-3006, title="Test group for journals")
+    db_session.add(group)
+    await db_session.commit()
+
+    # Создаём запись о привязке журнала
+    journal_link = GroupJournalChannel(
+        group_id=group.chat_id,
+        journal_channel_id=-1001234567891,
+        journal_title="Test journal",
+        is_active=True
+    )
+    db_session.add(journal_link)
+    await db_session.commit()
+
+    # Получаем список журналов
+    journals = await group_settings_logic.get_linked_journals(db_session)
+
+    # Проверяем что в списке один журнал
+    assert len(journals) == 1
+    assert journals[0]['group_id'] == group.chat_id
+    assert journals[0]['group_title'] == "Test group for journals"
+    # Ключ journal_id (не journal_channel_id) согласно get_linked_journals()
+    assert journals[0]['journal_id'] == -1001234567891
+    assert journals[0]['journal_title'] == "Test journal"
+    assert journals[0]['is_active'] is True
+
+
+@pytest.mark.asyncio
+async def test_get_linked_journals_includes_inactive_journals(db_session):
+    """Тест что get_linked_journals() возвращает неактивные журналы тоже"""
+    # Создаём группу
+    group = Group(chat_id=-3007, title="Inactive journal group")
+    db_session.add(group)
+    await db_session.commit()
+
+    # Создаём запись о неактивном журнале
+    journal_link = GroupJournalChannel(
+        group_id=group.chat_id,
+        journal_channel_id=-1001234567892,
+        journal_title="Inactive journal",
+        is_active=False
+    )
+    db_session.add(journal_link)
+    await db_session.commit()
+
+    # Получаем список журналов
+    journals = await group_settings_logic.get_linked_journals(db_session)
+
+    # Проверяем что неактивный журнал тоже в списке
+    assert len(journals) == 1
+    assert journals[0]['is_active'] is False
 
