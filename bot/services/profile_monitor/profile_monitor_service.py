@@ -491,12 +491,50 @@ async def check_profile_changes(
                 "new": "удалено фото",
             })
     elif current_has_photo and snapshot.photo_id != current_photo_id:
-        # Фото было и осталось, но изменилось
-        changes.append({
-            "type": "photo_changed",
-            "old": "старое фото",
-            "new": "новое фото",
-        })
+        # ─────────────────────────────────────────────────────────
+        # ДИАГНОСТИКА: Логируем реальные значения photo_id для отладки
+        # Это поможет понять почему срабатывает ложное изменение фото
+        # ─────────────────────────────────────────────────────────
+        logger.info(
+            f"[PROFILE_MONITOR] Photo ID comparison: "
+            f"snapshot_photo_id='{snapshot.photo_id}' "
+            f"current_photo_id='{current_photo_id}' "
+            f"match={snapshot.photo_id == current_photo_id}"
+        )
+
+        # ─────────────────────────────────────────────────────────
+        # ЗАЩИТА: Проверяем что оба ID являются file_unique_id
+        # file_unique_id обычно начинается с "Ag" и короче file_id
+        # file_id обычно длинный (80+ символов) и содержит разные префиксы
+        # Если форматы разные - пропускаем сравнение и обновляем snapshot
+        # ─────────────────────────────────────────────────────────
+        snapshot_is_unique = snapshot.photo_id and len(snapshot.photo_id) < 50
+        current_is_unique = current_photo_id and len(current_photo_id) < 50
+
+        # Если форматы ID разные (один file_id, другой file_unique_id)
+        # то это не реальная смена фото, а просто разный формат хранения
+        if snapshot_is_unique != current_is_unique:
+            logger.info(
+                f"[PROFILE_MONITOR] Photo ID format mismatch detected, updating snapshot silently: "
+                f"snapshot_is_unique={snapshot_is_unique} current_is_unique={current_is_unique}"
+            )
+            # ─────────────────────────────────────────────────────────
+            # Добавляем "тихое" изменение чтобы snapshot обновился новым photo_id
+            # Тип "_internal_photo_id_update" будет отфильтрован в handler
+            # и не попадёт в журнал, но snapshot обновится
+            # ─────────────────────────────────────────────────────────
+            changes.append({
+                "type": "_internal_photo_id_update",
+                "old": snapshot.photo_id,
+                "new": current_photo_id,
+            })
+        else:
+            # Фото было и осталось, но реально изменилось (оба ID одного формата)
+            changes.append({
+                "type": "photo_changed",
+                "old": "старое фото",
+                "new": "новое фото",
+            })
 
     return changes
 

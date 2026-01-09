@@ -524,6 +524,13 @@ async def _handle_profile_changes(
     # Логируем каждое изменение
     log_entries = []
     for change in changes:
+        # ─────────────────────────────────────────────────────────
+        # Пропускаем внутренние изменения (например обновление формата photo_id)
+        # Они нужны только для обновления snapshot, не для логирования
+        # ─────────────────────────────────────────────────────────
+        if change["type"].startswith("_internal"):
+            continue
+
         # Проверяем настройки логирования
         if change["type"] == "name" and not settings.log_name_changes:
             continue
