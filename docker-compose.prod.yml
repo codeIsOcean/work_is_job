@@ -87,8 +87,15 @@ services:
       - prod_network
 
 volumes:
+  # ╔═══════════════════════════════════════════════════════════════════════╗
+  # ║  ЗАЩИТА: external volumes НЕ удаляются при docker-compose down -v!   ║
+  # ╚═══════════════════════════════════════════════════════════════════════╝
   postgres_prod_data:
+    external: true
+    name: jobs_indubai_prod_postgres_prod_data
   redis_prod_data:
+    external: true
+    name: jobs_indubai_prod_redis_prod_data
 
 networks:
   prod_network:
