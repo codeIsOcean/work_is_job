@@ -698,8 +698,9 @@ async def mute_user_callback(callback):
 
         # Обновляем сообщение
         try:
-            current_text = callback.message.text or callback.message.caption or ""
-            new_text = current_text + "\n\n🔇 <b>МУТ НАВСЕГДА</b> применён администратором"
+            # ВАЖНО: используем html_text чтобы сохранить оригинальное HTML форматирование (ссылки)
+            admin_name = callback.from_user.full_name or f"ID:{callback.from_user.id}"
+            new_text = callback.message.html_text + f"\n\n🔇 <b>МУТ НАВСЕГДА</b> применён администратором\n\n{admin_name} [<code>{callback.from_user.id}</code>]"
             await callback.message.edit_text(
                 text=new_text,
                 parse_mode="HTML",
@@ -736,8 +737,9 @@ async def ban_user_callback(callback):
 
         # Обновляем сообщение
         try:
-            current_text = callback.message.text or callback.message.caption or ""
-            new_text = current_text + "\n\n🚫 <b>БАН</b> применён администратором"
+            # ВАЖНО: используем html_text чтобы сохранить оригинальное HTML форматирование (ссылки)
+            admin_name = callback.from_user.full_name or f"ID:{callback.from_user.id}"
+            new_text = callback.message.html_text + f"\n\n🚫 <b>БАН</b> применён администратором\n\n{admin_name} [<code>{callback.from_user.id}</code>]"
             await callback.message.edit_text(
                 text=new_text,
                 parse_mode="HTML",
@@ -792,8 +794,9 @@ async def mute7d_user_callback(callback):
 
         # Обновляем сообщение
         try:
-            current_text = callback.message.text or callback.message.caption or ""
-            new_text = current_text + "\n\n🔇 <b>МУТ 7 ДНЕЙ</b> применён администратором"
+            # ВАЖНО: используем html_text чтобы сохранить оригинальное HTML форматирование (ссылки)
+            admin_name = callback.from_user.full_name or f"ID:{callback.from_user.id}"
+            new_text = callback.message.html_text + f"\n\n🔇 <b>МУТ 7 ДНЕЙ</b> применён администратором\n\n{admin_name} [<code>{callback.from_user.id}</code>]"
             await callback.message.edit_text(
                 text=new_text,
                 parse_mode="HTML",
@@ -849,9 +852,9 @@ async def unmute_user_callback(callback):
 
         # Обновляем текст сообщения, добавляя информацию о размуте
         try:
-            # Получаем текущий текст и добавляем пометку
-            current_text = callback.message.text or callback.message.caption or ""
-            new_text = current_text + "\n\n✅ <b>РАЗМУЧЕН</b> администратором"
+            # ВАЖНО: используем html_text чтобы сохранить оригинальное HTML форматирование (ссылки)
+            admin_name = callback.from_user.full_name or f"ID:{callback.from_user.id}"
+            new_text = callback.message.html_text + f"\n\n✅ <b>РАЗМУЧЕН</b> администратором\n\n{admin_name} [<code>{callback.from_user.id}</code>]"
             await callback.message.edit_text(
                 text=new_text,
                 parse_mode="HTML",
@@ -903,8 +906,8 @@ async def delete_user_messages_callback(callback):
 
             # Обновляем текст сообщения
             try:
-                current_text = callback.message.text or callback.message.caption or ""
-                new_text = current_text + f"\n\n🗑️ <b>УДАЛЕНО {deleted_count} СООБЩЕНИЙ</b>"
+                # ВАЖНО: используем html_text чтобы сохранить оригинальное HTML форматирование (ссылки)
+                new_text = callback.message.html_text + f"\n\n🗑️ <b>УДАЛЕНО {deleted_count} СООБЩЕНИЙ</b>"
                 await callback.message.edit_text(
                     text=new_text,
                     parse_mode="HTML",

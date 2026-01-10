@@ -10,7 +10,9 @@
 # ============================================================
 
 # Импортируем типы для аннотаций
-from typing import Optional, NamedTuple, List
+from typing import Optional, NamedTuple, List, Dict, Any
+# Импортируем dataclass для SectionCandidate
+from dataclasses import dataclass
 # Импортируем логгер
 import logging
 # Импортируем re для работы с регулярными выражениями (word boundaries)
@@ -45,8 +47,8 @@ from bot.services.content_filter.scam_detector import (
 from bot.services.content_filter.flood_detector import FloodDetector, create_flood_detector
 # Импортируем CAS сервис для проверки в глобальной базе спамеров
 from bot.services.cas_service import is_cas_banned
-# Импортируем spammer_registry для добавления в БД спаммеров
-from bot.services.spammer_registry import record_spammer_incident
+# Импортируем spammer_registry для добавления и проверки в БД спаммеров
+from bot.services.spammer_registry import record_spammer_incident, get_spammer_record
 
 # Создаём логгер
 logger = logging.getLogger(__name__)
@@ -101,11 +103,45 @@ class FilterResult(NamedTuple):
     custom_delete_delay: Optional[int] = None
     custom_notification_delay: Optional[int] = None
     # CAS и БД спаммеров (для custom_section)
-    cas_banned: bool = False
-    added_to_spammer_db: bool = False
+    cas_checked: bool = False  # CAS проверка была выполнена
+    cas_banned: bool = False   # Пользователь найден в CAS
+    added_to_spammer_db: bool = False  # Добавлен в БД спаммеров (score >= 150)
+    in_spammer_db: bool = False  # Пользователь УЖЕ был в БД спаммеров до этого инцидента
     # Детальная информация о сработавших паттернах (для custom_section)
     # Список словарей: [{'pattern': str, 'method': str, 'weight': int, 'context': str}, ...]
     matched_patterns: Optional[List[dict]] = None
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# SectionCandidate — кандидат раздела для выбора по максимальному score
+# ════════════════════════════════════════════════════════════════════════════
+# Используется для сбора всех разделов которые превысили порог,
+# чтобы потом выбрать раздел с МАКСИМАЛЬНЫМ score (а не первый сработавший).
+# Это предотвращает ситуацию когда раздел с 60 баллами применяется
+# вместо раздела с 150 баллами только потому что проверился первым.
+# ════════════════════════════════════════════════════════════════════════════
+@dataclass
+class SectionCandidate:
+    """
+    Кандидат раздела для выбора по максимальному score.
+
+    Сохраняет все данные раздела чтобы после цикла
+    создать FilterResult для победителя (раздел с max score).
+    """
+    # Объект раздела CustomSpamSection
+    section: Any
+    # Набранные баллы
+    total_score: int
+    # Список сработавших паттернов (строки для trigger)
+    triggered_patterns: List[str]
+    # Детальная инфо о паттернах для журнала
+    matched_patterns_detailed: List[Dict]
+    # Строка для отображения (первые 3 паттерна + счётчик)
+    trigger_str: str
+    # CAS проверка была выполнена
+    cas_checked: bool = False
+    # Результат CAS проверки (кэшируется для всех разделов)
+    cas_banned: bool = False
 
 
 class FilterManager:
@@ -205,6 +241,23 @@ class FilterManager:
 
         # Получаем user_id для детекторов
         user_id = message.from_user.id if message.from_user else 0
+
+        # ─────────────────────────────────────────────────────────
+        # Проверяем, есть ли пользователь уже в БД спаммеров бота
+        # Это делается один раз в начале, результат передаётся в FilterResult
+        # ─────────────────────────────────────────────────────────
+        in_spammer_db = False
+        if user_id:
+            try:
+                spammer_record = await get_spammer_record(session, user_id)
+                if spammer_record:
+                    in_spammer_db = True
+                    logger.info(
+                        f"[FilterManager] 🛡️ user_id={user_id} УЖЕ в БД спаммеров "
+                        f"(incidents={spammer_record.incidents}, score={spammer_record.risk_score})"
+                    )
+            except Exception as e:
+                logger.warning(f"[FilterManager] Ошибка проверки spammer_registry: {e}")
 
         # ─────────────────────────────────────────────────────────
         # Пропускаем сообщения от Telegram (ID 777000)
@@ -459,6 +512,22 @@ class FilterManager:
                 # Нормализуем текст один раз
                 normalized_text = self._normalizer.normalize(text).lower()
 
+                # ══════════════════════════════════════════════════════════
+                # НОВАЯ ЛОГИКА: Собираем кандидатов, выбираем с max score
+                # ══════════════════════════════════════════════════════════
+                # Вместо return при первом срабатывании — сохраняем кандидата.
+                # После проверки ВСЕХ разделов выбираем раздел с максимальным score.
+                # Это предотвращает ситуацию когда раздел с 60 баллами применяется
+                # вместо раздела с 150 баллами только потому что проверился первым.
+                # ══════════════════════════════════════════════════════════
+
+                # Лучший кандидат (раздел с максимальным score)
+                best_candidate: Optional[SectionCandidate] = None
+
+                # Кэш результата CAS — проверяем ОДИН раз, используем для всех разделов
+                # None = ещё не проверяли, True/False = результат проверки
+                cas_result_cached: Optional[bool] = None
+
                 for section in sections:
                     # Получаем паттерны раздела
                     patterns = await section_service.get_section_patterns(section.id, session, active_only=True)
@@ -692,130 +761,199 @@ class FilterManager:
 
                     # Проверяем достижен ли порог
                     if total_score >= section.threshold:
-                        # Раздел сработал!
+                        # ─────────────────────────────────────────────────────
+                        # Раздел сработал! Формируем trigger_str для отображения
+                        # ─────────────────────────────────────────────────────
                         trigger_str = ', '.join(triggered_patterns[:3])
                         if len(triggered_patterns) > 3:
                             trigger_str += f" (+{len(triggered_patterns) - 3})"
 
                         # ─────────────────────────────────────────────────────
-                        # ПРОВЕРЯЕМ ПОРОГИ БАЛЛОВ РАЗДЕЛА (Баг 1 fix)
-                        # Если есть подходящий порог — используем его action
-                        # Если нет — используем action из самого раздела
+                        # CAS ПРОВЕРКА — один раз, результат кэшируется
+                        # Если юзер в CAS базе — добавляем в БД спаммеров СРАЗУ
+                        # Это позволяет ловить скаммеров с низким score (60-149)
+                        # которые прошли рандомизацию, но есть в глобальной базе
                         # ─────────────────────────────────────────────────────
-                        threshold_result = await section_service.get_action_for_section_score(
-                            section_id=section.id,
-                            score=total_score,
-                            session=session
-                        )
-
-                        # Определяем финальное действие и длительность
-                        if threshold_result:
-                            # Нашли подходящий порог — используем его
-                            final_action = threshold_result[0]
-                            final_mute_duration = threshold_result[1] or section.mute_duration
-                            logger.info(
-                                f"[FilterManager] CustomSection '{section.name}': "
-                                f"порог баллов {total_score} → {final_action}"
-                            )
-                        else:
-                            # Порог не найден — используем action из раздела
-                            final_action = section.action
-                            final_mute_duration = section.mute_duration
-
-                        logger.info(
-                            f"[FilterManager] CustomSection '{section.name}' сработал в чате {chat_id}: "
-                            f"score={total_score}, порог={section.threshold}, action={final_action}"
-                        )
-
-                        # ─────────────────────────────────────────────────────
-                        # CAS (COMBOT ANTI-SPAM) ПРОВЕРКА
-                        # ─────────────────────────────────────────────────────
-                        cas_banned = False
-                        if section.cas_enabled:
+                        if section.cas_enabled and cas_result_cached is None:
                             try:
-                                cas_banned = await is_cas_banned(user_id)
-                                if cas_banned:
+                                # Проверяем CAS один раз, кэшируем результат
+                                cas_result_cached = await is_cas_banned(user_id)
+                                if cas_result_cached:
                                     logger.info(
-                                        f"[FilterManager] CAS: user_id={user_id} найден в базе CAS!"
+                                        f"[FilterManager] CAS: user_id={user_id} найден в базе! "
+                                        f"Раздел '{section.name}', score={total_score}"
                                     )
+                                    # Добавляем в БД спаммеров сразу при обнаружении CAS
+                                    try:
+                                        await record_spammer_incident(
+                                            session=session,
+                                            user_id=user_id,
+                                            risk_score=total_score,
+                                            reason=f"cas_banned:{section.name}"
+                                        )
+                                        logger.info(
+                                            f"[FilterManager] CAS-спаммер добавлен в БД: user_id={user_id}"
+                                        )
+                                    except Exception as e:
+                                        logger.warning(
+                                            f"[FilterManager] Ошибка добавления CAS в БД: {e}"
+                                        )
                             except Exception as e:
                                 logger.warning(f"[FilterManager] CAS ошибка: {e}")
+                                # При ошибке считаем что не в CAS (не блокируем проверку)
+                                cas_result_cached = False
 
                         # ─────────────────────────────────────────────────────
-                        # ДОБАВЛЕНИЕ В ГЛОБАЛЬНУЮ БД СПАММЕРОВ
-                        # Добавляем только при срабатывании САМОГО ВЫСОКОГО порога
-                        # чтобы избежать ложных попаданий в БД спамеров
+                        # Сохраняем кандидата если score > лучшего
+                        # НЕ делаем return — продолжаем проверять остальные разделы
+                        # чтобы найти раздел с МАКСИМАЛЬНЫМ score
                         # ─────────────────────────────────────────────────────
-                        added_to_spammer_db = False
-                        if section.add_to_spammer_db:
-                            # Получаем все активные пороги раздела
-                            all_thresholds = await section_service.get_section_thresholds(
-                                section.id, session, enabled_only=True
+                        if best_candidate is None or total_score > best_candidate.total_score:
+                            # cas_checked=True если CAS был проверен (cas_result_cached != None)
+                            cas_was_checked = cas_result_cached is not None
+                            best_candidate = SectionCandidate(
+                                section=section,
+                                total_score=total_score,
+                                triggered_patterns=triggered_patterns,
+                                matched_patterns_detailed=matched_patterns_detailed,
+                                trigger_str=trigger_str,
+                                cas_checked=cas_was_checked,
+                                cas_banned=cas_result_cached if cas_result_cached else False
+                            )
+                            logger.info(
+                                f"[FilterManager] Новый лучший кандидат: '{section.name}' "
+                                f"score={total_score}"
                             )
 
-                            # Определяем, попадает ли score в самый высокий порог
-                            should_add_to_db = False
-                            if all_thresholds:
-                                # Находим порог с максимальным min_score (самый строгий)
-                                highest_threshold = max(all_thresholds, key=lambda t: t.min_score)
-                                # Добавляем в БД только если score >= min_score самого высокого порога
-                                if total_score >= highest_threshold.min_score:
-                                    should_add_to_db = True
-                                    logger.info(
-                                        f"[FilterManager] Score {total_score} >= {highest_threshold.min_score} "
-                                        f"(самый высокий порог) → добавляем в БД спаммеров"
-                                    )
-                                else:
-                                    logger.info(
-                                        f"[FilterManager] Score {total_score} < {highest_threshold.min_score} "
-                                        f"(самый высокий порог) → НЕ добавляем в БД спаммеров"
-                                    )
-                            else:
-                                # Нет порогов — добавляем по старой логике (флаг раздела)
+                        # НЕ return! Продолжаем проверять остальные разделы
+
+                # ══════════════════════════════════════════════════════════
+                # ПОСЛЕ ЦИКЛА: Обрабатываем лучшего кандидата (с max score)
+                # ══════════════════════════════════════════════════════════
+                if best_candidate:
+                    # Извлекаем данные из лучшего кандидата
+                    section = best_candidate.section
+                    total_score = best_candidate.total_score
+                    trigger_str = best_candidate.trigger_str
+                    matched_patterns_detailed = best_candidate.matched_patterns_detailed
+                    cas_checked = best_candidate.cas_checked
+                    cas_banned = best_candidate.cas_banned
+
+                    logger.info(
+                        f"[FilterManager] Победитель: '{section.name}' с max score={total_score}"
+                    )
+
+                    # ─────────────────────────────────────────────────────
+                    # ПРОВЕРЯЕМ ПОРОГИ БАЛЛОВ РАЗДЕЛА
+                    # Если есть подходящий порог — используем его action
+                    # Если нет — используем action из самого раздела
+                    # ─────────────────────────────────────────────────────
+                    threshold_result = await section_service.get_action_for_section_score(
+                        section_id=section.id,
+                        score=total_score,
+                        session=session
+                    )
+
+                    # Определяем финальное действие и длительность
+                    if threshold_result:
+                        # Нашли подходящий порог — используем его
+                        final_action = threshold_result[0]
+                        final_mute_duration = threshold_result[1] or section.mute_duration
+                        logger.info(
+                            f"[FilterManager] CustomSection '{section.name}': "
+                            f"порог баллов {total_score} → {final_action}"
+                        )
+                    else:
+                        # Порог не найден — используем action из раздела
+                        final_action = section.action
+                        final_mute_duration = section.mute_duration
+
+                    logger.info(
+                        f"[FilterManager] CustomSection '{section.name}' сработал в чате {chat_id}: "
+                        f"score={total_score}, порог={section.threshold}, action={final_action}"
+                    )
+
+                    # ─────────────────────────────────────────────────────
+                    # ДОБАВЛЕНИЕ В ГЛОБАЛЬНУЮ БД СПАММЕРОВ
+                    # Добавляем только при срабатывании САМОГО ВЫСОКОГО порога
+                    # чтобы избежать ложных попаданий в БД спамеров
+                    # (CAS-спаммеры уже добавлены выше при первом обнаружении)
+                    # ─────────────────────────────────────────────────────
+                    added_to_spammer_db = False
+                    if section.add_to_spammer_db:
+                        # Получаем все активные пороги раздела
+                        all_thresholds = await section_service.get_section_thresholds(
+                            section.id, session, enabled_only=True
+                        )
+
+                        # Определяем, попадает ли score в самый высокий порог
+                        should_add_to_db = False
+                        if all_thresholds:
+                            # Находим порог с максимальным min_score (самый строгий)
+                            highest_threshold = max(all_thresholds, key=lambda t: t.min_score)
+                            # Добавляем в БД только если score >= min_score самого высокого порога
+                            if total_score >= highest_threshold.min_score:
                                 should_add_to_db = True
                                 logger.info(
-                                    f"[FilterManager] Нет порогов в разделе, добавляем в БД спаммеров по флагу"
+                                    f"[FilterManager] Score {total_score} >= {highest_threshold.min_score} "
+                                    f"(самый высокий порог) → добавляем в БД спаммеров"
                                 )
+                            else:
+                                logger.info(
+                                    f"[FilterManager] Score {total_score} < {highest_threshold.min_score} "
+                                    f"(самый высокий порог) → НЕ добавляем в БД спаммеров"
+                                )
+                        else:
+                            # Нет порогов — добавляем по старой логике (флаг раздела)
+                            should_add_to_db = True
+                            logger.info(
+                                f"[FilterManager] Нет порогов в разделе, добавляем в БД спаммеров по флагу"
+                            )
 
-                            if should_add_to_db:
-                                try:
-                                    await record_spammer_incident(
-                                        session=session,
-                                        user_id=user_id,
-                                        risk_score=total_score,
-                                        reason=f"custom_section:{section.name}"
-                                    )
-                                    added_to_spammer_db = True
-                                    logger.info(
-                                        f"[FilterManager] Спаммер добавлен в БД: "
-                                        f"user_id={user_id}, section={section.name}"
-                                    )
-                                except Exception as e:
-                                    logger.warning(f"[FilterManager] Ошибка добавления в БД спаммеров: {e}")
+                        if should_add_to_db:
+                            try:
+                                await record_spammer_incident(
+                                    session=session,
+                                    user_id=user_id,
+                                    risk_score=total_score,
+                                    reason=f"custom_section:{section.name}"
+                                )
+                                added_to_spammer_db = True
+                                logger.info(
+                                    f"[FilterManager] Спаммер добавлен в БД: "
+                                    f"user_id={user_id}, section={section.name}"
+                                )
+                            except Exception as e:
+                                logger.warning(f"[FilterManager] Ошибка добавления в БД спаммеров: {e}")
 
-                        return FilterResult(
-                            should_act=True,
-                            detector_type='custom_section',
-                            trigger=trigger_str,
-                            action=final_action,
-                            action_duration=final_mute_duration,
-                            scam_score=total_score,
-                            forward_channel_id=section.forward_channel_id,
-                            section_name=section.name,
-                            forward_on_delete=section.forward_on_delete,
-                            forward_on_mute=section.forward_on_mute,
-                            forward_on_ban=section.forward_on_ban,
-                            # Передаём кастомные тексты и задержки из раздела
-                            custom_mute_text=section.mute_text,
-                            custom_ban_text=section.ban_text,
-                            custom_delete_delay=section.delete_delay,
-                            custom_notification_delay=section.notification_delete_delay,
-                            # CAS и БД спаммеров
-                            cas_banned=cas_banned,
-                            added_to_spammer_db=added_to_spammer_db,
-                            # Детальная информация о паттернах для журнала
-                            matched_patterns=matched_patterns_detailed
-                        )
+                    # ─────────────────────────────────────────────────────
+                    # Возвращаем результат для победителя
+                    # ─────────────────────────────────────────────────────
+                    return FilterResult(
+                        should_act=True,
+                        detector_type='custom_section',
+                        trigger=trigger_str,
+                        action=final_action,
+                        action_duration=final_mute_duration,
+                        scam_score=total_score,
+                        forward_channel_id=section.forward_channel_id,
+                        section_name=section.name,
+                        forward_on_delete=section.forward_on_delete,
+                        forward_on_mute=section.forward_on_mute,
+                        forward_on_ban=section.forward_on_ban,
+                        # Передаём кастомные тексты и задержки из раздела
+                        custom_mute_text=section.mute_text,
+                        custom_ban_text=section.ban_text,
+                        custom_delete_delay=section.delete_delay,
+                        custom_notification_delay=section.notification_delete_delay,
+                        # CAS и БД спаммеров
+                        cas_checked=cas_checked,
+                        cas_banned=cas_banned,
+                        added_to_spammer_db=added_to_spammer_db,
+                        in_spammer_db=in_spammer_db,  # Пользователь УЖЕ был в БД до этого
+                        # Детальная информация о паттернах для журнала
+                        matched_patterns=matched_patterns_detailed
+                    )
 
         # ─────────────────────────────────────────────────────────
         # ШАГ 5: Scam Detector (эвристика + кастомные паттерны)
