@@ -11,7 +11,7 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # Импортируем typing для аннотаций
-from typing import List, Any
+from typing import List, Any, Set
 
 
 # ============================================================
@@ -135,6 +135,44 @@ def create_import_groups_keyboard(groups: List[Any]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def create_import_type_select_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    """
+    Создаёт клавиатуру выбора типа импорта.
+
+    Показывает два варианта:
+    - Импорт в текущую группу
+    - Массовый импорт во все группы
+
+    Args:
+        chat_id: ID текущей группы
+
+    Returns:
+        InlineKeyboardMarkup с кнопками выбора
+    """
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text="📥 В эту группу",
+                callback_data=f"import_single:{chat_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="📤 Массовый импорт",
+                callback_data="import_mass",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🔙 Назад",
+                callback_data=f"import_back:{chat_id}",
+            )
+        ],
+    ]
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 def create_import_confirm_keyboard(chat_id: int) -> InlineKeyboardMarkup:
     """
     Создаёт клавиатуру подтверждения импорта.
@@ -230,3 +268,115 @@ def get_export_import_buttons(chat_id: int) -> List[List[InlineKeyboardButton]]:
             ),
         ],
     ]
+
+
+# ============================================================
+# КЛАВИАТУРА ВЫБОРА ГРУПП ДЛЯ МАССОВОГО ИМПОРТА
+# ============================================================
+
+def create_import_result_keyboard(chat_id: int = None) -> InlineKeyboardMarkup:
+    """
+    Создаёт клавиатуру для экрана результатов импорта.
+
+    Args:
+        chat_id: ID группы для возврата к настройкам (опционально)
+
+    Returns:
+        InlineKeyboardMarkup с кнопкой назад
+    """
+    if chat_id:
+        # Кнопка возврата к настройкам группы
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="🔙 Назад к настройкам",
+                    callback_data=f"import_back:{chat_id}",
+                )]
+            ]
+        )
+    else:
+        # Просто информационное сообщение без кнопки
+        return InlineKeyboardMarkup(inline_keyboard=[])
+
+
+def create_multi_group_select_keyboard(
+    groups: List[Any],
+    selected_ids: Set[int],
+    origin_chat_id: int = None,
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт клавиатуру с галочками для выбора нескольких групп.
+
+    Используется для массового импорта настроек во все выбранные группы.
+
+    Args:
+        groups: Список групп (объекты с chat_id и title)
+        selected_ids: Множество chat_id выбранных групп
+
+    Returns:
+        InlineKeyboardMarkup с галочками и кнопками управления
+    """
+    buttons = []
+
+    # Кнопки групп с галочками
+    for group in groups:
+        chat_id = group.chat_id
+        title = getattr(group, 'title', None) or f"Группа {chat_id}"
+
+        # Ограничиваем длину названия (максимум 25 символов из-за галочки)
+        if len(title) > 25:
+            title = title[:22] + "..."
+
+        # Определяем статус галочки
+        is_selected = chat_id in selected_ids
+        checkbox = "✅" if is_selected else "⬜"
+
+        # Создаём кнопку
+        button = InlineKeyboardButton(
+            text=f"{checkbox} {title}",
+            callback_data=f"import_toggle:{chat_id}",
+        )
+        buttons.append([button])
+
+    # Разделитель (пустая строка через текст)
+    # Кнопки "Выбрать все" / "Снять все"
+    all_selected = len(selected_ids) == len(groups) and len(groups) > 0
+    buttons.append([
+        InlineKeyboardButton(
+            text="☑️ Выбрать все" if not all_selected else "✅ Все выбраны",
+            callback_data="import_select_all",
+        ),
+        InlineKeyboardButton(
+            text="⬜ Снять все",
+            callback_data="import_deselect_all",
+        ),
+    ])
+
+    # Кнопка импорта с количеством выбранных групп
+    selected_count = len(selected_ids)
+    import_text = f"📤 Импортировать ({selected_count})" if selected_count > 0 else "📤 Выберите группы"
+
+    buttons.append([
+        InlineKeyboardButton(
+            text=import_text,
+            callback_data="import_execute",
+        ),
+    ])
+
+    # Кнопка назад/отмены (если есть origin_chat_id - возврат к настройкам)
+    if origin_chat_id:
+        buttons.append([
+            InlineKeyboardButton(
+                text="🔙 Назад к настройкам",
+                callback_data=f"import_back:{origin_chat_id}",
+            ),
+        ])
+    else:
+        buttons.append([
+            InlineKeyboardButton(
+                text="❌ Отмена",
+                callback_data="import_cancel",
+            ),
+        ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
