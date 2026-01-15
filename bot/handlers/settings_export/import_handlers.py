@@ -551,6 +551,10 @@ async def callback_execute_import(
             await callback.answer("⚠️ Выберите хотя бы одну группу", show_alert=True)
             return
 
+        # ВАЖНО: отвечаем на callback СРАЗУ, до долгих операций
+        # Иначе через 30 секунд Telegram вернёт "query is too old"
+        await callback.answer("⏳ Импорт начался...")
+
         # Преобразуем группы в dict для быстрого поиска названий
         groups_dict = {g["chat_id"]: g["title"] for g in groups_data}
 
@@ -632,7 +636,7 @@ async def callback_execute_import(
             parse_mode="HTML"
         )
 
-        await callback.answer("✅ Импорт завершён!")
+        # callback.answer() уже вызван в начале функции
 
     except Exception as e:
         logger.error(f"❌ [IMPORT] Критическая ошибка импорта: {e}")
@@ -642,7 +646,7 @@ async def callback_execute_import(
             f"❌ <b>Ошибка импорта</b>\n\n<code>{safe_error}</code>",
             parse_mode="HTML"
         )
-        await callback.answer("❌ Ошибка импорта", show_alert=True)
+        # callback.answer() уже вызван в начале функции
 
 
 # ============================================================
@@ -1076,6 +1080,10 @@ async def callback_import_confirm_single(
             await state.clear()
             return
 
+        # ВАЖНО: отвечаем на callback СРАЗУ, до долгих операций
+        # Иначе через 30 секунд Telegram вернёт "query is too old"
+        await callback.answer("⏳ Импорт начался...")
+
         # Показываем индикатор загрузки
         await callback.message.edit_text(
             "⏳ <b>Импорт настроек...</b>\n\n"
@@ -1117,7 +1125,7 @@ async def callback_import_confirm_single(
 
         logger.info(f"✅ [IMPORT] Импорт успешен chat_id={chat_id} stats={stats}")
 
-        await callback.answer("✅ Импорт завершён!")
+        # callback.answer() уже вызван в начале функции
 
     except Exception as e:
         logger.error(f"❌ [IMPORT] Ошибка импорта: {e}")
@@ -1129,7 +1137,7 @@ async def callback_import_confirm_single(
             f"❌ <b>Ошибка импорта</b>\n\n<code>{safe_error}</code>",
             parse_mode="HTML"
         )
-        await callback.answer("❌ Ошибка импорта", show_alert=True)
+        # callback.answer() уже вызван в начале функции
 
 
 @import_router.callback_query(F.data.regexp(r"^import_back:-?\d+$"))
