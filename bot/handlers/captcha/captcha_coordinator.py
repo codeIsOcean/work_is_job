@@ -176,16 +176,55 @@ async def handle_join_request(
             f"user_id={user.id}, chat_id={chat.id}, mode={mode.value}"
         )
     else:
-        # Если не удалось отправить капчу - автоодобряем
-        # Чтобы пользователь не застрял
+        # ═══════════════════════════════════════════════════════════════════════
+        # КРИТИЧЕСКИЙ ФИКС: НЕ одобрять заявку при ошибке отправки капчи!
+        # Раньше здесь было автоодобрение — это позволяло скаммерам обходить капчу,
+        # просто заблокировав бота. Теперь заявка остаётся "висеть" без изменений.
+        # Причина ошибки может быть: бот заблокирован, ошибка API, и т.д.
+        # ═══════════════════════════════════════════════════════════════════════
         logger.warning(
-            f"⚠️ [COORDINATOR] Не удалось отправить капчу, автоодобрение: "
-            f"user_id={user.id}"
+            f"⚠️ [COORDINATOR] Не удалось отправить капчу, заявка оставлена без изменений: "
+            f"user_id={user.id}, chat_id={chat.id}. Возможная причина: бот заблокирован."
         )
+
+        # Отправляем уведомление в журнал для ручного решения админом
         try:
-            await bot.approve_chat_join_request(chat.id, user.id)
-        except Exception as e:
-            logger.error(f"❌ Ошибка автоодобрения после неудачи капчи: {e}")
+            # Импортируем функцию отправки в журнал
+            from bot.handlers.bot_activity_journal.bot_activity_journal import send_activity_log
+
+            # Формируем данные для журнала
+            user_data = {
+                'user_id': user.id,
+                'first_name': user.first_name or '',
+                'last_name': user.last_name or '',
+                'username': user.username or '',
+            }
+            group_data = {
+                'chat_id': chat.id,
+                'title': chat.title or f'Chat {chat.id}',
+            }
+            additional_info = {
+                'reason': 'Не удалось отправить капчу (возможно, бот заблокирован)',
+                'action_required': 'Требуется ручное одобрение или отклонение заявки',
+            }
+
+            # Отправляем событие в журнал
+            await send_activity_log(
+                bot=bot,
+                event_type="CAPTCHA_SEND_FAILED",
+                user_data=user_data,
+                group_data=group_data,
+                additional_info=additional_info,
+                status="pending",
+                session=session,
+            )
+            logger.info(
+                f"📝 [COORDINATOR] Уведомление отправлено в журнал: "
+                f"user_id={user.id}, chat_id={chat.id}"
+            )
+        except Exception as journal_err:
+            # Ошибка отправки в журнал не должна ломать основную логику
+            logger.error(f"❌ [COORDINATOR] Ошибка отправки в журнал: {journal_err}")
 
 
 @coordinator_router.message(F.new_chat_members)

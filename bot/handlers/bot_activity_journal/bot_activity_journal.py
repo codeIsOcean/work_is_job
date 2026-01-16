@@ -507,6 +507,24 @@ async def format_activity_message(
         message += f"⏰ <b>Когда:</b> {current_time}\n"
         message += f"#scam_media #filtered #user{user_id}"
 
+    elif event_type == "CAPTCHA_SEND_FAILED":
+        # ═══════════════════════════════════════════════════════════════════════
+        # Не удалось отправить капчу (бот заблокирован или ошибка API)
+        # Заявка осталась "висеть", требуется ручное решение админа
+        # ═══════════════════════════════════════════════════════════════════════
+        reason = additional_info.get('reason', 'Неизвестно') if additional_info else 'Неизвестно'
+        action_required = additional_info.get('action_required', '') if additional_info else ''
+
+        message = f"⚠️ <b>#ОШИБКА_ОТПРАВКИ_КАПЧИ</b> 🟡\n\n"
+        message += f"👤 <b>Пользователь:</b> {user_display}\n"
+        message += f"🏢 <b>Группа:</b> {group_display}\n"
+        message += f"📝 <b>Причина:</b> {reason}\n"
+        if action_required:
+            message += f"⚡ <b>Действие:</b> {action_required}\n"
+        message += f"\n❗ <b>Заявка ожидает ручного решения</b>\n"
+        message += f"⏰ <b>Когда:</b> {current_time}\n"
+        message += f"#captcha #send_failed #manual_review #user{user_id}"
+
     else:
         # Общий формат для неизвестных событий
         message = f"📝 <b>#{event_type}</b> {status_emoji}\n\n"
@@ -633,6 +651,33 @@ async def create_activity_keyboard(
             InlineKeyboardButton(
                 text="🚫 Ban",
                 callback_data=f"ban_user_{user_id}_{chat_id}"
+            )
+        ])
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Кнопки для ошибки отправки капчи — ручное решение по заявке
+    # Заявка "висит", админ может одобрить или отклонить
+    # ═══════════════════════════════════════════════════════════════════════════
+    elif event_type == "CAPTCHA_SEND_FAILED":
+        user_id = user_data.get('user_id')
+        chat_id = group_data.get('chat_id')
+        buttons.append([
+            # Кнопка одобрить заявку (approve_chat_join_request)
+            InlineKeyboardButton(
+                text="✅ Одобрить заявку",
+                callback_data=f"jr_approve_{user_id}_{chat_id}"
+            ),
+            # Кнопка отклонить заявку (decline_chat_join_request)
+            InlineKeyboardButton(
+                text="❌ Отклонить",
+                callback_data=f"jr_decline_{user_id}_{chat_id}"
+            )
+        ])
+        buttons.append([
+            # Кнопка "Ничего не делать" — оставить заявку висеть
+            InlineKeyboardButton(
+                text="⏸️ Оставить висеть",
+                callback_data=f"jr_ignore_{user_id}_{chat_id}"
             )
         ])
 
@@ -1053,3 +1098,163 @@ async def captcha_skip_callback(callback):
 @bot_activity_journal_router.callback_query(lambda c: c.data.startswith("captcha_cancel_"))
 async def captcha_cancel_callback(callback):
     await _handle_captcha_decision(callback, action="Отменить", reject=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Обработчики для ручного решения по join request (когда капча не отправилась)
+# Формат callback_data: jr_approve_{user_id}_{chat_id}, jr_decline_{user_id}_{chat_id}
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@bot_activity_journal_router.callback_query(lambda c: c.data.startswith("jr_approve_"))
+async def jr_approve_callback(callback):
+    """
+    Обработчик кнопки ручного одобрения join request.
+    Вызывается когда капча не была отправлена (бот заблокирован) и
+    админ вручную решает одобрить заявку.
+
+    Callback data формат: jr_approve_{user_id}_{chat_id}
+    """
+    try:
+        # Извлекаем user_id и chat_id из callback_data
+        parts = callback.data.split("_")
+        user_id = int(parts[2])
+        chat_id = int(parts[3])
+
+        # Одобряем заявку на вступление
+        await _approve_join(callback.bot, chat_id, user_id)
+
+        # Уведомляем админа об успехе
+        await callback.answer("✅ Заявка одобрена", show_alert=True)
+        logger.info(
+            f"✅ [JR_APPROVE] Заявка одобрена вручную: "
+            f"user_id={user_id}, chat_id={chat_id}, admin={callback.from_user.id}"
+        )
+
+        # Обновляем сообщение — убираем кнопки, добавляем инфо об одобрении
+        try:
+            admin_name = callback.from_user.full_name or f"ID:{callback.from_user.id}"
+            new_text = (
+                callback.message.html_text +
+                f"\n\n✅ <b>ЗАЯВКА ОДОБРЕНА</b> администратором\n"
+                f"👮 {html.escape(admin_name)} [<code>{callback.from_user.id}</code>]"
+            )
+            await callback.message.edit_text(
+                text=new_text,
+                parse_mode="HTML",
+                reply_markup=None  # Убираем кнопки после действия
+            )
+        except Exception as edit_err:
+            logger.warning(f"Не удалось обновить сообщение: {edit_err}")
+
+    except TelegramBadRequest as e:
+        # Заявка могла уже быть обработана или истечь
+        error_msg = str(e)
+        if "HIDE_REQUESTER_MISSING" in error_msg:
+            await callback.answer(
+                "⚠️ Заявка уже обработана или истекла",
+                show_alert=True
+            )
+        else:
+            logger.error(f"❌ Ошибка одобрения заявки: {e}")
+            await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
+    except Exception as e:
+        logger.error(f"❌ Ошибка при одобрении заявки: {e}")
+        await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
+
+
+@bot_activity_journal_router.callback_query(lambda c: c.data.startswith("jr_decline_"))
+async def jr_decline_callback(callback):
+    """
+    Обработчик кнопки ручного отклонения join request.
+    Вызывается когда капча не была отправлена и админ решает отклонить заявку.
+
+    Callback data формат: jr_decline_{user_id}_{chat_id}
+    """
+    try:
+        # Извлекаем user_id и chat_id из callback_data
+        parts = callback.data.split("_")
+        user_id = int(parts[2])
+        chat_id = int(parts[3])
+
+        # Отклоняем заявку на вступление
+        await _decline_join(callback.bot, chat_id, user_id)
+
+        # Уведомляем админа об успехе
+        await callback.answer("❌ Заявка отклонена", show_alert=True)
+        logger.info(
+            f"❌ [JR_DECLINE] Заявка отклонена вручную: "
+            f"user_id={user_id}, chat_id={chat_id}, admin={callback.from_user.id}"
+        )
+
+        # Обновляем сообщение — убираем кнопки, добавляем инфо об отклонении
+        try:
+            admin_name = callback.from_user.full_name or f"ID:{callback.from_user.id}"
+            new_text = (
+                callback.message.html_text +
+                f"\n\n❌ <b>ЗАЯВКА ОТКЛОНЕНА</b> администратором\n"
+                f"👮 {html.escape(admin_name)} [<code>{callback.from_user.id}</code>]"
+            )
+            await callback.message.edit_text(
+                text=new_text,
+                parse_mode="HTML",
+                reply_markup=None  # Убираем кнопки после действия
+            )
+        except Exception as edit_err:
+            logger.warning(f"Не удалось обновить сообщение: {edit_err}")
+
+    except TelegramBadRequest as e:
+        # Заявка могла уже быть обработана или истечь
+        error_msg = str(e)
+        if "HIDE_REQUESTER_MISSING" in error_msg:
+            await callback.answer(
+                "⚠️ Заявка уже обработана или истекла",
+                show_alert=True
+            )
+        else:
+            logger.error(f"❌ Ошибка отклонения заявки: {e}")
+            await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
+    except Exception as e:
+        logger.error(f"❌ Ошибка при отклонении заявки: {e}")
+        await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
+
+
+@bot_activity_journal_router.callback_query(lambda c: c.data.startswith("jr_ignore_"))
+async def jr_ignore_callback(callback):
+    """
+    Обработчик кнопки "Оставить висеть" — админ решает ничего не делать.
+    Заявка остаётся в Telegram как есть.
+
+    Callback data формат: jr_ignore_{user_id}_{chat_id}
+    """
+    try:
+        # Извлекаем user_id и chat_id из callback_data
+        parts = callback.data.split("_")
+        user_id = int(parts[2])
+        chat_id = int(parts[3])
+
+        # Ничего не делаем с заявкой — просто убираем кнопки
+        await callback.answer("⏸️ Заявка оставлена без изменений", show_alert=True)
+        logger.info(
+            f"⏸️ [JR_IGNORE] Заявка оставлена висеть: "
+            f"user_id={user_id}, chat_id={chat_id}, admin={callback.from_user.id}"
+        )
+
+        # Обновляем сообщение — убираем кнопки
+        try:
+            admin_name = callback.from_user.full_name or f"ID:{callback.from_user.id}"
+            new_text = (
+                callback.message.html_text +
+                f"\n\n⏸️ <b>ЗАЯВКА ОСТАВЛЕНА БЕЗ ИЗМЕНЕНИЙ</b>\n"
+                f"👮 {html.escape(admin_name)} [<code>{callback.from_user.id}</code>]"
+            )
+            await callback.message.edit_text(
+                text=new_text,
+                parse_mode="HTML",
+                reply_markup=None  # Убираем кнопки после действия
+            )
+        except Exception as edit_err:
+            logger.warning(f"Не удалось обновить сообщение: {edit_err}")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при обработке jr_ignore: {e}")
+        await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
