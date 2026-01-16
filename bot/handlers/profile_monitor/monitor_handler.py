@@ -55,6 +55,15 @@ from bot.services.scam_media import (
     SettingsService as ScamMediaSettingsService,
 )
 from bot.services.pyrogram_client import pyrogram_service
+# Импортируем функции кросс-групповой детекции для отслеживания смены профиля
+from bot.services.cross_group.detection_service import (
+    track_profile_change,
+    check_cross_group_detection,
+)
+# Импортируем функцию применения действия при детекции кросс-группового скамера
+from bot.services.cross_group.action_service import apply_cross_group_action
+# Импортируем типы изменений профиля
+from bot.database.models_cross_group import ProfileChangeType
 
 # Логгер модуля
 logger = logging.getLogger(__name__)
@@ -572,6 +581,58 @@ async def _handle_profile_changes(
 
     # Проверяем есть ли смена фото среди изменений
     photo_changed = any(c["type"].startswith("photo") for c in changes)
+
+    # ─────────────────────────────────────────────────────────
+    # КРОСС-ГРУППОВАЯ ДЕТЕКЦИЯ: трекинг смены профиля
+    # Работает независимо от Profile Monitor автомута
+    # ─────────────────────────────────────────────────────────
+    if name_changed or photo_changed:
+        try:
+            # Определяем тип изменения для трекинга
+            if name_changed and photo_changed:
+                # Оба изменения — логируем как смену имени (более подозрительно)
+                change_type = ProfileChangeType.NAME
+            elif name_changed:
+                # Только смена имени
+                change_type = ProfileChangeType.NAME
+            else:
+                # Только смена фото
+                change_type = ProfileChangeType.PHOTO
+
+            # Записываем факт изменения профиля
+            await track_profile_change(
+                session=session,
+                user_id=user_id,
+                chat_id=chat_id,
+                change_type=change_type,
+            )
+            # Логируем трекинг
+            logger.debug(
+                f"[CROSS_GROUP] Tracked profile change: user={user_id} "
+                f"chat={chat_id} type={change_type.value}"
+            )
+            # Проверяем детекцию (срабатывает если выполнены все условия)
+            detection_result = await check_cross_group_detection(
+                session=session,
+                user_id=user_id,
+            )
+            # Если детекция сработала — применяем действие
+            if detection_result:
+                # Логируем детекцию скамера
+                logger.warning(
+                    f"[CROSS_GROUP] DETECTED SCAMMER on PROFILE CHANGE: "
+                    f"user={user_id} groups={detection_result.get('groups', [])}"
+                )
+                # Применяем действие во всех затронутых группах
+                await apply_cross_group_action(
+                    session=session,
+                    bot=bot,
+                    user_id=user_id,
+                    detection_data=detection_result,
+                )
+        except Exception as e:
+            # Ошибки кросс-групповой детекции не должны ломать основной флоу
+            logger.error(f"[CROSS_GROUP] Error in profile change tracking: {e}")
 
     # ─────────────────────────────────────────────────────────
     # ПРОВЕРКА ФОТО ПРОФИЛЯ ЧЕРЕЗ SCAM MEDIA FILTER

@@ -68,6 +68,14 @@ from bot.handlers.profile_monitor.monitor_handler import (
 # ProfileMonitor - импортируем функцию трекинга сообщений для удаления
 from bot.services.profile_monitor import track_user_message
 
+# Кросс-групповая детекция - импортируем функции трекинга и проверки
+from bot.services.cross_group.detection_service import (
+    track_user_message as cross_group_track_message,
+    check_cross_group_detection,
+)
+# Импортируем функцию применения действия при детекции
+from bot.services.cross_group.action_service import apply_cross_group_action
+
 # UserStats - импортируем функцию инкремента счётчика сообщений
 from bot.services.user_stats_service import increment_message_count
 
@@ -299,6 +307,50 @@ async def group_message_handler(
     except Exception as e:
         # Ошибка трекинга не должна блокировать обработку
         logger.warning(f"[COORDINATOR] Ошибка трекинга сообщения: {e}")
+
+    # ─────────────────────────────────────────────────────────
+    # КРОСС-ГРУППОВАЯ ДЕТЕКЦИЯ: трекинг сообщений
+    # ─────────────────────────────────────────────────────────
+    # Записываем факт сообщения пользователя для детекции
+    # скамеров, пишущих в несколько групп бота
+    try:
+        # Записываем факт отправки сообщения в группу
+        await cross_group_track_message(
+            session=session,
+            user_id=user_id,
+            chat_id=chat_id,
+            message_id=message.message_id,
+        )
+        # Логируем трекинг (debug чтобы не засорять логи)
+        logger.debug(f"[CROSS_GROUP] Tracked message: user={user_id} chat={chat_id}")
+        # Проверяем детекцию (срабатывает если выполнены все условия)
+        detection_result = await check_cross_group_detection(
+            session=session,
+            user_id=user_id,
+        )
+        # Если детекция сработала — применяем действие
+        if detection_result:
+            # Логируем детекцию скамера
+            logger.warning(
+                f"[CROSS_GROUP] DETECTED SCAMMER on MESSAGE: "
+                f"user={user_id} groups={detection_result.get('groups', [])}"
+            )
+            # Получаем имя пользователя для журнала
+            user_name = message.from_user.full_name if message.from_user else None
+            user_username = message.from_user.username if message.from_user else None
+
+            # Применяем действие во всех затронутых группах
+            await apply_cross_group_action(
+                session=session,
+                bot=message.bot,
+                user_id=user_id,
+                detection_data=detection_result,
+                user_name=user_name,
+                username=user_username,
+            )
+    except Exception as e:
+        # Ошибки кросс-групповой детекции не должны ломать основной флоу
+        logger.error(f"[CROSS_GROUP] Error in message tracking: {e}")
 
     # ─────────────────────────────────────────────────────────
     # ШАГ 1: CONTENT FILTER (слова, скам, флуд)

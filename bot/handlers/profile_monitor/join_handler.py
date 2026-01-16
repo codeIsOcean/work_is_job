@@ -23,6 +23,13 @@ from bot.services.profile_monitor import (
     get_profile_monitor_settings,
     create_snapshot_on_join,
 )
+# Импортируем функции кросс-групповой детекции
+from bot.services.cross_group.detection_service import (
+    track_user_join,
+    check_cross_group_detection,
+)
+# Импортируем функцию применения действия при детекции
+from bot.services.cross_group.action_service import apply_cross_group_action
 
 
 # Логгер модуля
@@ -57,6 +64,44 @@ async def handle_user_joined(
     chat_id = event.chat.id
     user = event.new_chat_member.user
     user_id = user.id
+
+    # ─────────────────────────────────────────────────────────────────────
+    # КРОСС-ГРУППОВАЯ ДЕТЕКЦИЯ: трекинг входа пользователя
+    # Работает независимо от Profile Monitor
+    # ─────────────────────────────────────────────────────────────────────
+    try:
+        # Записываем факт входа пользователя в группу
+        await track_user_join(
+            session=session,
+            user_id=user_id,
+            chat_id=chat_id,
+        )
+        # Логируем трекинг
+        logger.debug(
+            f"[CROSS_GROUP] Tracked join: user={user_id} chat={chat_id}"
+        )
+        # Проверяем детекцию (срабатывает если выполнены все условия)
+        detection_result = await check_cross_group_detection(
+            session=session,
+            user_id=user_id,
+        )
+        # Если детекция сработала — применяем действие
+        if detection_result:
+            # Логируем детекцию скамера
+            logger.warning(
+                f"[CROSS_GROUP] DETECTED SCAMMER on JOIN: "
+                f"user={user_id} groups={detection_result.get('groups', [])}"
+            )
+            # Применяем действие во всех затронутых группах
+            await apply_cross_group_action(
+                session=session,
+                bot=event.bot,
+                user_id=user_id,
+                detection_data=detection_result,
+            )
+    except Exception as e:
+        # Ошибки кросс-групповой детекции не должны ломать основной флоу
+        logger.error(f"[CROSS_GROUP] Error in join tracking: {e}")
 
     # Проверяем включён ли модуль Profile Monitor для этой группы
     settings = await get_profile_monitor_settings(session, chat_id)
