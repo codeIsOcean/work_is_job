@@ -2037,4 +2037,135 @@ alembic upgrade d0e1f2g3h4i5
 
 ---
 
-*Последнее обновление: 2026-01-17 (добавлен раздел Cross-Group Detection)*
+## 13. Anti-Raid / Защита от массовых атак (NEW 2026-01)
+
+### Назначение
+Защита группы от различных типов массовых атак и злоупотреблений.
+
+### Компоненты модуля
+
+| Компонент | Описание | Действие |
+|-----------|----------|----------|
+| **Join/Exit Abuse** | Боты входят-выходят чтобы засветить имя | ban/kick/mute |
+| **Name Pattern Ban** | Бан по паттернам имени при входе | ban/kick |
+| **Mass Join (Raid)** | Много вступлений одновременно | slowmode/lock/notify |
+| **Mass Invite** | Один юзер приглашает много людей | warn/kick/ban |
+| **Mass Reaction** | Спам реакциями | warn/mute/kick |
+
+### Файлы
+
+**Модели (database/):**
+| Файл | Назначение |
+|------|------------|
+| `models_antiraid.py` | AntiRaidSettings, AntiRaidNamePattern |
+
+**Сервисы (services/antiraid/):**
+| Файл | Назначение |
+|------|------------|
+| `__init__.py` | Экспорт модуля |
+| `settings_service.py` | CRUD настроек и паттернов |
+| `name_pattern_checker.py` | Проверка имени по паттернам (TextNormalizer) ✅ |
+| `action_service.py` | Применение действий (ban/kick/mute) ✅ |
+| `journal_service.py` | Отправка в журнал группы ✅ |
+| `join_exit_tracker.py` | Redis трекинг входов/выходов ✅ |
+| `mass_join_tracker.py` | Redis трекинг рейда (TODO) |
+| `mass_invite_tracker.py` | Redis трекинг инвайтов (TODO) |
+| `mass_reaction_tracker.py` | Redis трекинг реакций (TODO) |
+
+**Хендлеры (handlers/antiraid/):**
+| Файл | Назначение |
+|------|------------|
+| `__init__.py` | Экспорт роутеров ✅ |
+| `journal_callbacks.py` | Callbacks кнопок журнала (unban, ok, permban) ✅ |
+| `join_exit_handler.py` | Обработка выходов (LEFT_TRANSITION) ✅ |
+| `settings_handler.py` | UI настроек в ЛС (TODO) |
+| `patterns_handler.py` | UI паттернов имён (TODO) |
+
+### Дефолтные значения (настраиваемые через UI)
+
+| Компонент | Параметр | Дефолт |
+|-----------|----------|--------|
+| Join/Exit | окно | 60 сек |
+| Join/Exit | порог | 3 события |
+| Join/Exit | действие | ban |
+| Join/Exit | длительность бана | 168ч (7 дней) |
+| Name Pattern | действие | ban |
+| Name Pattern | длительность бана | 0 (навсегда) |
+| Mass Join | окно | 60 сек |
+| Mass Join | порог | 10 вступлений |
+| Mass Join | действие | slowmode |
+| Mass Join | slowmode | 60 сек |
+| Mass Join | авто-снятие | 30 мин |
+| Mass Invite | окно | 300 сек (5 мин) |
+| Mass Invite | порог | 5 инвайтов |
+| Mass Invite | действие | warn |
+| Mass Reaction | окно | 60 сек |
+| Mass Reaction | порог (юзер) | 10 реакций |
+| Mass Reaction | порог (сообщение) | 20 реакций |
+| Mass Reaction | действие | mute |
+
+### Миграция
+
+```bash
+# Создание таблиц
+alembic upgrade e1f2g3h4i5j6
+```
+
+Миграция создаёт:
+- Таблицу `antiraid_settings` (per-group настройки)
+- Таблицу `antiraid_name_patterns` (паттерны имён для бана)
+- Индексы для быстрого поиска
+
+### Интеграция в captcha_coordinator
+
+Проверка имени по паттернам интегрирована в `captcha_coordinator.py`:
+- **chat_join_request:** Проверка ДО капчи → отклонение + бан
+- **new_chat_members:** Проверка ДО капчи → бан
+
+Логика:
+```
+Пользователь входит в группу
+    │
+    ├── check_name_against_patterns(session, user, chat_id)
+    │   ├── get_full_name() → "Д.е́. t.С.k.ő.ē TKL98ВОТ"
+    │   ├── normalize_name() → "детское" (TextNormalizer)
+    │   └── check_pattern_match() → matched=True
+    │
+    └── Если matched:
+        ├── apply_name_pattern_action() → ban/kick
+        ├── send_name_pattern_journal() → уведомление в журнал
+        └── return (прерывание обработки)
+```
+
+### Callback Data формат журнала
+```
+ar:unban:{chat_id}:{user_id}    # Разбанить
+ar:ok:{chat_id}:{user_id}       # Удалить сообщение
+ar:permban:{chat_id}:{user_id}  # Забанить навсегда
+ar:unmute:{chat_id}:{user_id}   # Размутить
+ar:unslowmode:{chat_id}:0       # Снять slowmode
+ar:lock:{chat_id}:0             # Закрыть группу
+```
+
+### Статус реализации
+
+- [x] Модели БД (Фаза 1)
+- [x] Миграция (Фаза 1)
+- [x] Settings service (Фаза 1)
+- [x] Name Pattern Checker (Фаза 2)
+- [x] Action Service (Фаза 2)
+- [x] Journal Service (Фаза 2)
+- [x] Journal Callbacks (Фаза 2)
+- [x] Интеграция в captcha_coordinator (Фаза 2)
+- [x] Join/Exit Tracker (Фаза 3)
+- [x] Join/Exit Handler для выходов (Фаза 3)
+- [x] Интеграция track_join_event в coordinator (Фаза 3)
+- [ ] Mass Join Tracker (Фаза 4)
+- [ ] Mass Invite Tracker (Фаза 5)
+- [ ] Mass Reaction Tracker (Фаза 6)
+- [ ] UI настроек (Фаза 7)
+- [ ] Тесты (Фаза 8)
+
+---
+
+*Последнее обновление: 2026-01-17 (Фазы 1-3 Anti-Raid завершены)*

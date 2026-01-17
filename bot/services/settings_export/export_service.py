@@ -78,6 +78,12 @@ from bot.database.models_scam_media import (  # noqa: F401
     BannedImageHash,
 )
 
+# Anti-Raid (настройки, паттерны имён)
+from bot.database.models_antiraid import (  # noqa: F401
+    AntiRaidSettings,
+    AntiRaidNamePattern,
+)
+
 # Создаём логгер для отслеживания операций экспорта/импорта
 logger = logging.getLogger(__name__)
 

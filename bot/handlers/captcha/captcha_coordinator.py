@@ -34,6 +34,16 @@ from bot.services.profile_monitor.content_checker import (
     check_name_and_bio_content,
 )
 
+# Импортируем сервисы Anti-Raid для проверки имени по паттернам
+from bot.services.antiraid import (
+    check_name_against_patterns,
+    apply_name_pattern_action,
+    send_name_pattern_journal,
+)
+
+# Импортируем функцию трекинга входов/выходов
+from bot.handlers.antiraid import track_join_event
+
 
 # Логгер для отслеживания работы координатора
 logger = logging.getLogger(__name__)
@@ -103,7 +113,70 @@ async def handle_join_request(
         )
 
     # ═══════════════════════════════════════════════════════════════════════
-    # ШАГ 1.5: КРИТЕРИЙ 6 - Проверка имени/bio на запрещённый контент
+    # ШАГ 1.5: ANTI-RAID — Проверка имени по паттернам
+    # Проверяем ДО капчи, чтобы сразу забанить ботов с обфусцированными именами
+    # Например: "Д.е́. t.С.k.ő.ē TKL98ВОТ" → нормализация → "детское" → бан
+    # ═══════════════════════════════════════════════════════════════════════
+    antiraid_check = await check_name_against_patterns(session, user, chat.id)
+
+    # Если имя матчит паттерн — применяем действие и выходим
+    if antiraid_check.matched:
+        logger.warning(
+            f"🚫 [COORDINATOR] ANTI-RAID NAME PATTERN - Отклонение join_request: "
+            f"user_id={user.id}, chat_id={chat.id}, "
+            f"name='{antiraid_check.original_name}' → '{antiraid_check.normalized_name}', "
+            f"pattern='{antiraid_check.pattern.pattern if antiraid_check.pattern else 'N/A'}'"
+        )
+
+        # Применяем действие из настроек (бан/кик)
+        # is_join_request=True — сначала отклоняет заявку, потом банит
+        action_result = await apply_name_pattern_action(
+            bot=bot,
+            session=session,
+            chat_id=chat.id,
+            user_id=user.id,
+            is_join_request=True,
+        )
+
+        # Отправляем уведомление в журнал группы
+        await send_name_pattern_journal(
+            bot=bot,
+            session=session,
+            chat_id=chat.id,
+            user_id=user.id,
+            check_result=antiraid_check,
+            action_result=action_result,
+        )
+
+        return  # Прерываем обработку — пользователь забанен
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # ШАГ 1.55: ANTI-RAID — Трекинг входов/выходов
+    # Записываем событие входа и проверяем на злоупотребление
+    # ═══════════════════════════════════════════════════════════════════════
+    join_exit_abuse = await track_join_event(
+        bot=bot,
+        session=session,
+        chat_id=chat.id,
+        user_id=user.id,
+        user_name=user.full_name or str(user.id)
+    )
+
+    if join_exit_abuse:
+        # Злоупотребление обнаружено — действие уже применено в track_join_event
+        # Отклоняем заявку и выходим
+        logger.warning(
+            f"[COORDINATOR] JOIN/EXIT ABUSE - Отклонение join_request: "
+            f"user_id={user.id}, chat_id={chat.id}"
+        )
+        try:
+            await bot.decline_chat_join_request(chat.id, user.id)
+        except Exception as e:
+            logger.error(f"❌ Ошибка отклонения join_request: {e}")
+        return
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # ШАГ 1.6: КРИТЕРИЙ 6 - Проверка имени/bio на запрещённый контент (Profile Monitor)
     # Проверяем ДО капчи, чтобы сразу отклонить спаммеров
     # ═══════════════════════════════════════════════════════════════════════
     pm_settings = await get_profile_monitor_settings(session, chat.id)
@@ -302,6 +375,66 @@ async def handle_new_members(
             )
             # Продолжаем - мут уже восстановлен, капча не нужна
             continue
+
+        # ═══════════════════════════════════════════════════════════════════
+        # ШАГ 2.5: ANTI-RAID — Проверка имени по паттернам
+        # Проверяем ДО капчи, чтобы сразу забанить ботов с обфусцированными именами
+        # ═══════════════════════════════════════════════════════════════════
+        antiraid_check = await check_name_against_patterns(
+            session, new_member, chat.id
+        )
+
+        # Если имя матчит паттерн — применяем действие и переходим к следующему
+        if antiraid_check.matched:
+            logger.warning(
+                f"🚫 [COORDINATOR] ANTI-RAID NAME PATTERN - Бан new_member: "
+                f"user_id={new_member.id}, chat_id={chat.id}, "
+                f"name='{antiraid_check.original_name}' → "
+                f"'{antiraid_check.normalized_name}', "
+                f"pattern='{antiraid_check.pattern.pattern if antiraid_check.pattern else 'N/A'}'"
+            )
+
+            # Применяем действие из настроек (бан/кик)
+            # is_join_request=False — напрямую банит (пользователь уже в группе)
+            action_result = await apply_name_pattern_action(
+                bot=bot,
+                session=session,
+                chat_id=chat.id,
+                user_id=new_member.id,
+                is_join_request=False,
+            )
+
+            # Отправляем уведомление в журнал группы
+            await send_name_pattern_journal(
+                bot=bot,
+                session=session,
+                chat_id=chat.id,
+                user_id=new_member.id,
+                check_result=antiraid_check,
+                action_result=action_result,
+            )
+
+            continue  # Переходим к следующему участнику
+
+        # ═══════════════════════════════════════════════════════════════════
+        # ШАГ 2.6: ANTI-RAID — Трекинг входов/выходов
+        # Записываем событие входа и проверяем на злоупотребление
+        # ═══════════════════════════════════════════════════════════════════
+        join_exit_abuse = await track_join_event(
+            bot=bot,
+            session=session,
+            chat_id=chat.id,
+            user_id=new_member.id,
+            user_name=new_member.full_name or str(new_member.id)
+        )
+
+        if join_exit_abuse:
+            # Злоупотребление обнаружено — действие уже применено в track_join_event
+            logger.warning(
+                f"[COORDINATOR] JOIN/EXIT ABUSE - Бан new_member: "
+                f"user_id={new_member.id}, chat_id={chat.id}"
+            )
+            continue  # Переходим к следующему участнику
 
         # ═══════════════════════════════════════════════════════════════════
         # ШАГ 3: Определяем нужна ли капча

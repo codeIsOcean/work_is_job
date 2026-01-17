@@ -15,6 +15,7 @@
 - `bot/database/models_global_settings.py` — глобальные настройки бота (max_seen_user_id)
 - `bot/database/models_user_stats.py` — статистика пользователей (команда /stat)
 - `bot/database/models_profile_monitor.py` — модуль мониторинга профилей
+- `bot/database/models_antiraid.py` — модуль защиты от массовых атак (Anti-Raid)
 
 ---
 
@@ -663,6 +664,64 @@ max_id = int(result.scalar_one_or_none() or 8_600_000_000)
 
 ---
 
+## Таблицы Anti-Raid (models_antiraid.py)
+
+### antiraid_settings
+
+Настройки модуля Anti-Raid для каждой группы (per-group).
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| id | INTEGER PK | Уникальный ID |
+| chat_id | BIGINT UNIQUE | ID группы |
+| join_exit_enabled | BOOLEAN | Защита от частых входов/выходов |
+| join_exit_window | INTEGER | Окно в секундах (дефолт: 60) |
+| join_exit_threshold | INTEGER | Порог событий (дефолт: 3) |
+| join_exit_action | VARCHAR(20) | Действие: kick/ban/mute (дефолт: ban) |
+| join_exit_ban_duration | INTEGER | Длительность бана в часах (дефолт: 168) |
+| name_pattern_enabled | BOOLEAN | Бан по паттернам имени |
+| name_pattern_action | VARCHAR(20) | Действие: kick/ban (дефолт: ban) |
+| name_pattern_ban_duration | INTEGER | Длительность бана (дефолт: 0 = навсегда) |
+| mass_join_enabled | BOOLEAN | Защита от массовых вступлений |
+| mass_join_window | INTEGER | Окно в секундах (дефолт: 60) |
+| mass_join_threshold | INTEGER | Порог вступлений (дефолт: 10) |
+| mass_join_action | VARCHAR(20) | Действие: slowmode/lock/notify (дефолт: slowmode) |
+| mass_join_slowmode | INTEGER | Slowmode в секундах (дефолт: 60) |
+| mass_join_auto_unlock | INTEGER | Авто-снятие в минутах (дефолт: 30) |
+| mass_invite_enabled | BOOLEAN | Защита от массовых инвайтов |
+| mass_invite_window | INTEGER | Окно в секундах (дефолт: 300) |
+| mass_invite_threshold | INTEGER | Порог инвайтов (дефолт: 5) |
+| mass_invite_action | VARCHAR(20) | Действие: warn/kick/ban (дефолт: warn) |
+| mass_invite_ban_duration | INTEGER | Длительность бана (дефолт: 24) |
+| mass_reaction_enabled | BOOLEAN | Защита от массовых реакций |
+| mass_reaction_window | INTEGER | Окно в секундах (дефолт: 60) |
+| mass_reaction_threshold_user | INTEGER | Порог по юзеру (дефолт: 10) |
+| mass_reaction_threshold_msg | INTEGER | Порог по сообщению (дефолт: 20) |
+| mass_reaction_action | VARCHAR(20) | Действие: warn/mute/kick (дефолт: mute) |
+| mass_reaction_mute_duration | INTEGER | Длительность мута в минутах (дефолт: 60) |
+| created_at | DATETIME | Дата создания |
+| updated_at | DATETIME | Дата обновления |
+
+**Индексы:** `ix_antiraid_settings_chat_id` (unique)
+
+### antiraid_name_patterns
+
+Паттерны имён для бана при входе в группу.
+
+| Колонка | Тип | Описание |
+|---------|-----|----------|
+| id | INTEGER PK | Уникальный ID |
+| chat_id | BIGINT | ID группы |
+| pattern | VARCHAR(255) | Текст паттерна |
+| pattern_type | VARCHAR(20) | Тип: contains/regex/exact (дефолт: contains) |
+| is_enabled | BOOLEAN | Включён ли паттерн (дефолт: true) |
+| created_by | BIGINT | user_id админа |
+| created_at | DATETIME | Дата создания |
+
+**Индексы:** `ix_antiraid_name_patterns_chat_id`, `ix_antiraid_name_patterns_chat_enabled`
+
+---
+
 ## Миграции Alembic
 
 ### Важные миграции
@@ -686,6 +745,8 @@ max_id = int(result.scalar_one_or_none() or 8_600_000_000)
 | 9356cadad695 | add_bot_global_settings_table — глобальные настройки бота (max_seen_user_id) |
 | u1v2w3x4y5z6 | add_user_statistics_table — статистика пользователей (сообщения, дни активности) |
 | v2w3x4y5z6a7 | add_photo_freshness_columns — колонки для критериев автомута 4,5 |
+| d0e1f2g3h4i5 | add_cross_group_detection_tables — кросс-групповая детекция скамеров |
+| e1f2g3h4i5j6 | add_antiraid_tables — модуль Anti-Raid (защита от массовых атак) |
 
 ### Паттерн для ENUM в миграциях
 
@@ -706,4 +767,4 @@ my_enum = postgresql.ENUM('A', 'B', name='my_enum', create_type=False)
 
 ---
 
-*Последнее обновление: 2025-12-21 (добавлены колонки photo_age_days и photo_freshness_threshold_days для критериев автомута 4,5)*
+*Последнее обновление: 2026-01-17 (добавлены таблицы Anti-Raid: antiraid_settings, antiraid_name_patterns)*
