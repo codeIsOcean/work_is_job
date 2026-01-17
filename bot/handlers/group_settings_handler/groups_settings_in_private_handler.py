@@ -791,6 +791,10 @@ async def create_group_management_keyboard(session: AsyncSession, chat_id: int):
             callback_data=f"pm_settings_main:{chat_id}"
         )],
         [InlineKeyboardButton(
+            text="🛡️ Anti-Raid защита",
+            callback_data=f"ars:m:{chat_id}"
+        )],
+        [InlineKeyboardButton(
             text="📢 Рассылки",
             callback_data="broadcast_settings"
         )],

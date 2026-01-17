@@ -45,7 +45,7 @@ from .settings_export import settings_export_router
 # Импортируем роутер модуля кросс-групповой детекции (настройки + callbacks журнала)
 from .cross_group import router as cross_group_router
 # Импортируем роутеры модуля Anti-Raid
-from .antiraid import antiraid_callbacks_router, join_exit_router
+from .antiraid import antiraid_callbacks_router, antiraid_settings_router, join_exit_router, reaction_router
 
 # Объединяем все роутеры в один
 from aiogram import Router, F
@@ -93,8 +93,12 @@ handlers_router.include_router(settings_export_router)
 handlers_router.include_router(cross_group_router)
 # Anti-Raid callbacks журнала (разбан, OK, permban, и т.д.)
 handlers_router.include_router(antiraid_callbacks_router)
+# Anti-Raid настройки UI (в ЛС бота)
+handlers_router.include_router(antiraid_settings_router)
 # Anti-Raid join/exit трекер (обработка выходов из группы)
 handlers_router.include_router(join_exit_router)
+# Anti-Raid reaction трекер (обработка массовых реакций)
+handlers_router.include_router(reaction_router)
 # ============================================================
 # GROUP MESSAGE COORDINATOR - единый хендлер для сообщений в группах
 # ============================================================
@@ -144,8 +148,12 @@ def create_fresh_handlers_router():
     fresh_router.include_router(cross_group_router)
     # Anti-Raid callbacks журнала (разбан, OK, permban, и т.д.)
     fresh_router.include_router(antiraid_callbacks_router)
+    # Anti-Raid настройки UI (в ЛС бота)
+    fresh_router.include_router(antiraid_settings_router)
     # Anti-Raid join/exit трекер (обработка выходов из группы)
     fresh_router.include_router(join_exit_router)
+    # Anti-Raid reaction трекер (обработка массовых реакций)
+    fresh_router.include_router(reaction_router)
     # Group Message Coordinator - единый хендлер для групповых сообщений
     fresh_router.include_router(group_message_coordinator_router)
     return fresh_router

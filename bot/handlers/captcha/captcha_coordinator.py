@@ -41,8 +41,8 @@ from bot.services.antiraid import (
     send_name_pattern_journal,
 )
 
-# Импортируем функцию трекинга входов/выходов
-from bot.handlers.antiraid import track_join_event
+# Импортируем функции трекинга входов/выходов, массовых вступлений и инвайтов
+from bot.handlers.antiraid import track_join_event, track_mass_join, track_mass_invite
 
 
 # Логгер для отслеживания работы координатора
@@ -174,6 +174,19 @@ async def handle_join_request(
         except Exception as e:
             logger.error(f"❌ Ошибка отклонения join_request: {e}")
         return
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # ШАГ 1.56: ANTI-RAID — Проверка на массовые вступления (рейд)
+    # Записываем вступление и проверяем на рейд (много вступлений одновременно)
+    # НЕ прерываем обработку — рейд влияет на группу (slowmode), а не на юзера
+    # ═══════════════════════════════════════════════════════════════════════
+    await track_mass_join(
+        bot=bot,
+        session=session,
+        chat_id=chat.id,
+        user_id=user.id
+    )
+    # Продолжаем обработку — капча всё равно нужна
 
     # ═══════════════════════════════════════════════════════════════════════
     # ШАГ 1.6: КРИТЕРИЙ 6 - Проверка имени/bio на запрещённый контент (Profile Monitor)
@@ -435,6 +448,42 @@ async def handle_new_members(
                 f"user_id={new_member.id}, chat_id={chat.id}"
             )
             continue  # Переходим к следующему участнику
+
+        # ═══════════════════════════════════════════════════════════════════
+        # ШАГ 2.7: ANTI-RAID — Проверка на массовые вступления (рейд)
+        # Записываем вступление и проверяем на рейд
+        # НЕ прерываем обработку — рейд влияет на группу (slowmode), а не на юзера
+        # ═══════════════════════════════════════════════════════════════════
+        await track_mass_join(
+            bot=bot,
+            session=session,
+            chat_id=chat.id,
+            user_id=new_member.id
+        )
+        # Продолжаем обработку — капча всё равно нужна
+
+        # ═══════════════════════════════════════════════════════════════════
+        # ШАГ 2.8: ANTI-RAID — Проверка на массовые инвайты
+        # Если это инвайт — проверяем не приглашает ли один юзер слишком много людей
+        # НЕ блокируем приглашённого юзера — действие применяется к инвайтеру
+        # ═══════════════════════════════════════════════════════════════════
+        if event_str == "invite" and initiator_id is not None:
+            inviter_name = message.from_user.full_name if message.from_user else str(initiator_id)
+            mass_invite_abuse = await track_mass_invite(
+                bot=bot,
+                session=session,
+                chat_id=chat.id,
+                inviter_id=initiator_id,
+                inviter_name=inviter_name,
+                invited_user_id=new_member.id
+            )
+            if mass_invite_abuse:
+                logger.warning(
+                    f"[COORDINATOR] MASS INVITE ABUSE - Действие к инвайтеру: "
+                    f"inviter_id={initiator_id}, invited_user_id={new_member.id}, "
+                    f"chat_id={chat.id}"
+                )
+            # НЕ прерываем — приглашённый юзер продолжает проходить капчу
 
         # ═══════════════════════════════════════════════════════════════════
         # ШАГ 3: Определяем нужна ли капча

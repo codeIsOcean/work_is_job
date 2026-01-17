@@ -333,6 +333,49 @@ async def handle_antiraid_callback(
             await callback.answer(f"❌ Ошибка: {e}")
         return
 
+    elif action == "unprotect":
+        # Снимаем protection mode (режим защиты от рейда)
+        from bot.services.redis_conn import redis
+        from bot.services.antiraid import deactivate_protection
+
+        try:
+            if redis is None:
+                await callback.answer("❌ Redis недоступен")
+                return
+
+            # Деактивируем protection mode
+            await deactivate_protection(redis, chat_id)
+
+            # Обновляем сообщение
+            old_text = callback.message.text or callback.message.caption or ""
+            # Заменяем статус на "ЗАВЕРШЁН"
+            new_text = old_text.replace("🔴 АКТИВЕН", "🟢 ЗАВЕРШЁН (вручную)")
+            new_text = (
+                f"{new_text}\n\n"
+                f"🛡️ <b>Защита снята</b> админом {admin_name}"
+            )
+
+            try:
+                await callback.message.edit_text(
+                    text=new_text,
+                    parse_mode="HTML",
+                    reply_markup=None,
+                )
+            except TelegramAPIError:
+                pass
+
+            await callback.answer("🛡️ Режим защиты снят")
+
+            logger.info(
+                f"[ANTIRAID] Protection mode снят вручную: chat_id={chat_id}, "
+                f"admin_id={admin_id}"
+            )
+
+        except Exception as e:
+            logger.error(f"[ANTIRAID] Ошибка снятия protection mode: {e}")
+            await callback.answer(f"❌ Ошибка: {e}")
+        return
+
     else:
         # Неизвестное действие
         logger.warning(f"[ANTIRAID] Неизвестное действие: {action}")

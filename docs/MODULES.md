@@ -2160,12 +2160,12 @@ ar:lock:{chat_id}:0             # Закрыть группу
 - [x] Join/Exit Tracker (Фаза 3)
 - [x] Join/Exit Handler для выходов (Фаза 3)
 - [x] Интеграция track_join_event в coordinator (Фаза 3)
-- [ ] Mass Join Tracker (Фаза 4)
-- [ ] Mass Invite Tracker (Фаза 5)
-- [ ] Mass Reaction Tracker (Фаза 6)
-- [ ] UI настроек (Фаза 7)
+- [x] Mass Join Tracker (Фаза 4)
+- [x] Mass Invite Tracker (Фаза 5)
+- [x] Mass Reaction Tracker (Фаза 6)
+- [x] UI настроек (Фаза 7)
 - [ ] Тесты (Фаза 8)
 
 ---
 
-*Последнее обновление: 2026-01-17 (Фазы 1-3 Anti-Raid завершены)*
+*Последнее обновление: 2026-01-17 (Фазы 1-7 Anti-Raid завершены)*

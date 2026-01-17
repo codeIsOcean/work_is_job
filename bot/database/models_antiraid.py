@@ -151,6 +151,7 @@ class AntiRaidSettings(Base, ExportableMixin):
     # РАЗДЕЛ 3: МАССОВЫЕ ВСТУПЛЕНИЯ (MASS JOIN / RAID)
     # ═══════════════════════════════════════════════════════════
     # Защита от рейдов — когда много юзеров вступают одновременно
+    # v2: при превышении порога включается "режим защиты" — все новые вступления = бан
 
     # Включён ли этот компонент защиты
     mass_join_enabled = Column(
@@ -175,14 +176,35 @@ class AntiRaidSettings(Base, ExportableMixin):
         nullable=False
     )
 
-    # Действие при рейде: 'slowmode', 'lock', 'notify'
+    # Действие при рейде: 'ban', 'kick', 'slowmode', 'lock', 'notify'
+    # - ban: забанить всех участников рейда (рекомендуется)
+    # - kick: кикнуть без бана
     # - slowmode: включить режим медленных сообщений
     # - lock: закрыть группу для новых участников
     # - notify: только уведомить админов
-    # Дефолт: 'slowmode' — безопаснее чем lock
+    # Дефолт: 'ban' — банить рейдеров
     mass_join_action = Column(
         String(20),
-        server_default='slowmode',
+        server_default='ban',
+        nullable=False
+    )
+
+    # Длительность режима защиты в секундах
+    # После детекции рейда все новые вступления банятся в течение этого времени
+    # Дефолт: 180 секунд (3 минуты)
+    # Админ может изменить через UI
+    mass_join_protection_duration = Column(
+        Integer,
+        server_default='180',
+        nullable=False
+    )
+
+    # Длительность бана при рейде в часах (0 = навсегда)
+    # Дефолт: 0 (перманентный бан для рейдеров)
+    # Админ может изменить через UI
+    mass_join_ban_duration = Column(
+        Integer,
+        server_default='0',
         nullable=False
     )
 
@@ -249,7 +271,9 @@ class AntiRaidSettings(Base, ExportableMixin):
     # ═══════════════════════════════════════════════════════════
     # РАЗДЕЛ 5: МАССОВЫЕ РЕАКЦИИ (MASS REACTION)
     # ═══════════════════════════════════════════════════════════
-    # Защита от спама реакциями (накрутка или атака)
+    # Защита от спама реакциями
+    # v2: Паттерн спаммера — ставит по 1 реакции на разные сообщения (идёт вниз по чату)
+    # Цель спаммера: чтобы авторы сообщений увидели уведомление и зашли в профиль
 
     # Включён ли этот компонент защиты
     mass_reaction_enabled = Column(
@@ -266,35 +290,34 @@ class AntiRaidSettings(Base, ExportableMixin):
         nullable=False
     )
 
-    # Порог по юзеру — макс. реакций от одного юзера за окно
-    # Дефолт: 10 реакций за минуту = спам
-    mass_reaction_threshold_user = Column(
+    # Порог срабатывания — на сколько РАЗНЫХ сообщений за окно
+    # Паттерн спаммера: ставит по 1 реакции на разные сообщения
+    # Дефолт: 5 разных сообщений за окно = спам реакциями
+    # Админ может изменить через UI
+    mass_reaction_threshold = Column(
         Integer,
-        server_default='10',
+        server_default='5',
         nullable=False
     )
 
-    # Порог по сообщению — макс. разных реакций на одно сообщение
-    # Дефолт: 20 разных реакций = накрутка
-    mass_reaction_threshold_msg = Column(
-        Integer,
-        server_default='20',
-        nullable=False
-    )
-
-    # Действие при срабатывании: 'warn', 'mute', 'kick'
-    # Дефолт: 'mute' — мут на час
+    # Действие при срабатывании: 'ban', 'kick', 'mute', 'warn'
+    # - ban: забанить спаммера (рекомендуется)
+    # - kick: кикнуть без бана
+    # - mute: временно ограничить
+    # - warn: только предупреждение
+    # Дефолт: 'ban' — банить спаммеров реакциями
     mass_reaction_action = Column(
         String(20),
-        server_default='mute',
+        server_default='ban',
         nullable=False
     )
 
-    # Длительность мута в минутах (для action='mute')
-    # Дефолт: 60 минут (1 час)
-    mass_reaction_mute_duration = Column(
+    # Длительность бана в часах (для action='ban', 0 = навсегда)
+    # Дефолт: 0 (перманентный бан для спаммеров)
+    # Админ может изменить через UI
+    mass_reaction_ban_duration = Column(
         Integer,
-        server_default='60',
+        server_default='0',
         nullable=False
     )
 

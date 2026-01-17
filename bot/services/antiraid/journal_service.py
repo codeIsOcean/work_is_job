@@ -319,28 +319,116 @@ async def send_join_exit_journal(
         return None
 
 
+def _format_raid_journal_text(
+    join_count: int,
+    window_seconds: int,
+    banned_count: int,
+    protection_seconds: int,
+    action_taken: str,
+    slowmode_seconds: int = 0,
+    is_active: bool = True
+) -> str:
+    """
+    Формирует текст сообщения о рейде.
+
+    Используется для создания и обновления агрегированного уведомления.
+
+    Args:
+        join_count: Количество вступлений при детекции
+        window_seconds: Временное окно
+        banned_count: Сколько забанено ВСЕГО
+        protection_seconds: Длительность protection mode
+        action_taken: Применённое действие
+        slowmode_seconds: Значение slowmode
+        is_active: Protection mode ещё активен?
+
+    Returns:
+        Отформатированный HTML текст
+    """
+    # Статус
+    if is_active:
+        status = "🔴 АКТИВЕН"
+    else:
+        status = "🟢 ЗАВЕРШЁН"
+
+    # Определяем текст действия
+    if action_taken == 'ban':
+        action_text = "Бан рейдеров"
+    elif action_taken == 'slowmode':
+        action_text = f"Slowmode {slowmode_seconds} сек"
+    elif action_taken == 'lock':
+        action_text = "Группа закрыта"
+    else:
+        action_text = "Уведомление"
+
+    # Формируем сообщение
+    message_text = (
+        f"<b>🚨 #ANTIRAID | Рейд детектирован!</b>\n"
+        f"\n"
+        f"📊 <b>Статус:</b> {status}\n"
+        f"🔢 <b>Вступлений при детекции:</b> {join_count} за {window_seconds} сек\n"
+        f"🚫 <b>Забанено:</b> {banned_count}\n"
+        f"🛡️ <b>Режим защиты:</b> {protection_seconds} сек\n"
+        f"⚡ <b>Действие:</b> {action_text}\n"
+        f"\n"
+        f"#raid #antiraid #mass_join"
+    )
+
+    return message_text
+
+
+def _create_raid_journal_keyboard(chat_id: int) -> InlineKeyboardMarkup:
+    """
+    Создаёт клавиатуру для сообщения о рейде.
+
+    Args:
+        chat_id: ID группы
+
+    Returns:
+        InlineKeyboardMarkup с кнопками
+    """
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="Снять защиту",
+                callback_data=f"ar:unprotect:{chat_id}:0"
+            ),
+            InlineKeyboardButton(
+                text="OK",
+                callback_data=f"ar:ok:{chat_id}:0"
+            ),
+        ]
+    ])
+    return keyboard
+
+
 async def send_raid_detected_journal(
     bot: Bot,
     session: AsyncSession,
     chat_id: int,
     join_count: int,
     window_seconds: int,
-    action_taken: str,
-    slowmode_seconds: int = 0,
-    auto_unlock_minutes: int = 0
+    banned_count: int,
+    protection_seconds: int,
+    action_taken: str = 'ban',
+    slowmode_seconds: int = 0
 ) -> Optional[int]:
     """
-    Отправляет сообщение в журнал о детекции рейда.
+    Отправляет агрегированное сообщение в журнал о детекции рейда.
+
+    Это ПЕРВОЕ уведомление при обнаружении рейда.
+    Потом оно обновляется через update_raid_journal.
 
     Args:
         bot: Экземпляр Bot
         session: Асинхронная сессия SQLAlchemy
         chat_id: ID группы
-        join_count: Количество вступлений
+        join_count: Количество вступлений при детекции
         window_seconds: Временное окно
-        action_taken: Применённое действие (slowmode/lock/notify)
+        banned_count: Сколько забанено (на момент детекции)
+        protection_seconds: Длительность protection mode
+        action_taken: Применённое действие (ban/slowmode/lock/notify)
         slowmode_seconds: Значение slowmode (если применимо)
-        auto_unlock_minutes: Время до авто-снятия
 
     Returns:
         ID отправленного сообщения или None
@@ -352,41 +440,206 @@ async def send_raid_detected_journal(
 
     journal_channel_id = journal.journal_channel_id
 
+    # Формируем текст
+    message_text = _format_raid_journal_text(
+        join_count=join_count,
+        window_seconds=window_seconds,
+        banned_count=banned_count,
+        protection_seconds=protection_seconds,
+        action_taken=action_taken,
+        slowmode_seconds=slowmode_seconds,
+        is_active=True
+    )
+
+    # Создаём клавиатуру
+    keyboard = _create_raid_journal_keyboard(chat_id)
+
+    try:
+        message = await bot.send_message(
+            chat_id=journal_channel_id,
+            text=message_text,
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+
+        logger.info(
+            f"[ANTIRAID] Raid journal отправлен: chat_id={chat_id}, "
+            f"message_id={message.message_id}, banned={banned_count}"
+        )
+
+        return message.message_id
+
+    except TelegramAPIError as e:
+        logger.error(f"[ANTIRAID] Ошибка отправки raid journal: {e}")
+        return None
+
+
+async def update_raid_journal(
+    bot: Bot,
+    session: AsyncSession,
+    chat_id: int,
+    journal_message_id: int,
+    join_count: int,
+    window_seconds: int,
+    banned_count: int,
+    protection_seconds: int,
+    action_taken: str = 'ban',
+    slowmode_seconds: int = 0,
+    is_active: bool = True
+) -> bool:
+    """
+    Обновляет существующее сообщение о рейде в журнале.
+
+    Вызывается при каждом бане в protection mode чтобы
+    обновить счётчик забаненных.
+
+    Args:
+        bot: Экземпляр Bot
+        session: Асинхронная сессия SQLAlchemy
+        chat_id: ID группы
+        journal_message_id: ID сообщения для обновления
+        join_count: Количество вступлений при детекции
+        window_seconds: Временное окно
+        banned_count: Текущее количество забаненных
+        protection_seconds: Длительность protection mode
+        action_taken: Применённое действие
+        slowmode_seconds: Значение slowmode
+        is_active: Protection mode ещё активен?
+
+    Returns:
+        True если успешно обновлено
+    """
+    # Получаем канал журнала
+    journal = await get_group_journal_channel(session, chat_id)
+    if journal is None:
+        return False
+
+    journal_channel_id = journal.journal_channel_id
+
+    # Формируем текст
+    message_text = _format_raid_journal_text(
+        join_count=join_count,
+        window_seconds=window_seconds,
+        banned_count=banned_count,
+        protection_seconds=protection_seconds,
+        action_taken=action_taken,
+        slowmode_seconds=slowmode_seconds,
+        is_active=is_active
+    )
+
+    # Создаём клавиатуру
+    keyboard = _create_raid_journal_keyboard(chat_id)
+
+    try:
+        await bot.edit_message_text(
+            chat_id=journal_channel_id,
+            message_id=journal_message_id,
+            text=message_text,
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+
+        logger.debug(
+            f"[ANTIRAID] Raid journal обновлён: chat_id={chat_id}, "
+            f"banned={banned_count}, is_active={is_active}"
+        )
+
+        return True
+
+    except TelegramAPIError as e:
+        # "message is not modified" — игнорируем
+        if "message is not modified" in str(e):
+            return True
+        logger.error(f"[ANTIRAID] Ошибка обновления raid journal: {e}")
+        return False
+
+
+async def send_mass_invite_journal(
+    bot: Bot,
+    session: AsyncSession,
+    chat_id: int,
+    inviter_id: int,
+    inviter_name: str,
+    invite_count: int,
+    window_seconds: int,
+    action_result: ActionResult
+) -> Optional[int]:
+    """
+    Отправляет сообщение в журнал о массовых инвайтах.
+
+    Args:
+        bot: Экземпляр Bot
+        session: Асинхронная сессия SQLAlchemy
+        chat_id: ID группы
+        inviter_id: ID инвайтера
+        inviter_name: Имя инвайтера
+        invite_count: Количество инвайтов
+        window_seconds: Временное окно в секундах
+        action_result: Результат применения действия
+
+    Returns:
+        ID отправленного сообщения или None
+    """
+    # Получаем канал журнала
+    journal = await get_group_journal_channel(session, chat_id)
+    if journal is None:
+        return None
+
+    journal_channel_id = journal.journal_channel_id
+
+    # Экранируем имя
+    inviter_name_safe = (
+        inviter_name
+        .replace('&', '&amp;')
+        .replace('<', '&lt;')
+        .replace('>', '&gt;')
+    )
+
     # Определяем текст действия
-    if action_taken == 'slowmode':
-        action_text = f"Slowmode {slowmode_seconds} сек"
-    elif action_taken == 'lock':
-        action_text = "Группа закрыта"
+    if action_result.action_type == 'ban':
+        if action_result.duration_hours == 0:
+            action_text = "Бан навсегда"
+        else:
+            action_text = f"Бан на {action_result.duration_hours}ч"
+    elif action_result.action_type == 'kick':
+        action_text = "Кик"
+    elif action_result.action_type == 'mute':
+        action_text = f"Мут на {action_result.duration_hours}ч"
+    elif action_result.action_type == 'warn':
+        action_text = "Предупреждение"
     else:
-        action_text = "Уведомление"
+        action_text = action_result.action_type
 
     # Формируем сообщение
     message_text = (
-        f"<b>🚨 #ANTIRAID | Рейд детектирован!</b>\n"
+        f"<b>📨 #ANTIRAID | Массовые инвайты</b>\n"
         f"\n"
-        f"🔢 <b>Вступлений:</b> {join_count} за {window_seconds} сек\n"
+        f"👤 <b>Инвайтер:</b> {inviter_name_safe}\n"
+        f"🆔 <b>ID:</b> <code>{inviter_id}</code>\n"
+        f"🔢 <b>Инвайтов:</b> {invite_count} за {window_seconds} сек\n"
+        f"\n"
         f"⚡ <b>Действие:</b> {action_text}\n"
     )
 
-    if auto_unlock_minutes > 0:
-        message_text += f"⏱ <b>Авто-снятие через:</b> {auto_unlock_minutes} мин\n"
+    if not action_result.success:
+        message_text += f"\n⚠️ <b>Ошибка:</b> {action_result.error_message}"
 
-    message_text += f"\n#raid #antiraid #mass_join"
+    message_text += f"\n\n#mass_invite #antiraid #id{inviter_id}"
 
     # Создаём клавиатуру
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
-                text="Снять slowmode",
-                callback_data=f"ar:unslowmode:{chat_id}:0"
+                text="Разбанить" if action_result.action_type == 'ban' else "Размутить",
+                callback_data=f"ar:unban:{chat_id}:{inviter_id}"
             ),
             InlineKeyboardButton(
-                text="Закрыть группу",
-                callback_data=f"ar:lock:{chat_id}:0"
+                text="Бан навсегда",
+                callback_data=f"ar:permban:{chat_id}:{inviter_id}"
             ),
             InlineKeyboardButton(
                 text="OK",
-                callback_data=f"ar:ok:{chat_id}:0"
+                callback_data=f"ar:ok:{chat_id}:{inviter_id}"
             ),
         ]
     ])
@@ -400,5 +653,119 @@ async def send_raid_detected_journal(
         )
         return message.message_id
     except TelegramAPIError as e:
-        logger.error(f"[ANTIRAID] Ошибка отправки в журнал: {e}")
+        logger.error(f"[ANTIRAID] Ошибка отправки в журнал (mass_invite): {e}")
+        return None
+
+
+async def send_mass_reaction_journal(
+    bot: Bot,
+    session: AsyncSession,
+    chat_id: int,
+    user_id: int,
+    user_name: str,
+    abuse_type: str,
+    reaction_count: int,
+    window_seconds: int,
+    action_result: ActionResult,
+    message_id: Optional[int] = None
+) -> Optional[int]:
+    """
+    Отправляет сообщение в журнал о массовых реакциях.
+
+    Args:
+        bot: Экземпляр Bot
+        session: Асинхронная сессия SQLAlchemy
+        chat_id: ID группы
+        user_id: ID пользователя
+        user_name: Имя пользователя
+        abuse_type: Тип злоупотребления ('user' или 'message')
+        reaction_count: Количество реакций
+        window_seconds: Временное окно в секундах
+        action_result: Результат применения действия
+        message_id: ID сообщения (для message abuse)
+
+    Returns:
+        ID отправленного сообщения или None
+    """
+    # Получаем канал журнала
+    journal = await get_group_journal_channel(session, chat_id)
+    if journal is None:
+        return None
+
+    journal_channel_id = journal.journal_channel_id
+
+    # Экранируем имя
+    user_name_safe = (
+        user_name
+        .replace('&', '&amp;')
+        .replace('<', '&lt;')
+        .replace('>', '&gt;')
+    )
+
+    # Определяем текст действия
+    if action_result.action_type == 'mute':
+        action_text = f"Мут на {action_result.duration_hours}ч" if action_result.duration_hours > 0 else "Мут"
+    elif action_result.action_type == 'kick':
+        action_text = "Кик"
+    elif action_result.action_type == 'ban':
+        action_text = f"Бан на {action_result.duration_hours}ч"
+    elif action_result.action_type == 'warn':
+        action_text = "Предупреждение"
+    else:
+        action_text = action_result.action_type
+
+    # Определяем тип abuse
+    if abuse_type == 'user':
+        abuse_text = "Спам реакциями (per-user)"
+    else:
+        abuse_text = "Атака на сообщение (per-message)"
+
+    # Формируем сообщение
+    message_text = (
+        f"<b>😡 #ANTIRAID | Массовые реакции</b>\n"
+        f"\n"
+        f"👤 <b>Пользователь:</b> {user_name_safe}\n"
+        f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
+        f"📌 <b>Тип:</b> {abuse_text}\n"
+        f"🔢 <b>Реакций:</b> {reaction_count} за {window_seconds} сек\n"
+    )
+
+    if message_id:
+        message_text += f"💬 <b>Сообщение:</b> <code>{message_id}</code>\n"
+
+    message_text += f"\n⚡ <b>Действие:</b> {action_text}\n"
+
+    if not action_result.success:
+        message_text += f"\n⚠️ <b>Ошибка:</b> {action_result.error_message}"
+
+    message_text += f"\n\n#mass_reaction #antiraid #id{user_id}"
+
+    # Создаём клавиатуру
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="Размутить" if action_result.action_type == 'mute' else "Разбанить",
+                callback_data=f"ar:unban:{chat_id}:{user_id}"
+            ),
+            InlineKeyboardButton(
+                text="Бан навсегда",
+                callback_data=f"ar:permban:{chat_id}:{user_id}"
+            ),
+            InlineKeyboardButton(
+                text="OK",
+                callback_data=f"ar:ok:{chat_id}:{user_id}"
+            ),
+        ]
+    ])
+
+    try:
+        message = await bot.send_message(
+            chat_id=journal_channel_id,
+            text=message_text,
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+        return message.message_id
+    except TelegramAPIError as e:
+        logger.error(f"[ANTIRAID] Ошибка отправки в журнал (mass_reaction): {e}")
         return None
