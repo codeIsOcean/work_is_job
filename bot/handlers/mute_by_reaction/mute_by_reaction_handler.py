@@ -10,6 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.services.mute_by_reaction_service import handle_reaction_mute
 
+# Импортируем Anti-Raid трекинг реакций для проверки массовых реакций
+from bot.handlers.antiraid import track_reaction
+
 reaction_mute_router = Router(name="reaction_mute_router")
 
 logger = logging.getLogger(__name__)
@@ -85,6 +88,26 @@ async def _process_reaction_event(
                     logger.info(f"📅 Запланировано автоудаление уведомления через {result.notification_delete_delay} сек")
             except Exception as exc:
                 logger.error("❌ Ошибка при отправке системного сообщения: %s", exc)
+
+        # ─────────────────────────────────────────────────────────
+        # Anti-Raid: проверяем на массовые реакции
+        # Вызываем track_reaction для трекинга независимо от результата мута
+        # ─────────────────────────────────────────────────────────
+        try:
+            user = getattr(event, 'user', None)
+            message_id = getattr(event, 'message_id', None)
+            if user and message_id and event.chat:
+                await track_reaction(
+                    bot=event.bot,
+                    session=session,
+                    chat_id=event.chat.id,
+                    user_id=user.id,
+                    user_name=user.full_name or str(user.id),
+                    message_id=message_id
+                )
+        except Exception as e:
+            logger.warning(f"[ANTIRAID] Ошибка track_reaction: {e}")
+
     except Exception as exc:
         logger.error("❌ [REACTION_MUTE_HANDLER] КРИТИЧЕСКАЯ ОШИБКА при обработке реакции: %s", exc, exc_info=True)
         import traceback

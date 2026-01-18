@@ -96,6 +96,21 @@ async def handle_message_reaction(
         return
 
     # ─────────────────────────────────────────────────────────
+    # Проверяем является ли юзер админом/модератором
+    # Админы могут ставить реакции без ограничений
+    # ─────────────────────────────────────────────────────────
+    try:
+        member = await bot.get_chat_member(chat.id, user.id)
+        if member.status in ('creator', 'administrator'):
+            logger.debug(
+                f"[ANTIRAID] Mass reaction skip: user_id={user.id} is admin/creator"
+            )
+            return
+    except Exception as e:
+        # Если не удалось проверить статус — продолжаем проверку
+        logger.warning(f"[ANTIRAID] Failed to check admin status for reaction: {e}")
+
+    # ─────────────────────────────────────────────────────────
     # Проверяем на злоупотребление
     # ─────────────────────────────────────────────────────────
     if redis is None:
@@ -185,6 +200,21 @@ async def track_reaction(
     # Если настроек нет или mass_reaction выключен — пропускаем
     if settings is None or not settings.mass_reaction_enabled:
         return False
+
+    # ─────────────────────────────────────────────────────────
+    # Проверяем является ли юзер админом/модератором
+    # Админы могут ставить реакции без ограничений
+    # ─────────────────────────────────────────────────────────
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+        if member.status in ('creator', 'administrator'):
+            logger.debug(
+                f"[ANTIRAID] Mass reaction skip: user_id={user_id} is admin/creator"
+            )
+            return False
+    except Exception as e:
+        # Если не удалось проверить статус — продолжаем проверку
+        logger.warning(f"[ANTIRAID] Failed to check admin status for reaction: {e}")
 
     # ─────────────────────────────────────────────────────────
     # Проверяем на злоупотребление
