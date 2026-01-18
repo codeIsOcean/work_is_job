@@ -100,6 +100,75 @@ class TextNormalizer:
         'T': 'т',
         'X': 'х',
 
+        # ─────────────────────────────────────────────────────────
+        # Латинские буквы с диакритиками (венгерские, немецкие и др.)
+        # ─────────────────────────────────────────────────────────
+        # Спамеры используют буквы с акцентами для обфускации:
+        # Д.е́.t.С.k.ő.ē → детское
+        # Венгерские
+        'ő': 'о',  # U+0151 LATIN SMALL LETTER O WITH DOUBLE ACUTE
+        'Ő': 'о',  # U+0150 заглавная
+        'ű': 'у',  # U+0171 LATIN SMALL LETTER U WITH DOUBLE ACUTE
+        'Ű': 'у',  # U+0170 заглавная
+        # С макроном (латышские, литовские)
+        'ā': 'а',  # U+0101 LATIN SMALL LETTER A WITH MACRON
+        'Ā': 'а',  # U+0100 заглавная
+        'ē': 'е',  # U+0113 LATIN SMALL LETTER E WITH MACRON
+        'Ē': 'е',  # U+0112 заглавная
+        'ī': 'и',  # U+012B LATIN SMALL LETTER I WITH MACRON
+        'Ī': 'и',  # U+012A заглавная
+        'ō': 'о',  # U+014D LATIN SMALL LETTER O WITH MACRON
+        'Ō': 'о',  # U+014C заглавная
+        'ū': 'у',  # U+016B LATIN SMALL LETTER U WITH MACRON
+        'Ū': 'у',  # U+016A заглавная
+        # Немецкие умляуты
+        'ä': 'а',  # U+00E4 LATIN SMALL LETTER A WITH DIAERESIS
+        'Ä': 'а',  # U+00C4 заглавная
+        'ö': 'о',  # U+00F6 LATIN SMALL LETTER O WITH DIAERESIS
+        'Ö': 'о',  # U+00D6 заглавная
+        'ü': 'у',  # U+00FC LATIN SMALL LETTER U WITH DIAERESIS
+        'Ü': 'у',  # U+00DC заглавная
+        # Французские/испанские акценты
+        'á': 'а',  # U+00E1 LATIN SMALL LETTER A WITH ACUTE
+        'à': 'а',  # U+00E0 LATIN SMALL LETTER A WITH GRAVE
+        'â': 'а',  # U+00E2 LATIN SMALL LETTER A WITH CIRCUMFLEX
+        'é': 'е',  # U+00E9 LATIN SMALL LETTER E WITH ACUTE
+        'è': 'е',  # U+00E8 LATIN SMALL LETTER E WITH GRAVE
+        'ê': 'е',  # U+00EA LATIN SMALL LETTER E WITH CIRCUMFLEX
+        'ë': 'е',  # U+00EB LATIN SMALL LETTER E WITH DIAERESIS
+        'í': 'и',  # U+00ED LATIN SMALL LETTER I WITH ACUTE
+        'ì': 'и',  # U+00EC LATIN SMALL LETTER I WITH GRAVE
+        'î': 'и',  # U+00EE LATIN SMALL LETTER I WITH CIRCUMFLEX
+        'ï': 'и',  # U+00EF LATIN SMALL LETTER I WITH DIAERESIS
+        'ó': 'о',  # U+00F3 LATIN SMALL LETTER O WITH ACUTE
+        'ò': 'о',  # U+00F2 LATIN SMALL LETTER O WITH GRAVE
+        'ô': 'о',  # U+00F4 LATIN SMALL LETTER O WITH CIRCUMFLEX
+        'ú': 'у',  # U+00FA LATIN SMALL LETTER U WITH ACUTE
+        'ù': 'у',  # U+00F9 LATIN SMALL LETTER U WITH GRAVE
+        'û': 'у',  # U+00FB LATIN SMALL LETTER U WITH CIRCUMFLEX
+        'ý': 'у',  # U+00FD LATIN SMALL LETTER Y WITH ACUTE
+        'ÿ': 'у',  # U+00FF LATIN SMALL LETTER Y WITH DIAERESIS
+        # Скандинавские
+        'å': 'а',  # U+00E5 LATIN SMALL LETTER A WITH RING ABOVE
+        'ø': 'о',  # U+00F8 LATIN SMALL LETTER O WITH STROKE
+        'æ': 'а',  # U+00E6 LATIN SMALL LETTER AE (лигатура)
+        # Польские/чешские
+        'ą': 'а',  # U+0105 LATIN SMALL LETTER A WITH OGONEK
+        'ę': 'е',  # U+0119 LATIN SMALL LETTER E WITH OGONEK
+        'ł': 'л',  # U+0142 LATIN SMALL LETTER L WITH STROKE
+        'ń': 'н',  # U+0144 LATIN SMALL LETTER N WITH ACUTE
+        'ś': 'с',  # U+015B LATIN SMALL LETTER S WITH ACUTE
+        'ź': 'з',  # U+017A LATIN SMALL LETTER Z WITH ACUTE
+        'ż': 'з',  # U+017C LATIN SMALL LETTER Z WITH DOT ABOVE
+        'č': 'ч',  # U+010D LATIN SMALL LETTER C WITH CARON
+        'š': 'ш',  # U+0161 LATIN SMALL LETTER S WITH CARON
+        'ž': 'ж',  # U+017E LATIN SMALL LETTER Z WITH CARON
+        'ř': 'р',  # U+0159 LATIN SMALL LETTER R WITH CARON
+        'ě': 'е',  # U+011B LATIN SMALL LETTER E WITH CARON
+        'ň': 'н',  # U+0148 LATIN SMALL LETTER N WITH CARON
+        'ť': 'т',  # U+0165 LATIN SMALL LETTER T WITH CARON
+        'ď': 'д',  # U+010F LATIN SMALL LETTER D WITH CARON
+
         # Small Caps (ᴀᴋᴏ) - NFKD не раскладывает их
         '\u1d00': 'а',  # ᴀ LATIN LETTER SMALL CAPITAL A
         '\u0299': 'б',  # ʙ LATIN LETTER SMALL CAPITAL B

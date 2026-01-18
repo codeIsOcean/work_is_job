@@ -399,6 +399,21 @@ async def track_mass_invite(
         return False
 
     # ─────────────────────────────────────────────────────────
+    # Проверяем является ли инвайтер админом/модератором
+    # Админы могут приглашать без ограничений
+    # ─────────────────────────────────────────────────────────
+    try:
+        member = await bot.get_chat_member(chat_id, inviter_id)
+        if member.status in ('creator', 'administrator'):
+            logger.debug(
+                f"[ANTIRAID] Mass invite skip: inviter_id={inviter_id} is admin/creator"
+            )
+            return False
+    except Exception as e:
+        # Если не удалось проверить статус — продолжаем проверку
+        logger.warning(f"[ANTIRAID] Failed to check admin status: {e}")
+
+    # ─────────────────────────────────────────────────────────
     # Проверяем на злоупотребление
     # ─────────────────────────────────────────────────────────
     if redis is None:

@@ -166,25 +166,34 @@ async def send_name_pattern_journal(
     if check_result.pattern:
         pattern_text = check_result.pattern.pattern
 
+    # Создаём кликабельную ссылку на пользователя
+    user_link = _get_user_link(user_id, check_result.original_name)
+
     # Формируем сообщение
-    # Используем HTML разметку
+    # Используем HTML разметку с чётким визуальным разделением
     message_text = (
-        f"<b>⛔ #ANTIRAID | Бан по имени</b>\n"
+        f"<b>⛔ ANTI-RAID: Запрещённое имя</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"\n"
-        f"👤 <b>Имя:</b> {original_name_safe}\n"
-        f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
-        f"📝 <b>Паттерн:</b> <code>{pattern_text}</code>\n"
-        f"🔄 <b>Нормализация:</b> <code>{check_result.normalized_name}</code>\n"
+        f"👤 <b>Пользователь:</b> {user_link}\n"
+        f"    <i>ID:</i> <code>{user_id}</code>\n"
+        f"\n"
+        f"🔍 <b>Причина бана:</b>\n"
+        f"    <i>Паттерн:</i> <code>{pattern_text}</code>\n"
+        f"    <i>После нормализации:</i> <code>{check_result.normalized_name}</code>\n"
         f"\n"
         f"⚡ <b>Действие:</b> {action_text}\n"
     )
 
     # Если действие не удалось — добавляем ошибку
     if not action_result.success:
-        message_text += f"\n⚠️ <b>Ошибка:</b> {action_result.error_message}"
+        message_text += f"\n❌ <b>Ошибка:</b> {action_result.error_message}"
 
-    # Добавляем хештеги для поиска
-    message_text += f"\n\n#name_pattern #antiraid #id{user_id}"
+    # Добавляем разделитель и хештеги для поиска
+    message_text += (
+        f"\n━━━━━━━━━━━━━━━━━━━━━\n"
+        f"#name_pattern #antiraid #user{user_id}"
+    )
 
     # ─────────────────────────────────────────────────────────
     # Создаём клавиатуру
@@ -272,21 +281,31 @@ async def send_join_exit_journal(
     else:
         action_text = action_result.action_type
 
-    # Формируем сообщение
+    # Создаём кликабельную ссылку на пользователя
+    user_link = _get_user_link(user_id, user_name)
+
+    # Формируем сообщение с чётким визуальным разделением
     message_text = (
-        f"<b>⚠️ #ANTIRAID | Частые входы/выходы</b>\n"
+        f"<b>⚠️ ANTI-RAID: Частые входы/выходы</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"\n"
-        f"👤 <b>Пользователь:</b> {user_name_safe}\n"
-        f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
-        f"🔢 <b>События:</b> {event_count} за {window_seconds} сек\n"
+        f"👤 <b>Пользователь:</b> {user_link}\n"
+        f"    <i>ID:</i> <code>{user_id}</code>\n"
+        f"\n"
+        f"🔍 <b>Причина:</b>\n"
+        f"    <i>Злоупотребление:</i> {event_count} входов/выходов\n"
+        f"    <i>За период:</i> {window_seconds} секунд\n"
         f"\n"
         f"⚡ <b>Действие:</b> {action_text}\n"
     )
 
     if not action_result.success:
-        message_text += f"\n⚠️ <b>Ошибка:</b> {action_result.error_message}"
+        message_text += f"\n❌ <b>Ошибка:</b> {action_result.error_message}"
 
-    message_text += f"\n\n#join_exit #antiraid #id{user_id}"
+    message_text += (
+        f"\n━━━━━━━━━━━━━━━━━━━━━\n"
+        f"#join_exit #antiraid #user{user_id}"
+    )
 
     # Создаём клавиатуру
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -587,13 +606,8 @@ async def send_mass_invite_journal(
 
     journal_channel_id = journal.journal_channel_id
 
-    # Экранируем имя
-    inviter_name_safe = (
-        inviter_name
-        .replace('&', '&amp;')
-        .replace('<', '&lt;')
-        .replace('>', '&gt;')
-    )
+    # Создаём кликабельную ссылку на инвайтера
+    inviter_link = _get_user_link(inviter_id, inviter_name)
 
     # Определяем текст действия
     if action_result.action_type == 'ban':
@@ -610,21 +624,27 @@ async def send_mass_invite_journal(
     else:
         action_text = action_result.action_type
 
-    # Формируем сообщение
+    # Формируем сообщение с кликабельным именем
     message_text = (
-        f"<b>📨 #ANTIRAID | Массовые инвайты</b>\n"
+        f"<b>📨 ANTI-RAID: Массовые инвайты</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"\n"
-        f"👤 <b>Инвайтер:</b> {inviter_name_safe}\n"
-        f"🆔 <b>ID:</b> <code>{inviter_id}</code>\n"
-        f"🔢 <b>Инвайтов:</b> {invite_count} за {window_seconds} сек\n"
+        f"👤 <b>Инвайтер:</b> {inviter_link}\n"
+        f"    <i>ID:</i> <code>{inviter_id}</code>\n"
+        f"\n"
+        f"🔍 <b>Причина:</b>\n"
+        f"    <i>Инвайтов:</i> {invite_count} за {window_seconds} сек\n"
         f"\n"
         f"⚡ <b>Действие:</b> {action_text}\n"
     )
 
     if not action_result.success:
-        message_text += f"\n⚠️ <b>Ошибка:</b> {action_result.error_message}"
+        message_text += f"\n❌ <b>Ошибка:</b> {action_result.error_message}"
 
-    message_text += f"\n\n#mass_invite #antiraid #id{inviter_id}"
+    message_text += (
+        f"\n━━━━━━━━━━━━━━━━━━━━━\n"
+        f"#mass_invite #antiraid #user{inviter_id}"
+    )
 
     # Создаём клавиатуру
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -694,13 +714,8 @@ async def send_mass_reaction_journal(
 
     journal_channel_id = journal.journal_channel_id
 
-    # Экранируем имя
-    user_name_safe = (
-        user_name
-        .replace('&', '&amp;')
-        .replace('<', '&lt;')
-        .replace('>', '&gt;')
-    )
+    # Создаём кликабельную ссылку на пользователя
+    user_link = _get_user_link(user_id, user_name)
 
     # Определяем текст действия
     if action_result.action_type == 'mute':
@@ -724,7 +739,7 @@ async def send_mass_reaction_journal(
     message_text = (
         f"<b>😡 #ANTIRAID | Массовые реакции</b>\n"
         f"\n"
-        f"👤 <b>Пользователь:</b> {user_name_safe}\n"
+        f"👤 <b>Пользователь:</b> {user_link}\n"
         f"🆔 <b>ID:</b> <code>{user_id}</code>\n"
         f"📌 <b>Тип:</b> {abuse_text}\n"
         f"🔢 <b>Реакций:</b> {reaction_count} за {window_seconds} сек\n"
