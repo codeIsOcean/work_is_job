@@ -590,14 +590,14 @@ async def _handle_profile_changes(
         try:
             # Определяем тип изменения для трекинга
             if name_changed and photo_changed:
-                # Оба изменения — логируем как смену имени (более подозрительно)
-                change_type = ProfileChangeType.NAME
+                # Оба изменения — логируем как both
+                change_type = ProfileChangeType.both
             elif name_changed:
                 # Только смена имени
-                change_type = ProfileChangeType.NAME
+                change_type = ProfileChangeType.name
             else:
                 # Только смена фото
-                change_type = ProfileChangeType.PHOTO
+                change_type = ProfileChangeType.photo
 
             # Записываем факт изменения профиля
             await track_profile_change(
