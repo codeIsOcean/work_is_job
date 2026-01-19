@@ -16,6 +16,21 @@ from bot.services.bot_activity_journal.bot_activity_journal_logic import (
 )
 import logging
 
+# ═══════════════════════════════════════════════════════════════════════
+# ANTI-RAID: Импорты для проверки имени по паттернам и трекинга входов
+# Вызываем здесь как fallback, т.к. не все группы получают new_chat_members
+# ═══════════════════════════════════════════════════════════════════════
+from bot.services.antiraid import (
+    check_name_against_patterns,  # Проверка имени по паттернам
+    apply_name_pattern_action,    # Применение действия (бан/кик/мут)
+    send_name_pattern_journal,    # Отправка в журнал
+)
+from bot.handlers.antiraid import (
+    track_join_event,   # Трекинг входа/выхода (join_exit abuse)
+    track_mass_join,    # Детекция рейда (mass join)
+    track_mass_invite,  # Детекция массовых инвайтов
+)
+
 logger = logging.getLogger(__name__)
 new_member_requested_handler = Router()
 
@@ -192,6 +207,109 @@ async def manually_mute_on_approval(event: ChatMemberUpdated):
                             )
             except Exception as pm_error:
                 logger.error(f"[PROFILE_MONITOR] Error creating snapshot: {pm_error}")
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # ANTI-RAID: Проверка имени по паттернам и трекинг входов
+        # Вызываем здесь как fallback, т.к. не все группы получают new_chat_members
+        # ═══════════════════════════════════════════════════════════════════════
+        if old_status in ("left", "kicked") and new_status == "member":
+            # Получаем пользователя для проверки
+            user = event.new_chat_member.user
+            # Пропускаем ботов — они не подлежат Anti-Raid проверке
+            if not user.is_bot:
+                try:
+                    # Импортируем get_session если ещё не импортирован
+                    from bot.database.session import get_session
+                    async with get_session() as ar_session:
+                        # ─────────────────────────────────────────────────────────
+                        # 1. Проверка имени по паттернам (Name Pattern Check)
+                        # ─────────────────────────────────────────────────────────
+                        logger.info(
+                            f"[ANTIRAID] Checking name patterns: "
+                            f"chat={event.chat.id} user={user.id} name='{user.full_name}'"
+                        )
+                        # Вызываем проверку имени по паттернам
+                        antiraid_check = await check_name_against_patterns(
+                            ar_session, user, event.chat.id
+                        )
+                        # Если паттерн совпал — применяем действие
+                        if antiraid_check.matched:
+                            logger.warning(
+                                f"[ANTIRAID] Name pattern MATCHED: "
+                                f"user={user.id} pattern='{antiraid_check.pattern}'"
+                            )
+                            # Применяем действие (бан/кик/мут) по настройкам группы
+                            action_result = await apply_name_pattern_action(
+                                bot=event.bot,
+                                session=ar_session,
+                                chat_id=event.chat.id,
+                                user_id=user.id,
+                                is_join_request=False,  # Это chat_member_updated, не join_request
+                            )
+                            # Отправляем уведомление в журнал группы
+                            await send_name_pattern_journal(
+                                bot=event.bot,
+                                session=ar_session,
+                                chat_id=event.chat.id,
+                                user_id=user.id,
+                                check_result=antiraid_check,
+                                action_result=action_result,
+                            )
+                        else:
+                            logger.debug(
+                                f"[ANTIRAID] Name pattern NOT matched: "
+                                f"user={user.id} name='{user.full_name}'"
+                            )
+
+                        # ─────────────────────────────────────────────────────────
+                        # 2. Трекинг входа/выхода (Join/Exit Abuse Detection)
+                        # ─────────────────────────────────────────────────────────
+                        # Записываем событие входа для детекции join/exit abuse
+                        await track_join_event(
+                            bot=event.bot,
+                            session=ar_session,
+                            chat_id=event.chat.id,
+                            user_id=user.id,
+                            user_name=user.full_name or str(user.id)
+                        )
+
+                        # ─────────────────────────────────────────────────────────
+                        # 3. Детекция рейда (Mass Join Detection)
+                        # ─────────────────────────────────────────────────────────
+                        # Проверяем на массовые вступления (рейд)
+                        await track_mass_join(
+                            bot=event.bot,
+                            session=ar_session,
+                            chat_id=event.chat.id,
+                            user_id=user.id
+                        )
+
+                        # ─────────────────────────────────────────────────────────
+                        # 4. Детекция массовых инвайтов (если есть инвайтер)
+                        # ─────────────────────────────────────────────────────────
+                        # Проверяем был ли пользователь приглашён другим участником
+                        inviter = event.from_user
+                        # Если inviter != user — это инвайт (кто-то пригласил)
+                        if inviter and inviter.id != user.id:
+                            logger.info(
+                                f"[ANTIRAID] Detected invite: "
+                                f"inviter={inviter.id} invited={user.id}"
+                            )
+                            # Вызываем трекинг массовых инвайтов
+                            await track_mass_invite(
+                                bot=event.bot,
+                                session=ar_session,
+                                chat_id=event.chat.id,
+                                inviter_id=inviter.id,
+                                inviter_name=inviter.full_name or str(inviter.id),
+                                invited_user_id=user.id
+                            )
+
+                except Exception as ar_error:
+                    # Логируем ошибку, но не прерываем обработку
+                    logger.error(f"[ANTIRAID] Error in chat_member handler: {ar_error}")
+                    import traceback
+                    logger.error(f"[ANTIRAID] Traceback: {traceback.format_exc()}")
 
         try:
             # Проверяем глобальный мут (мастер-переключатель)
