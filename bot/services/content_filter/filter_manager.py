@@ -110,6 +110,14 @@ class FilterResult(NamedTuple):
     # Детальная информация о сработавших паттернах (для custom_section)
     # Список словарей: [{'pattern': str, 'method': str, 'weight': int, 'context': str}, ...]
     matched_patterns: Optional[List[dict]] = None
+    # ─────────────────────────────────────────────────────────
+    # КРОСС-СООБЩЕНИЕ ДЕТЕКЦИЯ
+    # ─────────────────────────────────────────────────────────
+    # Максимальный score по разделам (возвращается ВСЕГДА, даже если порог не превышен)
+    # Используется для накопления в CrossMessageService
+    accumulated_score: int = 0
+    # Название раздела с максимальным score (для логирования)
+    accumulated_section: Optional[str] = None
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -490,6 +498,13 @@ class FilterManager:
                 )
 
         # ─────────────────────────────────────────────────────────
+        # КРОСС-СООБЩЕНИЕ ДЕТЕКЦИЯ: переменные для накопления
+        # Определяем здесь чтобы были доступны в финальном return
+        # ─────────────────────────────────────────────────────────
+        max_accumulated_score = 0
+        max_accumulated_section: Optional[str] = None
+
+        # ─────────────────────────────────────────────────────────
         # ШАГ 4: Custom Sections (кастомные разделы спама)
         # ПРИОРИТЕТ: Разделы проверяются ПЕРВЫМИ перед общим scam_detector
         # ─────────────────────────────────────────────────────────
@@ -827,6 +842,15 @@ class FilterManager:
 
                         # НЕ return! Продолжаем проверять остальные разделы
 
+                    # ─────────────────────────────────────────────────────
+                    # КРОСС-СООБЩЕНИЕ ДЕТЕКЦИЯ: сохраняем max score
+                    # Даже если порог раздела НЕ превышен — сохраняем score
+                    # для накопления в CrossMessageService
+                    # ─────────────────────────────────────────────────────
+                    if total_score > max_accumulated_score:
+                        max_accumulated_score = total_score
+                        max_accumulated_section = section.name
+
                 # ══════════════════════════════════════════════════════════
                 # ПОСЛЕ ЦИКЛА: Обрабатываем лучшего кандидата (с max score)
                 # ══════════════════════════════════════════════════════════
@@ -1020,7 +1044,12 @@ class FilterManager:
                 )
 
         # Ничего не найдено
-        return FilterResult(should_act=False)
+        # Возвращаем accumulated_score для кросс-сообщение детекции
+        return FilterResult(
+            should_act=False,
+            accumulated_score=max_accumulated_score,
+            accumulated_section=max_accumulated_section
+        )
 
     async def log_violation(
         self,

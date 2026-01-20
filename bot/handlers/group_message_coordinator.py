@@ -12,6 +12,9 @@
 # Это паттерн "Single Entry Point" / "Message Coordinator"
 # ============================================================
 
+# Импортируем Optional для типизации
+from typing import Optional
+
 # Импортируем Router для создания единого роутера
 from aiogram import Router, F
 # Импортируем типы сообщений
@@ -35,6 +38,12 @@ from bot.handlers.content_filter.filter_handler import (
     _apply_action as content_filter_apply_action,
     _send_journal_log as content_filter_send_journal_log,
     _filter_manager
+)
+# CrossMessageService - накопление скора через несколько сообщений
+from bot.services.content_filter.cross_message_service import (
+    CrossMessageService,
+    get_cross_message_service,
+    create_cross_message_service
 )
 
 # Antispam - импортируем функцию проверки и типы
@@ -429,8 +438,20 @@ async def _process_content_filter(
             f"trigger={result.trigger}"
         )
 
-        # Если фильтр не сработал - возвращаем False
+        # Если фильтр не сработал - проверяем кросс-сообщение детекцию
         if not result.should_act:
+            # ─────────────────────────────────────────────────────
+            # КРОСС-СООБЩЕНИЕ ДЕТЕКЦИЯ: используем СВОИ паттерны
+            # НЕ используем accumulated_score из разделов!
+            # Вместо этого вызываем check_patterns() который использует
+            # отдельную таблицу cross_message_patterns
+            # ─────────────────────────────────────────────────────
+            cross_msg_triggered = await _process_cross_message_detection(
+                message=message,
+                session=session
+            )
+            if cross_msg_triggered:
+                return True
             return False
 
         # ─────────────────────────────────────────────────────
@@ -466,6 +487,293 @@ async def _process_content_filter(
         )
         # При ошибке считаем что фильтр не сработал
         return False
+
+
+# ============================================================
+# ОБРАБОТКА КРОСС-СООБЩЕНИЕ ДЕТЕКЦИИ
+# ============================================================
+
+async def _process_cross_message_detection(
+    message: Message,
+    session: AsyncSession
+) -> bool:
+    """
+    Обрабатывает кросс-сообщение детекцию с использованием СВОИХ паттернов.
+
+    НЕ использует accumulated_score из разделов!
+    Вместо этого вызывает check_patterns() который проверяет текст
+    по ОТДЕЛЬНОЙ таблице cross_message_patterns.
+
+    Args:
+        message: Сообщение
+        session: Сессия БД
+
+    Returns:
+        bool: True если cross_message_threshold превышен, False иначе
+    """
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+
+    try:
+        # ─────────────────────────────────────────────────────
+        # Получаем настройки ContentFilter для этой группы
+        # ─────────────────────────────────────────────────────
+        settings = await _filter_manager.get_or_create_settings(chat_id, session)
+
+        # Проверяем включена ли кросс-сообщение детекция
+        if not getattr(settings, 'cross_message_enabled', False):
+            return False
+
+        # ─────────────────────────────────────────────────────
+        # Получаем CrossMessageService
+        # ─────────────────────────────────────────────────────
+        cross_msg_service = get_cross_message_service()
+        if not cross_msg_service:
+            # Сервис не инициализирован — пробуем создать
+            # Используем тот же Redis что и для flood_detector
+            if redis:
+                cross_msg_service = create_cross_message_service(redis)
+            else:
+                logger.warning("[COORDINATOR/CM] Redis недоступен для CrossMessageService")
+                return False
+
+        # ─────────────────────────────────────────────────────
+        # Получаем текст сообщения
+        # ─────────────────────────────────────────────────────
+        text = message.text or message.caption or ''
+        if not text.strip():
+            # Нет текста — нечего проверять
+            return False
+
+        # ─────────────────────────────────────────────────────
+        # Получаем настройки кросс-сообщение детекции
+        # ─────────────────────────────────────────────────────
+        window_seconds = getattr(settings, 'cross_message_window_seconds', 7200)
+        threshold = getattr(settings, 'cross_message_threshold', 100)
+        action = getattr(settings, 'cross_message_action', 'mute') or 'mute'
+
+        # ─────────────────────────────────────────────────────
+        # Проверяем текст по СВОИМ паттернам (НЕ разделов!)
+        # ─────────────────────────────────────────────────────
+        result = await cross_msg_service.check_patterns(
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=message.message_id,
+            text=text,
+            session=session,
+            window_seconds=window_seconds,
+            threshold=threshold
+        )
+
+        # Если ничего не найдено — выходим
+        if result.score == 0:
+            return False
+
+        # Логируем накопление
+        logger.info(
+            f"[COORDINATOR/CM] 📊 Накопление: chat={chat_id}, user={user_id}, "
+            f"+{result.score} баллов, total={result.total_score}/{threshold}, "
+            f"matched={len(result.matched_patterns)}"
+        )
+
+        # ─────────────────────────────────────────────────────
+        # Если порог НЕ превышен — выходим
+        # ─────────────────────────────────────────────────────
+        if not result.threshold_exceeded:
+            return False
+
+        # ─────────────────────────────────────────────────────
+        # ПОРОГ ПРЕВЫШЕН — применяем действие
+        # ─────────────────────────────────────────────────────
+        logger.warning(
+            f"[COORDINATOR/CM] ⚡ CROSS-MESSAGE THRESHOLD EXCEEDED: "
+            f"chat={chat_id}, user={user_id}, total={result.total_score}, "
+            f"action={action}, matched_patterns={result.matched_patterns}"
+        )
+
+        # Сбрасываем счётчик чтобы не срабатывать повторно
+        await cross_msg_service.reset_score(chat_id, user_id)
+
+        # Получаем историю для журнала
+        history = await cross_msg_service.get_history(chat_id, user_id)
+
+        # Применяем действие
+        await _apply_cross_message_action(
+            message=message,
+            session=session,
+            action=action,
+            total_score=result.total_score,
+            messages_count=len(history) if history else 1,
+            history=history or [],
+            settings=settings,
+            message_ids=result.message_ids,
+            matched_patterns=result.matched_patterns
+        )
+
+        return True
+
+    except Exception as e:
+        logger.exception(
+            f"[COORDINATOR/CM] Ошибка обработки: {e}, "
+            f"chat={chat_id}, user={user_id}"
+        )
+        return False
+
+
+async def _apply_cross_message_action(
+    message: Message,
+    session: AsyncSession,
+    action: str,
+    total_score: int,
+    messages_count: int,
+    history: list,
+    settings,
+    message_ids: list = None,
+    matched_patterns: list = None
+) -> None:
+    """
+    Применяет действие при превышении cross_message_threshold.
+
+    Args:
+        message: Последнее сообщение
+        session: Сессия БД
+        action: Действие (mute/ban/kick)
+        total_score: Накопленный score
+        messages_count: Количество сообщений в накоплении
+        history: История сообщений
+        settings: Настройки ContentFilter
+        message_ids: Список ID сообщений для удаления
+        matched_patterns: Список сработавших паттернов
+    """
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    bot = message.bot
+
+    try:
+        # ─────────────────────────────────────────────────────
+        # ДЕЙСТВИЕ: MUTE
+        # ─────────────────────────────────────────────────────
+        if action == 'mute':
+            # Используем default_mute_duration из настроек
+            mute_duration = getattr(settings, 'default_mute_duration', 1440)
+
+            permissions = ChatPermissions(
+                can_send_messages=False,
+                can_send_media_messages=False,
+                can_send_polls=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False,
+                can_change_info=False,
+                can_invite_users=False,
+                can_pin_messages=False,
+            )
+
+            await bot.restrict_chat_member(
+                chat_id,
+                user_id,
+                permissions=permissions,
+                until_date=timedelta(minutes=mute_duration)
+            )
+
+            logger.info(
+                f"[COORDINATOR/CM] 🔇 Мут применён: user={user_id}, "
+                f"duration={mute_duration} мин, score={total_score}"
+            )
+
+        # ─────────────────────────────────────────────────────
+        # ДЕЙСТВИЕ: BAN
+        # ─────────────────────────────────────────────────────
+        elif action == 'ban':
+            await bot.ban_chat_member(chat_id, user_id)
+            logger.info(
+                f"[COORDINATOR/CM] 🚫 Бан применён: user={user_id}, score={total_score}"
+            )
+
+        # ─────────────────────────────────────────────────────
+        # ДЕЙСТВИЕ: KICK
+        # ─────────────────────────────────────────────────────
+        elif action == 'kick':
+            await bot.ban_chat_member(chat_id, user_id)
+            await bot.unban_chat_member(chat_id, user_id)
+            logger.info(
+                f"[COORDINATOR/CM] 👢 Кик применён: user={user_id}, score={total_score}"
+            )
+
+        # ─────────────────────────────────────────────────────
+        # УДАЛЯЕМ ВСЕ НАКОПЛЕННЫЕ СООБЩЕНИЯ
+        # ─────────────────────────────────────────────────────
+        deleted_count = 0
+        if message_ids:
+            for msg_id in message_ids:
+                try:
+                    await bot.delete_message(chat_id, msg_id)
+                    deleted_count += 1
+                except Exception:
+                    pass  # Сообщение могло быть уже удалено
+
+            logger.info(
+                f"[COORDINATOR/CM] 🗑️ Удалено сообщений: {deleted_count}/{len(message_ids)}"
+            )
+
+        # Также удаляем текущее сообщение (если не в списке)
+        if not message_ids or message.message_id not in message_ids:
+            try:
+                await message.delete()
+                deleted_count += 1
+            except Exception:
+                pass
+
+        # ─────────────────────────────────────────────────────
+        # ОТПРАВЛЯЕМ В ЖУРНАЛ
+        # ─────────────────────────────────────────────────────
+        if getattr(settings, 'log_violations', True):
+            # Формируем текст сработавших паттернов
+            patterns_text = ""
+            if matched_patterns:
+                for i, p in enumerate(matched_patterns[:5], 1):  # Показываем до 5 паттернов
+                    p_pattern = p.get('pattern', '')[:30]
+                    p_weight = p.get('weight', 0)
+                    p_method = p.get('method', '')
+                    patterns_text += f"  • «{p_pattern}» +{p_weight} [{p_method}]\n"
+
+            # Формируем историю для отображения
+            history_text = ""
+            if history:
+                for i, h in enumerate(history[-5:], 1):  # Показываем последние 5
+                    preview = h.get('preview', '')[:40]
+                    h_score = h.get('score', 0)
+                    history_text += f"  {i}. +{h_score} «{preview}...»\n"
+
+            action_names = {
+                'mute': '🔇 Мут',
+                'ban': '🚫 Бан',
+                'kick': '👢 Кик'
+            }
+            action_name = action_names.get(action, action)
+
+            await send_journal_event(
+                bot=bot,
+                session=session,
+                group_id=chat_id,
+                message_text=(
+                    f"📊 <b>Кросс-сообщение детекция</b>\n\n"
+                    f"👤 Пользователь: {message.from_user.mention_html()} "
+                    f"[<code>{user_id}</code>]\n"
+                    f"📈 Накопленный скор: <b>{total_score}</b>\n"
+                    f"📝 Сообщений: {messages_count}\n"
+                    f"🗑️ Удалено: {deleted_count}\n"
+                    f"⚡ Действие: {action_name}\n\n"
+                    f"🎯 Сработавшие паттерны:\n{patterns_text if patterns_text else '  (из разделов)'}\n"
+                    f"📜 Последние сообщения:\n{history_text}"
+                )
+            )
+
+    except TelegramBadRequest as e:
+        logger.error(f"[COORDINATOR/CM] TelegramBadRequest: {e}")
+    except TelegramForbiddenError as e:
+        logger.error(f"[COORDINATOR/CM] TelegramForbiddenError: {e}")
+    except Exception as e:
+        logger.exception(f"[COORDINATOR/CM] Ошибка применения действия: {e}")
 
 
 # ============================================================

@@ -61,6 +61,7 @@ from bot.database.models_content_filter import (  # noqa: F401
     CustomSpamSection,
     CustomSectionPattern,
     CustomSectionThreshold,
+    CrossMessagePattern,  # Паттерны кросс-сообщение детекции
 )
 
 # Антиспам (правила, белый список)

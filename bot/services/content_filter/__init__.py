@@ -25,6 +25,13 @@ from bot.services.content_filter.scam_pattern_service import (
     get_pattern_service
 )
 
+# Импортируем сервис кросс-сообщение детекции
+from bot.services.content_filter.cross_message_service import (
+    CrossMessageService,
+    create_cross_message_service,
+    get_cross_message_service
+)
+
 # Экспортируем публичные компоненты модуля
 # __all__ определяет что будет импортировано при "from module import *"
 __all__ = [
@@ -40,4 +47,8 @@ __all__ = [
     # Сервис кастомных паттернов
     'ScamPatternService',
     'get_pattern_service',
+    # Сервис кросс-сообщение детекции
+    'CrossMessageService',
+    'create_cross_message_service',
+    'get_cross_message_service',
 ]
