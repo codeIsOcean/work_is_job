@@ -69,6 +69,19 @@ async def callback_mute_user(
     )
 
     try:
+        # ВАЖНО: Проверяем статус пользователя перед мутом
+        # Если пользователь забанен (kicked) — мут снимет бан!
+        can_mute, current_status, error_msg = await _check_user_status_before_mute(
+            bot, chat_id, user_id
+        )
+
+        if not can_mute:
+            logger.warning(
+                f"[PROFILE_MONITOR] Mute blocked: user={user_id} status={current_status}"
+            )
+            await callback.answer(error_msg, show_alert=True)
+            return
+
         # Применяем мут
         permissions = ChatPermissions(
             can_send_messages=False,
@@ -410,6 +423,54 @@ async def callback_ok(
 # ============================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================
+
+
+async def _check_user_status_before_mute(
+    bot: Bot,
+    chat_id: int,
+    user_id: int,
+) -> tuple[bool, str, str | None]:
+    """
+    Проверяет статус пользователя перед мутом.
+
+    Возвращает:
+        (can_mute, current_status, error_message)
+        - can_mute: True если можно мутить
+        - current_status: текущий статус пользователя
+        - error_message: сообщение об ошибке если нельзя мутить
+    """
+    try:
+        # Получаем текущий статус пользователя в чате
+        member = await bot.get_chat_member(chat_id, user_id)
+        status = member.status
+
+        # Если пользователь забанен (kicked) — нельзя мутить!
+        # Мут снимет бан и даст права читать сообщения
+        if status == "kicked":
+            return (
+                False,
+                status,
+                "⛔ Пользователь уже забанен. Мут снимет бан! Используйте разбан если нужно.",
+            )
+
+        # Если пользователь покинул чат — нельзя мутить
+        if status == "left":
+            return (False, status, "❌ Пользователь покинул чат")
+
+        # Если пользователь админ или владелец — нельзя мутить
+        if status in ("administrator", "creator"):
+            return (False, status, "⚠️ Нельзя замутить администратора")
+
+        # Статусы member и restricted — можно мутить
+        return (True, status, None)
+
+    except Exception as e:
+        logger.error(f"[PROFILE_MONITOR] Failed to check user status: {e}")
+        # При ошибке проверки — разрешаем мут (старое поведение)
+        # но логируем предупреждение
+        return (True, "unknown", None)
+
+
 async def _update_log_action(
     session: AsyncSession,
     log_id: int,
@@ -479,6 +540,19 @@ async def callback_mute7d_user(
     )
 
     try:
+        # ВАЖНО: Проверяем статус пользователя перед мутом
+        # Если пользователь забанен (kicked) — мут снимет бан!
+        can_mute, current_status, error_msg = await _check_user_status_before_mute(
+            bot, chat_id, user_id
+        )
+
+        if not can_mute:
+            logger.warning(
+                f"[PROFILE_MONITOR] Mute7d blocked: user={user_id} status={current_status}"
+            )
+            await callback.answer(error_msg, show_alert=True)
+            return
+
         # Импортируем datetime для вычисления until_date
         from datetime import datetime, timedelta
 
@@ -570,6 +644,19 @@ async def callback_mute_forever_user(
     )
 
     try:
+        # ВАЖНО: Проверяем статус пользователя перед мутом
+        # Если пользователь забанен (kicked) — мут снимет бан!
+        can_mute, current_status, error_msg = await _check_user_status_before_mute(
+            bot, chat_id, user_id
+        )
+
+        if not can_mute:
+            logger.warning(
+                f"[PROFILE_MONITOR] Mute_forever blocked: user={user_id} status={current_status}"
+            )
+            await callback.answer(error_msg, show_alert=True)
+            return
+
         # Создаём ограничения - запрещаем отправку сообщений
         permissions = ChatPermissions(
             can_send_messages=False,
