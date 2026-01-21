@@ -603,7 +603,6 @@ async def _handle_profile_changes(
             await track_profile_change(
                 session=session,
                 user_id=user_id,
-                chat_id=chat_id,
                 change_type=change_type,
             )
             # Логируем трекинг
