@@ -203,6 +203,18 @@ class ManualCommandSettings(Base, ExportableMixin):
         nullable=False
     )
 
+    # ═══════════════════════════════════════════════════════════
+    # РАЗДЕЛ 4: НАСТРОЙКИ КОМАНДЫ /asend
+    # ═══════════════════════════════════════════════════════════
+
+    # Удалять ли команду /asend после отправки сообщения
+    # По умолчанию True — команда удаляется
+    send_delete_command = Column(
+        Boolean,
+        server_default='true',
+        nullable=False
+    )
+
     def __repr__(self):
         # Строковое представление для отладки
         return (

@@ -72,6 +72,7 @@ def create_settings_keyboard(
     delete_delay: int = 0,
     notify_text: str | None = None,
     notify_delete_delay: int = 0,
+    send_delete_command: bool = True,
 ) -> InlineKeyboardMarkup:
     """
     Создаёт клавиатуру настроек модуля.
@@ -84,6 +85,7 @@ def create_settings_keyboard(
         delete_delay: Задержка удаления сообщения (секунды)
         notify_text: Кастомный текст уведомления
         notify_delete_delay: Задержка удаления уведомления (секунды)
+        send_delete_command: Удалять команду /asend после отправки
     """
     buttons = []
 
@@ -140,6 +142,14 @@ def create_settings_keyboard(
         callback_data=f"mcs:duration:{chat_id}"
     )
     buttons.append([duration_btn])
+
+    # ─── БЛОК 4: Команда /asend ───
+    send_icon = "✅" if send_delete_command else "❌"
+    send_btn = InlineKeyboardButton(
+        text=f"{send_icon} /asend: удалять команду",
+        callback_data=f"mcs:toggle:senddelete:{chat_id}"
+    )
+    buttons.append([send_btn])
 
     # ─── Кнопка назад ───
     back_btn = InlineKeyboardButton(
@@ -252,7 +262,7 @@ async def handle_main_menu(
         # Формируем текст
         text = (
             "⚙️ <b>Настройки ручных команд</b>\n\n"
-            "Команды: /amute, /aunmute\n\n"
+            "Команды: /amute, /aunmute, /asend\n\n"
             "<b>Опции:</b>\n"
             "• <b>Удалять сообщение</b> — удалять сообщение нарушителя при муте\n"
             "• <b>Уведомлять группу</b> — отправлять уведомление о муте в группу\n"
@@ -269,6 +279,7 @@ async def handle_main_menu(
             delete_delay=settings.mute_delete_delay,
             notify_text=settings.mute_notify_text,
             notify_delete_delay=settings.mute_notify_delete_delay,
+            send_delete_command=settings.send_delete_command,
         )
 
         await callback.message.edit_text(
@@ -317,6 +328,10 @@ async def handle_toggle(
             new_value = not settings.mute_notify_group
             await update_mute_settings(session, chat_id, mute_notify_group=new_value)
             msg = "Уведомления включены" if new_value else "Уведомления выключены"
+        elif toggle_type == "senddelete":
+            new_value = not settings.send_delete_command
+            await update_mute_settings(session, chat_id, send_delete_command=new_value)
+            msg = "/asend: команда удаляется" if new_value else "/asend: команда остаётся"
         else:
             await callback.answer("❌ Неизвестный параметр", show_alert=True)
             return
@@ -335,6 +350,7 @@ async def handle_toggle(
             delete_delay=settings.mute_delete_delay,
             notify_text=settings.mute_notify_text,
             notify_delete_delay=settings.mute_notify_delete_delay,
+            send_delete_command=settings.send_delete_command,
         )
 
         await callback.message.edit_reply_markup(reply_markup=keyboard)
@@ -425,7 +441,7 @@ async def handle_set_duration(
 
         text = (
             "⚙️ <b>Настройки ручных команд</b>\n\n"
-            "Команды: /amute, /aunmute\n\n"
+            "Команды: /amute, /aunmute, /asend\n\n"
             "<b>Опции:</b>\n"
             "• <b>Удалять сообщение</b> — удалять сообщение нарушителя при муте\n"
             "• <b>Уведомлять группу</b> — отправлять уведомление о муте в группу\n"
@@ -441,6 +457,7 @@ async def handle_set_duration(
             delete_delay=settings.mute_delete_delay,
             notify_text=settings.mute_notify_text,
             notify_delete_delay=settings.mute_notify_delete_delay,
+            send_delete_command=settings.send_delete_command,
         )
 
         await callback.message.edit_text(
@@ -597,7 +614,7 @@ async def handle_custom_duration_input(
     text = (
         "⚙️ <b>Настройки ручных команд</b>\n\n"
         f"✅ Время по умолчанию установлено: <b>{duration_text}</b>\n\n"
-        "Команды: /amute, /aunmute\n\n"
+        "Команды: /amute, /aunmute, /asend\n\n"
         "<b>Опции:</b>\n"
         "• <b>Удалять сообщение</b> — удалять сообщение нарушителя при муте\n"
         "• <b>Уведомлять группу</b> — отправлять уведомление о муте в группу\n"
@@ -612,6 +629,7 @@ async def handle_custom_duration_input(
         delete_delay=settings.mute_delete_delay,
         notify_text=settings.mute_notify_text,
         notify_delete_delay=settings.mute_notify_delete_delay,
+        send_delete_command=settings.send_delete_command,
     )
 
     await bot.send_message(
@@ -747,7 +765,7 @@ async def handle_set_delete_delay(
 
         text = (
             "⚙️ <b>Настройки ручных команд</b>\n\n"
-            "Команды: /amute, /aunmute\n\n"
+            "Команды: /amute, /aunmute, /asend\n\n"
             "<b>Опции:</b>\n"
             "• <b>Удалять сообщение</b> — удалять сообщение нарушителя при муте\n"
             "• <b>Уведомлять группу</b> — отправлять уведомление о муте в группу\n"
@@ -763,6 +781,7 @@ async def handle_set_delete_delay(
             delete_delay=settings.mute_delete_delay,
             notify_text=settings.mute_notify_text,
             notify_delete_delay=settings.mute_notify_delete_delay,
+            send_delete_command=settings.send_delete_command,
         )
 
         await callback.message.edit_text(
@@ -901,7 +920,7 @@ async def handle_set_notify_delay(
 
         text = (
             "⚙️ <b>Настройки ручных команд</b>\n\n"
-            "Команды: /amute, /aunmute\n\n"
+            "Команды: /amute, /aunmute, /asend\n\n"
             "<b>Опции:</b>\n"
             "• <b>Удалять сообщение</b> — удалять сообщение нарушителя при муте\n"
             "• <b>Уведомлять группу</b> — отправлять уведомление о муте в группу\n"
@@ -917,6 +936,7 @@ async def handle_set_notify_delay(
             delete_delay=settings.mute_delete_delay,
             notify_text=settings.mute_notify_text,
             notify_delete_delay=settings.mute_notify_delete_delay,
+            send_delete_command=settings.send_delete_command,
         )
 
         await callback.message.edit_text(
@@ -1023,7 +1043,7 @@ async def handle_reset_notify_text(
 
         text = (
             "⚙️ <b>Настройки ручных команд</b>\n\n"
-            "Команды: /amute, /aunmute\n\n"
+            "Команды: /amute, /aunmute, /asend\n\n"
             "<b>Опции:</b>\n"
             "• <b>Удалять сообщение</b> — удалять сообщение нарушителя при муте\n"
             "• <b>Уведомлять группу</b> — отправлять уведомление о муте в группу\n"
@@ -1039,6 +1059,7 @@ async def handle_reset_notify_text(
             delete_delay=settings.mute_delete_delay,
             notify_text=settings.mute_notify_text,
             notify_delete_delay=settings.mute_notify_delete_delay,
+            send_delete_command=settings.send_delete_command,
         )
 
         await callback.message.edit_text(
@@ -1100,7 +1121,7 @@ async def handle_notify_text_input(
     text = (
         "⚙️ <b>Настройки ручных команд</b>\n\n"
         f"✅ Текст уведомления сохранён:\n<i>«{notify_text[:50]}...»</i>\n\n"
-        "Команды: /amute, /aunmute\n\n"
+        "Команды: /amute, /aunmute, /asend\n\n"
         "<b>Опции:</b>\n"
         "• <b>Удалять сообщение</b> — удалять сообщение нарушителя при муте\n"
         "• <b>Уведомлять группу</b> — отправлять уведомление о муте в группу\n"
@@ -1115,6 +1136,7 @@ async def handle_notify_text_input(
         delete_delay=settings.mute_delete_delay,
         notify_text=settings.mute_notify_text,
         notify_delete_delay=settings.mute_notify_delete_delay,
+        send_delete_command=settings.send_delete_command,
     )
 
     await bot.send_message(
@@ -1213,7 +1235,7 @@ async def handle_custom_delete_delay_input(
     text = (
         "⚙️ <b>Настройки ручных команд</b>\n\n"
         f"✅ Задержка удаления: <b>{delay_text}</b>\n\n"
-        "Команды: /amute, /aunmute"
+        "Команды: /amute, /aunmute, /asend"
     )
 
     keyboard = create_settings_keyboard(
@@ -1224,6 +1246,7 @@ async def handle_custom_delete_delay_input(
         delete_delay=settings.mute_delete_delay,
         notify_text=settings.mute_notify_text,
         notify_delete_delay=settings.mute_notify_delete_delay,
+        send_delete_command=settings.send_delete_command,
     )
 
     await bot.send_message(
@@ -1322,7 +1345,7 @@ async def handle_custom_notify_delay_input(
     text = (
         "⚙️ <b>Настройки ручных команд</b>\n\n"
         f"✅ Удалить уведомление через: <b>{delay_text}</b>\n\n"
-        "Команды: /amute, /aunmute"
+        "Команды: /amute, /aunmute, /asend"
     )
 
     keyboard = create_settings_keyboard(
@@ -1333,6 +1356,7 @@ async def handle_custom_notify_delay_input(
         delete_delay=settings.mute_delete_delay,
         notify_text=settings.mute_notify_text,
         notify_delete_delay=settings.mute_notify_delete_delay,
+        send_delete_command=settings.send_delete_command,
     )
 
     await bot.send_message(
