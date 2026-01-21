@@ -86,6 +86,11 @@ from bot.database.models_antiraid import (  # noqa: F401
     AntiRaidNamePattern,
 )
 
+# Manual Commands (ручные команды /amute, /aban, /akick)
+from bot.database.models_manual_commands import (  # noqa: F401
+    ManualCommandSettings,
+)
+
 # Создаём логгер для отслеживания операций экспорта/импорта
 logger = logging.getLogger(__name__)
 

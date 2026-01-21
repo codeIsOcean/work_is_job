@@ -46,6 +46,8 @@ from .settings_export import settings_export_router
 from .cross_group import router as cross_group_router
 # Импортируем роутеры модуля Anti-Raid
 from .antiraid import antiraid_callbacks_router, antiraid_settings_router, join_exit_router, reaction_router
+# Импортируем роутер ручных команд модерации (/amute, /aban, /akick)
+from .manual_commands import manual_commands_router
 
 # Объединяем все роутеры в один
 from aiogram import Router, F
@@ -99,6 +101,9 @@ handlers_router.include_router(antiraid_settings_router)
 handlers_router.include_router(join_exit_router)
 # Anti-Raid reaction трекер (обработка массовых реакций)
 handlers_router.include_router(reaction_router)
+# Ручные команды модерации (/amute, /aban, /akick)
+# ВАЖНО: должен быть ДО group_message_coordinator
+handlers_router.include_router(manual_commands_router)
 # ============================================================
 # GROUP MESSAGE COORDINATOR - единый хендлер для сообщений в группах
 # ============================================================
@@ -154,6 +159,8 @@ def create_fresh_handlers_router():
     fresh_router.include_router(join_exit_router)
     # Anti-Raid reaction трекер (обработка массовых реакций)
     fresh_router.include_router(reaction_router)
+    # Ручные команды модерации (/amute, /aban, /akick)
+    fresh_router.include_router(manual_commands_router)
     # Group Message Coordinator - единый хендлер для групповых сообщений
     fresh_router.include_router(group_message_coordinator_router)
     return fresh_router
