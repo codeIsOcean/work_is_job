@@ -45,6 +45,9 @@ from bot.handlers.content_filter.sections import sections_router
 # Модуль cleanup - настройки очистки
 from bot.handlers.content_filter.cleanup import cleanup_router
 
+# Callback обработчики для кнопок журнала кросс-сообщений
+from bot.handlers.content_filter.crossmsg_callbacks import crossmsg_callbacks_router
+
 # ============================================================
 # ПОДКЛЮЧЕНИЕ РОУТЕРОВ
 # ============================================================
@@ -56,6 +59,7 @@ content_filter_router.include_router(scam_router)
 content_filter_router.include_router(flood_router)
 content_filter_router.include_router(sections_router)
 content_filter_router.include_router(cleanup_router)
+content_filter_router.include_router(crossmsg_callbacks_router)
 
 # Экспортируем главный роутер
 __all__ = ['content_filter_router']

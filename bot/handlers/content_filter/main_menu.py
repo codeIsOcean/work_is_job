@@ -25,7 +25,19 @@ from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Импортируем FSM состояния
-from bot.handlers.content_filter.common import AddCrossMessagePatternStates
+from bot.handlers.content_filter.common import (
+    AddCrossMessagePatternStates,
+    CrossMessageNotificationStates,
+    # Новые состояния для кастомного ввода значений
+    CrossMessageWindowInputStates,
+    CrossMessageThresholdInputStates,
+    CrossMessageCustomScoreStates,
+    CrossMessageNotificationDelayInputStates,
+    CrossMessageThresholdMuteInputStates,
+    # Функции парсинга
+    parse_delay_seconds,
+    parse_duration,
+)
 
 # Импортируем клавиатуры
 from bot.keyboards.content_filter_keyboards import (
@@ -45,7 +57,17 @@ from bot.keyboards.content_filter_keyboards import (
     create_cross_message_pattern_detail_menu,
     create_cross_message_pattern_type_menu,
     create_cross_message_cancel_input_menu,
-    create_cross_message_delete_confirm_menu
+    create_cross_message_delete_confirm_menu,
+    # Кросс-сообщение пороги баллов (CrossMessageThreshold)
+    create_cross_message_score_thresholds_menu,
+    create_cross_message_threshold_edit_menu,
+    create_cross_message_add_threshold_menu,
+    create_cross_message_add_threshold_max_menu,
+    create_cross_message_add_threshold_action_menu,
+    # Кросс-сообщение уведомления
+    create_cross_message_notifications_menu,
+    create_cross_message_notification_delay_menu,
+    create_cross_message_notification_text_back_menu,
 )
 
 # Импортируем общие объекты
@@ -529,7 +551,8 @@ async def cross_message_settings_menu(
 @main_menu_router.callback_query(F.data.startswith("cf:cmw:"))
 async def cross_message_window_menu(
     callback: CallbackQuery,
-    session: AsyncSession
+    session: AsyncSession,
+    state: FSMContext
 ) -> None:
     """
     Показывает меню выбора временного окна.
@@ -539,7 +562,11 @@ async def cross_message_window_menu(
     Args:
         callback: CallbackQuery
         session: Сессия БД
+        state: FSM контекст (для очистки при возврате)
     """
+    # Очищаем FSM state если был в режиме ввода
+    await state.clear()
+
     parts = callback.data.split(":")
 
     # Проверяем это выбор или показ меню
@@ -576,7 +603,8 @@ async def cross_message_window_menu(
 @main_menu_router.callback_query(F.data.startswith("cf:cmt:"))
 async def cross_message_threshold_menu(
     callback: CallbackQuery,
-    session: AsyncSession
+    session: AsyncSession,
+    state: FSMContext
 ) -> None:
     """
     Показывает меню выбора порога срабатывания.
@@ -586,7 +614,11 @@ async def cross_message_threshold_menu(
     Args:
         callback: CallbackQuery
         session: Сессия БД
+        state: FSM контекст (для очистки при возврате)
     """
+    # Очищаем FSM state если был в режиме ввода
+    await state.clear()
+
     parts = callback.data.split(":")
 
     # Проверяем это выбор или показ меню
@@ -665,6 +697,563 @@ async def cross_message_action_menu(
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     except TelegramAPIError:
         pass
+
+
+# ============================================================
+# КРОСС-СООБЩЕНИЕ: КАСТОМНЫЙ ВВОД ЗНАЧЕНИЙ
+# ============================================================
+# Хендлеры для ввода произвольных значений (вместо хардкоженных)
+# ============================================================
+
+@main_menu_router.callback_query(F.data.startswith("cf:cmwc:"))
+async def cross_message_window_custom_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Начинает FSM для кастомного ввода временного окна.
+
+    Callback: cf:cmwc:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        state: FSM контекст
+        session: Сессия БД
+    """
+    # Парсим chat_id из callback_data
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Сохраняем chat_id и message_id для удаления в FSM данных
+    await state.update_data(
+        chat_id=chat_id,
+        prompt_message_id=callback.message.message_id,
+        prompt_chat_id=callback.message.chat.id
+    )
+    # Устанавливаем состояние ожидания ввода
+    await state.set_state(CrossMessageWindowInputStates.waiting_for_window)
+
+    # Показываем инструкцию с клавиатурой отмены
+    text = (
+        f"⏱️ <b>Введите временное окно</b>\n\n"
+        f"Укажите время в одном из форматов:\n"
+        f"• <code>3600</code> — секунды\n"
+        f"• <code>30min</code> — минуты\n"
+        f"• <code>2h</code> — часы\n"
+        f"• <code>1d</code> — дни\n\n"
+        f"Пример: <code>4h</code> = 4 часа"
+    )
+
+    # Клавиатура с кнопкой назад
+    keyboard = create_cross_message_cancel_input_menu(chat_id, 'cmw')
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@main_menu_router.message(CrossMessageWindowInputStates.waiting_for_window)
+async def cross_message_window_custom_process(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает введённое значение временного окна.
+
+    Args:
+        message: Сообщение с введённым значением
+        state: FSM контекст
+        session: Сессия БД
+    """
+    # Проверка на команду — очищаем FSM и игнорируем
+    if message.text and message.text.startswith("/"):
+        await state.clear()
+        return
+
+    # Получаем данные из FSM
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    prompt_message_id = data.get('prompt_message_id')
+    prompt_chat_id = data.get('prompt_chat_id')
+
+    if not chat_id:
+        await message.answer("❌ Ошибка: потеряны данные сессии. Начните заново.")
+        await state.clear()
+        return
+
+    # Парсим введённое значение
+    input_text = message.text.strip()
+    seconds = parse_delay_seconds(input_text)
+
+    if seconds is None or seconds < 60:
+        # Ошибка парсинга или слишком маленькое значение
+        await message.answer(
+            "❌ Неверный формат. Введите число в секундах или с суффиксом:\n"
+            "<code>30min</code>, <code>2h</code>, <code>1d</code>\n\n"
+            "Минимум: 60 секунд (1 минута)"
+        , parse_mode="HTML")
+        return
+
+    # Ограничение: максимум 365 дней (для временного окна)
+    max_seconds = 365 * 24 * 3600  # 365 дней
+    if seconds > max_seconds:
+        await message.answer(
+            f"❌ Слишком большое значение. Максимум: 365 дней"
+        )
+        return
+
+    # Обновляем настройки
+    await filter_manager.update_settings(chat_id, session, cross_message_window_seconds=seconds)
+
+    # Удаляем сообщение с запросом ввода (State Leak fix)
+    if prompt_message_id and prompt_chat_id:
+        try:
+            await message.bot.delete_message(prompt_chat_id, prompt_message_id)
+        except TelegramAPIError:
+            pass
+
+    # Удаляем сообщение пользователя с введённым значением
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    # Сбрасываем FSM
+    await state.clear()
+
+    # Формируем текст подтверждения
+    if seconds >= 86400:
+        time_str = f"{seconds // 86400}д"
+    elif seconds >= 3600:
+        time_str = f"{seconds // 3600}ч"
+    elif seconds >= 60:
+        time_str = f"{seconds // 60}мин"
+    else:
+        time_str = f"{seconds}сек"
+
+    await message.answer(f"✅ Временное окно установлено: {time_str} ({seconds} сек)")
+
+    # Показываем обновлённое меню настроек
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+    keyboard = create_cross_message_settings_menu(chat_id, settings)
+    text = _get_cross_message_settings_text(settings)
+
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@main_menu_router.callback_query(F.data.startswith("cf:cmtc:"))
+async def cross_message_threshold_custom_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Начинает FSM для кастомного ввода порога срабатывания.
+
+    Callback: cf:cmtc:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        state: FSM контекст
+        session: Сессия БД
+    """
+    # Парсим chat_id из callback_data
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Сохраняем chat_id и message_id для удаления в FSM данных
+    await state.update_data(
+        chat_id=chat_id,
+        prompt_message_id=callback.message.message_id,
+        prompt_chat_id=callback.message.chat.id
+    )
+    # Устанавливаем состояние ожидания ввода
+    await state.set_state(CrossMessageThresholdInputStates.waiting_for_threshold)
+
+    # Показываем инструкцию
+    text = (
+        f"📊 <b>Введите порог срабатывания</b>\n\n"
+        f"Укажите количество баллов (число от 10 до 10000).\n\n"
+        f"Пример: <code>150</code>"
+    )
+
+    # Клавиатура с кнопкой назад
+    keyboard = create_cross_message_cancel_input_menu(chat_id, 'cmt')
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@main_menu_router.message(CrossMessageThresholdInputStates.waiting_for_threshold)
+async def cross_message_threshold_custom_process(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает введённое значение порога.
+
+    Args:
+        message: Сообщение с введённым значением
+        state: FSM контекст
+        session: Сессия БД
+    """
+    # Проверка на команду — очищаем FSM и игнорируем
+    if message.text and message.text.startswith("/"):
+        await state.clear()
+        return
+
+    # Получаем данные из FSM
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    prompt_message_id = data.get('prompt_message_id')
+    prompt_chat_id = data.get('prompt_chat_id')
+
+    if not chat_id:
+        await message.answer("❌ Ошибка: потеряны данные сессии. Начните заново.")
+        await state.clear()
+        return
+
+    # Парсим введённое значение
+    input_text = message.text.strip()
+
+    try:
+        value = int(input_text)
+    except ValueError:
+        await message.answer("❌ Введите целое число.")
+        return
+
+    # Проверяем диапазон
+    if value < 10:
+        await message.answer("❌ Минимальный порог: 10 баллов")
+        return
+    if value > 10000:
+        await message.answer("❌ Максимальный порог: 10000 баллов")
+        return
+
+    # Обновляем настройки
+    await filter_manager.update_settings(chat_id, session, cross_message_threshold=value)
+
+    # Удаляем сообщение с запросом ввода (State Leak fix)
+    if prompt_message_id and prompt_chat_id:
+        try:
+            await message.bot.delete_message(prompt_chat_id, prompt_message_id)
+        except TelegramAPIError:
+            pass
+
+    # Удаляем сообщение пользователя с введённым значением
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    # Сбрасываем FSM
+    await state.clear()
+
+    await message.answer(f"✅ Порог срабатывания установлен: {value} баллов")
+
+    # Показываем обновлённое меню настроек
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+    keyboard = create_cross_message_settings_menu(chat_id, settings)
+    text = _get_cross_message_settings_text(settings)
+
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@main_menu_router.callback_query(F.data.startswith("cf:cmstamc:"))
+async def cross_message_add_threshold_min_custom_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Начинает FSM для кастомного ввода минимального скора порога.
+
+    Callback: cf:cmstamc:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        state: FSM контекст
+        session: Сессия БД
+    """
+    # Парсим chat_id из callback_data
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Сохраняем chat_id и message_id для удаления в FSM данных
+    await state.update_data(
+        chat_id=chat_id,
+        prompt_message_id=callback.message.message_id,
+        prompt_chat_id=callback.message.chat.id
+    )
+    # Устанавливаем состояние ожидания ввода
+    await state.set_state(CrossMessageCustomScoreStates.waiting_for_min_score)
+
+    # Показываем инструкцию
+    text = (
+        f"📊 <b>Введите минимальный скор</b>\n\n"
+        f"Порог начнёт работать когда скор >= этого значения.\n\n"
+        f"Пример: <code>100</code>"
+    )
+
+    # Клавиатура с кнопкой назад
+    keyboard = create_cross_message_cancel_input_menu(chat_id, 'cmsta')
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@main_menu_router.message(CrossMessageCustomScoreStates.waiting_for_min_score)
+async def cross_message_add_threshold_min_custom_process(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает введённое значение минимального скора.
+
+    Args:
+        message: Сообщение с введённым значением
+        state: FSM контекст
+        session: Сессия БД
+    """
+    # Проверка на команду — очищаем FSM и игнорируем
+    if message.text and message.text.startswith("/"):
+        await state.clear()
+        return
+
+    # Получаем данные из FSM
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    prompt_message_id = data.get('prompt_message_id')
+    prompt_chat_id = data.get('prompt_chat_id')
+
+    if not chat_id:
+        await message.answer("❌ Ошибка: потеряны данные сессии. Начните заново.")
+        await state.clear()
+        return
+
+    # Парсим введённое значение
+    input_text = message.text.strip()
+
+    try:
+        min_score = int(input_text)
+    except ValueError:
+        await message.answer("❌ Введите целое число.")
+        return
+
+    # Проверяем диапазон
+    if min_score < 1:
+        await message.answer("❌ Минимальное значение: 1")
+        return
+    if min_score > 10000:
+        await message.answer("❌ Максимальное значение: 10000")
+        return
+
+    # Удаляем сообщение с запросом ввода (State Leak fix)
+    if prompt_message_id and prompt_chat_id:
+        try:
+            await message.bot.delete_message(prompt_chat_id, prompt_message_id)
+        except TelegramAPIError:
+            pass
+
+    # Удаляем сообщение пользователя с введённым значением
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    # Сохраняем min_score и очищаем FSM
+    await state.clear()
+
+    # Показываем меню выбора максимального скора (без отдельного подтверждения)
+    keyboard = create_cross_message_add_threshold_max_menu(chat_id, min_score)
+    text = (
+        f"📊 <b>Выберите максимальный скор</b>\n\n"
+        f"Минимальный: {min_score}\n\n"
+        f"Выберите верхнюю границу диапазона или «∞ (без лимита)»."
+    )
+
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@main_menu_router.callback_query(F.data.startswith("cf:cmstaxc:"))
+async def cross_message_add_threshold_max_custom_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Начинает FSM для кастомного ввода максимального скора порога.
+
+    Callback: cf:cmstaxc:{chat_id}:{min_score}
+
+    Args:
+        callback: CallbackQuery
+        state: FSM контекст
+        session: Сессия БД
+    """
+    # Парсим данные из callback_data
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+    min_score = int(parts[3])
+
+    # Сохраняем в FSM данных (включая prompt для удаления)
+    await state.update_data(
+        chat_id=chat_id,
+        min_score=min_score,
+        prompt_message_id=callback.message.message_id,
+        prompt_chat_id=callback.message.chat.id
+    )
+    # Устанавливаем состояние ожидания ввода
+    await state.set_state(CrossMessageCustomScoreStates.waiting_for_max_score)
+
+    # Показываем инструкцию
+    text = (
+        f"📊 <b>Введите максимальный скор</b>\n\n"
+        f"Минимальный скор: {min_score}\n\n"
+        f"Введите верхнюю границу диапазона (больше {min_score}).\n"
+        f"Пример: <code>{min_score + 100}</code>"
+    )
+
+    # Клавиатура с кнопкой назад
+    keyboard = create_cross_message_cancel_input_menu(chat_id, 'cmsta')
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@main_menu_router.message(CrossMessageCustomScoreStates.waiting_for_max_score)
+async def cross_message_add_threshold_max_custom_process(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает введённое значение максимального скора.
+
+    Args:
+        message: Сообщение с введённым значением
+        state: FSM контекст
+        session: Сессия БД
+    """
+    # Проверка на команду — очищаем FSM и игнорируем
+    if message.text and message.text.startswith("/"):
+        await state.clear()
+        return
+
+    # Получаем данные из FSM
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    min_score = data.get('min_score')
+    prompt_message_id = data.get('prompt_message_id')
+    prompt_chat_id = data.get('prompt_chat_id')
+
+    if not chat_id or min_score is None:
+        await message.answer("❌ Ошибка: потеряны данные сессии. Начните заново.")
+        await state.clear()
+        return
+
+    # Парсим введённое значение
+    input_text = message.text.strip()
+
+    try:
+        max_score = int(input_text)
+    except ValueError:
+        await message.answer("❌ Введите целое число.")
+        return
+
+    # Проверяем диапазон
+    if max_score <= min_score:
+        await message.answer(f"❌ Максимальный скор должен быть больше минимального ({min_score})")
+        return
+    if max_score > 100000:
+        await message.answer("❌ Слишком большое значение. Максимум: 100000")
+        return
+
+    # Удаляем сообщение с запросом ввода (State Leak fix)
+    if prompt_message_id and prompt_chat_id:
+        try:
+            await message.bot.delete_message(prompt_chat_id, prompt_message_id)
+        except TelegramAPIError:
+            pass
+
+    # Удаляем сообщение пользователя с введённым значением
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    # Сбрасываем FSM
+    await state.clear()
+
+    # Показываем меню выбора действия (без отдельного подтверждения)
+    keyboard = create_cross_message_add_threshold_action_menu(chat_id, min_score, max_score)
+    text = (
+        f"📊 <b>Выберите действие для порога</b>\n\n"
+        f"Диапазон: {min_score} — {max_score} баллов"
+    )
+
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+def _get_cross_message_settings_text(settings) -> str:
+    """
+    Формирует текст меню настроек кросс-сообщений.
+
+    Args:
+        settings: Объект ContentFilterSettings
+
+    Returns:
+        str: Текст для сообщения
+    """
+    # Статус
+    status = "✅ Включено" if settings.cross_message_enabled else "❌ Выключено"
+
+    # Форматируем временное окно
+    window_sec = settings.cross_message_window_seconds or 7200
+    if window_sec >= 86400:
+        window_str = f"{window_sec // 86400}д"
+    elif window_sec >= 3600:
+        window_str = f"{window_sec // 3600}ч"
+    else:
+        window_str = f"{window_sec // 60}мин"
+
+    # Порог
+    threshold = settings.cross_message_threshold or 100
+
+    # Действие
+    action_map = {'mute': 'Мут', 'ban': 'Бан', 'kick': 'Кик'}
+    action = action_map.get(settings.cross_message_action or 'mute', 'Мут')
+
+    text = (
+        f"📊 <b>Кросс-сообщение детекция</b>\n\n"
+        f"Накапливает баллы через несколько сообщений.\n"
+        f"Ловит спам, разбитый на части.\n\n"
+        f"<b>Статус:</b> {status}\n"
+        f"<b>Окно:</b> {window_str}\n"
+        f"<b>Порог:</b> {threshold} баллов\n"
+        f"<b>Действие:</b> {action}"
+    )
+
+    return text
 
 
 # ============================================================
@@ -1329,3 +1918,1087 @@ async def cross_message_pattern_weight_received(
     keyboard = create_cross_message_patterns_menu(chat_id, patterns_count, active_count)
 
     await message.answer(result_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+# ============================================================
+# КРОСС-СООБЩЕНИЕ: ПОРОГИ БАЛЛОВ (CrossMessageThreshold)
+# ============================================================
+# Хендлеры для управления порогами баллов с разными действиями
+# ============================================================
+
+# Импортируем модель CrossMessageThreshold
+from bot.database.models_content_filter import CrossMessageThreshold
+
+
+@main_menu_router.callback_query(F.data.startswith("cf:cmst:"))
+async def cross_message_score_thresholds_menu(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает меню порогов баллов кросс-сообщений.
+
+    Callback: cf:cmst:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        session: AsyncSession
+    """
+    # Парсим chat_id
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Получаем сервис
+    service = get_cross_message_service()
+    if not service and redis:
+        service = create_cross_message_service(redis)
+
+    # Получаем список порогов
+    thresholds = []
+    if service:
+        thresholds = await service.get_thresholds(chat_id, session)
+
+    # Формируем текст
+    if thresholds:
+        text = (
+            f"📈 <b>Пороги баллов</b>\n\n"
+            f"Настройте разные действия для разных диапазонов скора.\n\n"
+            f"Всего порогов: {len(thresholds)}"
+        )
+    else:
+        text = (
+            f"📈 <b>Пороги баллов</b>\n\n"
+            f"Пороги не настроены.\n\n"
+            f"Будет использоваться общее действие из настроек.\n\n"
+            f"Добавьте пороги для тонкой настройки:\n"
+            f"• 100-149 баллов → мут 30 мин\n"
+            f"• 150-199 баллов → мут 2 часа\n"
+            f"• 200+ баллов → бан"
+        )
+
+    keyboard = create_cross_message_score_thresholds_menu(chat_id, thresholds)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+    await callback.answer()
+
+
+@main_menu_router.callback_query(F.data.startswith("cf:cmsta:"))
+async def cross_message_add_threshold_start(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """
+    Начинает добавление порога — показывает выбор минимального скора.
+
+    Callback: cf:cmsta:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        session: Сессия БД
+        state: FSM контекст (для очистки при возврате)
+    """
+    # Очищаем FSM state если был в режиме ввода
+    await state.clear()
+
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    text = (
+        f"📈 <b>Добавление порога</b>\n\n"
+        f"Шаг 1/3: Выберите <b>минимальный</b> скор.\n\n"
+        f"Порог сработает когда накопленный скор\n"
+        f"достигнет этого значения."
+    )
+
+    keyboard = create_cross_message_add_threshold_menu(chat_id)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+    await callback.answer()
+
+
+@main_menu_router.callback_query(F.data.startswith("cf:cmstam:"))
+async def cross_message_add_threshold_min_selected(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Выбран минимальный скор — показывает выбор максимального.
+
+    Callback: cf:cmstam:{chat_id}:{min_score}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+    min_score = int(parts[3])
+
+    text = (
+        f"📈 <b>Добавление порога</b>\n\n"
+        f"Шаг 2/3: Выберите <b>максимальный</b> скор.\n\n"
+        f"Минимум: {min_score} баллов\n\n"
+        f"Порог сработает для скора в диапазоне\n"
+        f"от {min_score} до выбранного максимума."
+    )
+
+    keyboard = create_cross_message_add_threshold_max_menu(chat_id, min_score)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+    await callback.answer()
+
+
+@main_menu_router.callback_query(F.data.startswith("cf:cmstax:"))
+async def cross_message_add_threshold_max_selected(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Выбран максимальный скор — показывает выбор действия.
+
+    Callback: cf:cmstax:{chat_id}:{min_score}:{max_score}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+    min_score = int(parts[3])
+    max_score_str = parts[4]
+    max_score = None if max_score_str == 'inf' else int(max_score_str)
+
+    # Форматируем диапазон
+    if max_score is None:
+        range_text = f"{min_score}+ баллов"
+    else:
+        range_text = f"{min_score}-{max_score} баллов"
+
+    text = (
+        f"📈 <b>Добавление порога</b>\n\n"
+        f"Шаг 3/3: Выберите <b>действие</b>.\n\n"
+        f"Диапазон: {range_text}\n\n"
+        f"Какое действие применить при достижении порога?"
+    )
+
+    keyboard = create_cross_message_add_threshold_action_menu(chat_id, min_score, max_score)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+    await callback.answer()
+
+
+@main_menu_router.callback_query(F.data.startswith("cf:cmstaa:"))
+async def cross_message_add_threshold_action_selected(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Выбрано действие — создаёт порог.
+
+    Callback: cf:cmstaa:{chat_id}:{min_score}:{max_score}:{action}:{duration}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+    min_score = int(parts[3])
+    max_score_str = parts[4]
+    max_score = None if max_score_str == 'inf' else int(max_score_str)
+    action = parts[5]
+    mute_duration = int(parts[6]) if parts[6] != '0' else None
+
+    # Получаем сервис
+    service = get_cross_message_service()
+    if not service and redis:
+        service = create_cross_message_service(redis)
+
+    if not service:
+        await callback.answer("Сервис недоступен", show_alert=True)
+        return
+
+    # Создаём порог
+    try:
+        new_threshold = await service.add_threshold(
+            chat_id=chat_id,
+            min_score=min_score,
+            max_score=max_score,
+            action=action,
+            mute_duration=mute_duration,
+            created_by=callback.from_user.id,
+            session=session
+        )
+
+        if new_threshold:
+            await callback.answer("✅ Порог добавлен!")
+        else:
+            await callback.answer("⚠️ Не удалось добавить порог", show_alert=True)
+
+    except Exception as e:
+        logger.error(f"[CrossMessageThreshold] Error adding: {e}")
+        await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
+        return
+
+    # Обновляем список
+    thresholds = await service.get_thresholds(chat_id, session)
+
+    text = (
+        f"📈 <b>Пороги баллов</b>\n\n"
+        f"Порог добавлен!\n\n"
+        f"Всего порогов: {len(thresholds)}"
+    )
+
+    keyboard = create_cross_message_score_thresholds_menu(chat_id, thresholds)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+
+@main_menu_router.callback_query(F.data.startswith("cf:cmstam_c:"))
+async def cross_message_custom_mute_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Начинает ввод кастомного времени мута для порога.
+
+    Callback: cf:cmstam_c:{chat_id}:{min_score}:{max_score}
+    """
+    from bot.handlers.content_filter.common import CrossMessageThresholdMuteInputStates
+
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+    min_score = int(parts[3])
+    max_score_str = parts[4]
+
+    # Сохраняем данные в FSM
+    await state.update_data(
+        chat_id=chat_id,
+        min_score=min_score,
+        max_score_str=max_score_str,
+        prompt_message_id=callback.message.message_id,
+        prompt_chat_id=callback.message.chat.id
+    )
+    await state.set_state(CrossMessageThresholdMuteInputStates.waiting_for_mute_duration)
+
+    text = (
+        f"⏱️ <b>Время мута</b>\n\n"
+        f"Введите время мута для диапазона {min_score}—{max_score_str} баллов.\n\n"
+        f"<b>Форматы:</b>\n"
+        f"• <code>30</code> — 30 минут\n"
+        f"• <code>2h</code> — 2 часа\n"
+        f"• <code>1d</code> — 1 день\n"
+        f"• <code>7d</code> — 7 дней"
+    )
+
+    keyboard = create_cross_message_cancel_input_menu(chat_id, 'cmsta')
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+    await callback.answer()
+
+
+@main_menu_router.message(CrossMessageThresholdMuteInputStates.waiting_for_mute_duration)
+async def cross_message_custom_mute_process(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ввод кастомного времени мута.
+    """
+    from bot.handlers.content_filter.common import parse_duration, CrossMessageThresholdMuteInputStates
+
+    # Проверка на команду
+    if message.text and message.text.startswith("/"):
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    min_score = data.get('min_score')
+    max_score_str = data.get('max_score_str')
+    prompt_message_id = data.get('prompt_message_id')
+    prompt_chat_id = data.get('prompt_chat_id')
+
+    if not chat_id:
+        await message.answer("❌ Ошибка: потеряны данные сессии.")
+        await state.clear()
+        return
+
+    # Парсим время
+    input_text = message.text.strip()
+    minutes = parse_duration(input_text)
+
+    if minutes is None or minutes < 1:
+        await message.answer(
+            "❌ Неверный формат. Используйте:\n"
+            "<code>30</code>, <code>2h</code>, <code>1d</code>\n"
+            "Минимум: 1 минута",
+            parse_mode="HTML"
+        )
+        return
+
+    # Нет ограничения по времени мута — админ решает сам
+
+    # Удаляем prompt сообщение
+    if prompt_message_id and prompt_chat_id:
+        try:
+            await message.bot.delete_message(prompt_chat_id, prompt_message_id)
+        except TelegramAPIError:
+            pass
+
+    # Удаляем сообщение пользователя
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    await state.clear()
+
+    # Получаем сервис и создаём порог
+    service = get_cross_message_service()
+    if not service and redis:
+        service = create_cross_message_service(redis)
+
+    if not service:
+        await message.answer("❌ Сервис недоступен")
+        return
+
+    max_score = None if max_score_str == 'inf' else int(max_score_str)
+
+    try:
+        new_threshold = await service.add_threshold(
+            chat_id=chat_id,
+            min_score=min_score,
+            max_score=max_score,
+            action='mute',
+            mute_duration=minutes,
+            created_by=message.from_user.id,
+            session=session
+        )
+
+        if not new_threshold:
+            await message.answer("⚠️ Не удалось добавить порог")
+            return
+
+        time_str = f"{minutes}мин" if minutes < 60 else (
+            f"{minutes // 60}ч" if minutes < 1440 else f"{minutes // 1440}д"
+        )
+
+    except Exception as e:
+        logger.error(f"[CrossMessageThreshold] Error adding custom: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
+        return
+
+    # Показываем обновлённый список (одно сообщение с подтверждением)
+    thresholds = await service.get_thresholds(chat_id, session)
+
+    text = (
+        f"📈 <b>Пороги баллов</b>\n\n"
+        f"✅ Добавлен: {min_score}—{max_score_str} → мут {time_str}\n\n"
+        f"Всего порогов: {len(thresholds)}"
+    )
+
+    keyboard = create_cross_message_score_thresholds_menu(chat_id, thresholds)
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+
+
+@main_menu_router.callback_query(F.data.startswith("cf:cmste:"))
+async def cross_message_threshold_edit(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает детали порога для редактирования.
+
+    Callback: cf:cmste:{chat_id}:{threshold_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+    threshold_id = int(parts[3])
+
+    # Получаем порог из БД
+    from sqlalchemy import select
+    query = select(CrossMessageThreshold).where(CrossMessageThreshold.id == threshold_id)
+    result = await session.execute(query)
+    threshold = result.scalar_one_or_none()
+
+    if not threshold:
+        await callback.answer("Порог не найден", show_alert=True)
+        return
+
+    # Форматируем диапазон
+    if threshold.max_score is None:
+        range_text = f"{threshold.min_score}+"
+    else:
+        range_text = f"{threshold.min_score}-{threshold.max_score}"
+
+    # Форматируем действие
+    action_map = {'mute': 'Мут', 'ban': 'Бан', 'kick': 'Кик'}
+    action_text = action_map.get(threshold.action, threshold.action)
+
+    # Форматируем длительность
+    if threshold.action == 'mute' and threshold.mute_duration:
+        if threshold.mute_duration >= 1440:
+            duration_text = f"{threshold.mute_duration // 1440} дн."
+        elif threshold.mute_duration >= 60:
+            duration_text = f"{threshold.mute_duration // 60} ч."
+        else:
+            duration_text = f"{threshold.mute_duration} мин."
+        action_text = f"{action_text} на {duration_text}"
+
+    # Статус
+    status = "✅ Активен" if threshold.enabled else "⏸️ Отключён"
+
+    text = (
+        f"📈 <b>Порог баллов #{threshold_id}</b>\n\n"
+        f"Диапазон: {range_text} баллов\n"
+        f"Действие: {action_text}\n"
+        f"Статус: {status}"
+    )
+
+    keyboard = create_cross_message_threshold_edit_menu(chat_id, threshold_id, threshold)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+    await callback.answer()
+
+
+@main_menu_router.callback_query(F.data.startswith("cf:cmstt:"))
+async def cross_message_threshold_toggle(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Переключает активность порога.
+
+    Callback: cf:cmstt:{chat_id}:{threshold_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+    threshold_id = int(parts[3])
+
+    # Получаем сервис
+    service = get_cross_message_service()
+    if not service and redis:
+        service = create_cross_message_service(redis)
+
+    if not service:
+        await callback.answer("Сервис недоступен", show_alert=True)
+        return
+
+    # Переключаем
+    new_status = await service.toggle_threshold(threshold_id, session)
+
+    if new_status is not None:
+        status_text = "включён" if new_status else "отключён"
+        await callback.answer(f"Порог {status_text}")
+    else:
+        await callback.answer("Порог не найден", show_alert=True)
+        return
+
+    # Обновляем список
+    thresholds = await service.get_thresholds(chat_id, session)
+
+    text = (
+        f"📈 <b>Пороги баллов</b>\n\n"
+        f"Всего порогов: {len(thresholds)}"
+    )
+
+    keyboard = create_cross_message_score_thresholds_menu(chat_id, thresholds)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+
+@main_menu_router.callback_query(F.data.startswith("cf:cmstd:"))
+async def cross_message_threshold_delete(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Удаляет порог.
+
+    Callback: cf:cmstd:{chat_id}:{threshold_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+    threshold_id = int(parts[3])
+
+    # Получаем сервис
+    service = get_cross_message_service()
+    if not service and redis:
+        service = create_cross_message_service(redis)
+
+    if not service:
+        await callback.answer("Сервис недоступен", show_alert=True)
+        return
+
+    # Удаляем
+    success = await service.delete_threshold(threshold_id, session)
+
+    if success:
+        await callback.answer("🗑️ Порог удалён")
+    else:
+        await callback.answer("Порог не найден", show_alert=True)
+        return
+
+    # Обновляем список
+    thresholds = await service.get_thresholds(chat_id, session)
+
+    text = (
+        f"📈 <b>Пороги баллов</b>\n\n"
+        f"Порог удалён.\n\n"
+        f"Всего порогов: {len(thresholds)}"
+    )
+
+    keyboard = create_cross_message_score_thresholds_menu(chat_id, thresholds)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+
+# ============================================================
+# КРОСС-СООБЩЕНИЕ: УВЕДОМЛЕНИЯ
+# ============================================================
+# Хендлеры для настройки текстов уведомлений
+# ============================================================
+
+@main_menu_router.callback_query(F.data.startswith("cf:cmn:"))
+async def cross_message_notifications_menu(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Показывает меню настройки уведомлений.
+
+    Callback: cf:cmn:{chat_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Получаем настройки
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+
+    # Текущие значения
+    mute_text = getattr(settings, 'cross_message_mute_text', None) if settings else None
+    ban_text = getattr(settings, 'cross_message_ban_text', None) if settings else None
+
+    text = (
+        f"📢 <b>Уведомления кросс-сообщений</b>\n\n"
+        f"Настройте тексты уведомлений при срабатывании.\n\n"
+        f"<b>Плейсхолдеры:</b>\n"
+        f"• <code>%user%</code> — имя пользователя\n"
+        f"• <code>%time%</code> — время мута\n\n"
+        f"<b>Текст мута:</b>\n"
+        f"{mute_text or '❌ Не задан'}\n\n"
+        f"<b>Текст бана:</b>\n"
+        f"{ban_text or '❌ Не задан'}"
+    )
+
+    keyboard = create_cross_message_notifications_menu(chat_id, settings)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+    await callback.answer()
+
+
+@main_menu_router.callback_query(F.data.startswith("cf:cmnc:"))
+async def cross_message_notification_cancel(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Отменяет FSM ввод текста уведомления и возвращает в меню.
+
+    По CHECKLIST.md: кнопка "Назад" должна очищать FSM!
+
+    Callback: cf:cmnc:{chat_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # ОБЯЗАТЕЛЬНО: Очищаем FSM состояние
+    await state.clear()
+
+    # Получаем настройки
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+
+    text = (
+        f"📢 <b>Уведомления кросс-сообщений</b>\n\n"
+        f"Ввод отменён."
+    )
+
+    keyboard = create_cross_message_notifications_menu(chat_id, settings)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+    await callback.answer()
+
+
+@main_menu_router.callback_query(F.data.startswith("cf:cmnm:"))
+async def cross_message_notification_mute_text_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Начинает ввод текста уведомления при муте.
+
+    Callback: cf:cmnm:{chat_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Сохраняем chat_id и message_id для удаления (CHECKLIST: State Leak)
+    await state.update_data(
+        chat_id=chat_id,
+        prompt_message_id=callback.message.message_id,
+        prompt_chat_id=callback.message.chat.id
+    )
+    await state.set_state(CrossMessageNotificationStates.waiting_for_mute_text)
+
+    text = (
+        f"📝 <b>Текст уведомления при муте</b>\n\n"
+        f"Отправьте текст уведомления.\n\n"
+        f"<b>Плейсхолдеры:</b>\n"
+        f"• <code>%user%</code> — имя пользователя\n"
+        f"• <code>%time%</code> — время мута\n\n"
+        f"<b>Пример:</b>\n"
+        f"<code>🔇 %user% замучен на %time% за нарушения</code>\n\n"
+        f"Отправьте <code>-</code> чтобы отключить уведомления."
+    )
+
+    keyboard = create_cross_message_notification_text_back_menu(chat_id)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+    await callback.answer()
+
+
+@main_menu_router.message(CrossMessageNotificationStates.waiting_for_mute_text)
+async def cross_message_notification_mute_text_received(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ввод текста уведомления при муте.
+
+    По CHECKLIST.md: удаляем prompt сообщение чтобы не засорять чат.
+    """
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    prompt_message_id = data.get('prompt_message_id')
+    prompt_chat_id = data.get('prompt_chat_id')
+
+    if not chat_id:
+        await message.answer("Ошибка: потерян контекст. Начните заново.")
+        await state.clear()
+        return
+
+    # CHECKLIST: Удаляем prompt сообщение
+    if prompt_message_id and prompt_chat_id:
+        try:
+            await message.bot.delete_message(prompt_chat_id, prompt_message_id)
+        except Exception:
+            pass  # Сообщение могло быть уже удалено
+
+    # Удаляем сообщение пользователя с текстом
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    # Получаем текст
+    new_text = message.text.strip()
+
+    # "-" = отключить
+    if new_text == '-':
+        new_text = None
+
+    # Обновляем настройки
+    await filter_manager.update_settings(
+        chat_id, session,
+        cross_message_mute_text=new_text
+    )
+
+    # Очищаем FSM
+    await state.clear()
+
+    # Получаем обновлённые настройки
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+
+    result_text = "✅ Текст мута обновлён!" if new_text else "✅ Уведомление при муте отключено"
+
+    text = (
+        f"📢 <b>Уведомления кросс-сообщений</b>\n\n"
+        f"{result_text}"
+    )
+
+    keyboard = create_cross_message_notifications_menu(chat_id, settings)
+
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@main_menu_router.callback_query(F.data.startswith("cf:cmnb:"))
+async def cross_message_notification_ban_text_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Начинает ввод текста уведомления при бане.
+
+    Callback: cf:cmnb:{chat_id}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Сохраняем chat_id и message_id для удаления (CHECKLIST: State Leak)
+    await state.update_data(
+        chat_id=chat_id,
+        prompt_message_id=callback.message.message_id,
+        prompt_chat_id=callback.message.chat.id
+    )
+    await state.set_state(CrossMessageNotificationStates.waiting_for_ban_text)
+
+    text = (
+        f"📝 <b>Текст уведомления при бане</b>\n\n"
+        f"Отправьте текст уведомления.\n\n"
+        f"<b>Плейсхолдеры:</b>\n"
+        f"• <code>%user%</code> — имя пользователя\n\n"
+        f"<b>Пример:</b>\n"
+        f"<code>🚫 %user% забанен за нарушения</code>\n\n"
+        f"Отправьте <code>-</code> чтобы отключить уведомления."
+    )
+
+    keyboard = create_cross_message_notification_text_back_menu(chat_id)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+    await callback.answer()
+
+
+@main_menu_router.message(CrossMessageNotificationStates.waiting_for_ban_text)
+async def cross_message_notification_ban_text_received(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает ввод текста уведомления при бане.
+
+    По CHECKLIST.md: удаляем prompt сообщение чтобы не засорять чат.
+    """
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    prompt_message_id = data.get('prompt_message_id')
+    prompt_chat_id = data.get('prompt_chat_id')
+
+    if not chat_id:
+        await message.answer("Ошибка: потерян контекст. Начните заново.")
+        await state.clear()
+        return
+
+    # CHECKLIST: Удаляем prompt сообщение
+    if prompt_message_id and prompt_chat_id:
+        try:
+            await message.bot.delete_message(prompt_chat_id, prompt_message_id)
+        except Exception:
+            pass  # Сообщение могло быть уже удалено
+
+    # Удаляем сообщение пользователя с текстом
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    # Получаем текст
+    new_text = message.text.strip()
+
+    # "-" = отключить
+    if new_text == '-':
+        new_text = None
+
+    # Обновляем настройки
+    await filter_manager.update_settings(
+        chat_id, session,
+        cross_message_ban_text=new_text
+    )
+
+    # Очищаем FSM
+    await state.clear()
+
+    # Получаем обновлённые настройки
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+
+    result_text = "✅ Текст бана обновлён!" if new_text else "✅ Уведомление при бане отключено"
+
+    text = (
+        f"📢 <b>Уведомления кросс-сообщений</b>\n\n"
+        f"{result_text}"
+    )
+
+    keyboard = create_cross_message_notifications_menu(chat_id, settings)
+
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@main_menu_router.callback_query(F.data.startswith("cf:cmnd:"))
+async def cross_message_notification_delay_menu(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    state: FSMContext
+) -> None:
+    """
+    Показывает меню выбора задержки автоудаления.
+
+    Callback: cf:cmnd:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        session: Сессия БД
+        state: FSM контекст (для очистки при возврате)
+    """
+    # Очищаем FSM state если был в режиме ввода
+    await state.clear()
+
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Получаем настройки
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+
+    current = getattr(settings, 'cross_message_notification_delete_delay', None) if settings else None
+    current_text = f"{current} сек" if current else "выключено"
+
+    text = (
+        f"🕐 <b>Автоудаление уведомлений</b>\n\n"
+        f"Текущее значение: {current_text}\n\n"
+        f"Уведомление будет автоматически удалено\n"
+        f"через выбранное время."
+    )
+
+    keyboard = create_cross_message_notification_delay_menu(chat_id, settings)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+    await callback.answer()
+
+
+@main_menu_router.callback_query(F.data.startswith("cf:cmnds:"))
+async def cross_message_notification_delay_set(
+    callback: CallbackQuery,
+    session: AsyncSession
+) -> None:
+    """
+    Устанавливает задержку автоудаления.
+
+    Callback: cf:cmnds:{chat_id}:{delay}
+    """
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+    delay = int(parts[3])
+
+    # 0 = отключить
+    delay_value = delay if delay > 0 else None
+
+    # Обновляем настройки
+    await filter_manager.update_settings(
+        chat_id, session,
+        cross_message_notification_delete_delay=delay_value
+    )
+
+    delay_text = f"{delay} сек" if delay > 0 else "выключено"
+    await callback.answer(f"✅ Автоудаление: {delay_text}")
+
+    # Обновляем меню
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+
+    text = (
+        f"📢 <b>Уведомления кросс-сообщений</b>\n\n"
+        f"Автоудаление: {delay_text}"
+    )
+
+    keyboard = create_cross_message_notifications_menu(chat_id, settings)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+
+@main_menu_router.callback_query(F.data.startswith("cf:cmndc:"))
+async def cross_message_notification_delay_custom_start(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Начинает FSM для кастомного ввода задержки автоудаления.
+
+    Callback: cf:cmndc:{chat_id}
+
+    Args:
+        callback: CallbackQuery
+        state: FSM контекст
+        session: Сессия БД
+    """
+    # Парсим chat_id из callback_data
+    parts = callback.data.split(":")
+    chat_id = int(parts[2])
+
+    # Сохраняем chat_id и message_id для удаления в FSM данных
+    await state.update_data(
+        chat_id=chat_id,
+        prompt_message_id=callback.message.message_id,
+        prompt_chat_id=callback.message.chat.id
+    )
+    # Устанавливаем состояние ожидания ввода
+    await state.set_state(CrossMessageNotificationDelayInputStates.waiting_for_delay)
+
+    # Показываем инструкцию
+    text = (
+        f"🕐 <b>Введите задержку автоудаления</b>\n\n"
+        f"Укажите время в одном из форматов:\n"
+        f"• <code>30</code> — секунды\n"
+        f"• <code>5min</code> — минуты\n"
+        f"• <code>1h</code> — часы\n\n"
+        f"Пример: <code>2min</code> = 2 минуты\n\n"
+        f"Для отключения введите <code>0</code>"
+    )
+
+    # Клавиатура с кнопкой назад
+    keyboard = create_cross_message_cancel_input_menu(chat_id, 'cmnd')
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+    await callback.answer()
+
+
+@main_menu_router.message(CrossMessageNotificationDelayInputStates.waiting_for_delay)
+async def cross_message_notification_delay_custom_process(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession
+) -> None:
+    """
+    Обрабатывает введённое значение задержки.
+
+    Args:
+        message: Сообщение с введённым значением
+        state: FSM контекст
+        session: Сессия БД
+    """
+    # Проверка на команду — очищаем FSM и игнорируем
+    if message.text and message.text.startswith("/"):
+        await state.clear()
+        return
+
+    # Получаем данные из FSM
+    data = await state.get_data()
+    chat_id = data.get('chat_id')
+    prompt_message_id = data.get('prompt_message_id')
+    prompt_chat_id = data.get('prompt_chat_id')
+
+    if not chat_id:
+        await message.answer("❌ Ошибка: потеряны данные сессии. Начните заново.")
+        await state.clear()
+        return
+
+    # Парсим введённое значение
+    input_text = message.text.strip()
+
+    # Проверяем на 0 (отключить)
+    if input_text == "0":
+        delay = 0
+    else:
+        delay = parse_delay_seconds(input_text)
+
+        if delay is None or delay < 0:
+            await message.answer(
+                "❌ Неверный формат. Введите число в секундах или с суффиксом:\n"
+                "<code>30</code>, <code>2min</code>, <code>1h</code>\n\n"
+                "Для отключения введите <code>0</code>"
+            , parse_mode="HTML")
+            return
+
+        # Ограничение: максимум 1 час
+        if delay > 3600:
+            await message.answer("❌ Слишком большое значение. Максимум: 1 час (3600 сек)")
+            return
+
+    # Обновляем настройки (0 = None = отключено)
+    delay_value = delay if delay > 0 else None
+    await filter_manager.update_settings(
+        chat_id, session,
+        cross_message_notification_delete_delay=delay_value
+    )
+
+    # Удаляем сообщение с запросом ввода (State Leak fix)
+    if prompt_message_id and prompt_chat_id:
+        try:
+            await message.bot.delete_message(prompt_chat_id, prompt_message_id)
+        except TelegramAPIError:
+            pass
+
+    # Удаляем сообщение пользователя с введённым значением
+    try:
+        await message.delete()
+    except TelegramAPIError:
+        pass
+
+    # Сбрасываем FSM
+    await state.clear()
+
+    delay_text = f"{delay} сек" if delay > 0 else "выключено"
+    await message.answer(f"✅ Автоудаление: {delay_text}")
+
+    # Показываем обновлённое меню уведомлений
+    settings = await filter_manager.get_or_create_settings(chat_id, session)
+    keyboard = create_cross_message_notifications_menu(chat_id, settings)
+
+    mute_text = getattr(settings, 'cross_message_mute_text', None) if settings else None
+    ban_text = getattr(settings, 'cross_message_ban_text', None) if settings else None
+
+    text = (
+        f"📢 <b>Уведомления кросс-сообщений</b>\n\n"
+        f"Автоудаление: {delay_text}\n\n"
+        f"<b>Текст мута:</b>\n"
+        f"{mute_text or '❌ Не задан'}\n\n"
+        f"<b>Текст бана:</b>\n"
+        f"{ban_text or '❌ Не задан'}"
+    )
+
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")

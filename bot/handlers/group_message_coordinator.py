@@ -23,6 +23,8 @@ from aiogram.types import Message
 from aiogram.exceptions import TelegramAPIError
 # Импортируем логгер
 import logging
+# Импортируем asyncio для асинхронных задач (автоудаление уведомлений)
+import asyncio
 
 # Импортируем типы SQLAlchemy
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -93,8 +95,8 @@ from bot.handlers.scam_media import check_message_for_scam_media
 # Импортируем вспомогательную функцию проверки наличия медиа
 from bot.handlers.scam_media.filter_handler import has_media
 
-# Импорт для ограничения прав (мут)
-from aiogram.types import ChatPermissions
+# Импорт для ограничения прав (мут) и клавиатур
+from aiogram.types import ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton
 # Импорт для работы со временем
 from datetime import timedelta
 # Импорт исключений
@@ -591,11 +593,12 @@ async def _process_cross_message_detection(
             f"action={action}, matched_patterns={result.matched_patterns}"
         )
 
-        # Сбрасываем счётчик чтобы не срабатывать повторно
-        await cross_msg_service.reset_score(chat_id, user_id)
-
-        # Получаем историю для журнала
+        # ВАЖНО: Сначала получаем историю, ПОТОМ сбрасываем счётчик!
+        # reset_score удаляет все ключи Redis включая history
         history = await cross_msg_service.get_history(chat_id, user_id)
+
+        # Теперь сбрасываем счётчик чтобы не срабатывать повторно
+        await cross_msg_service.reset_score(chat_id, user_id)
 
         # Применяем действие
         await _apply_cross_message_action(
@@ -634,10 +637,15 @@ async def _apply_cross_message_action(
     """
     Применяет действие при превышении cross_message_threshold.
 
+    Логика выбора действия:
+    1. Ищем порог (CrossMessageThreshold) где min_score <= total_score <= max_score
+    2. Если порог найден — используем action и mute_duration из порога
+    3. Если не найден — используем action из параметра и default_mute_duration из настроек
+
     Args:
         message: Последнее сообщение
         session: Сессия БД
-        action: Действие (mute/ban/kick)
+        action: Действие по умолчанию (mute/ban/kick)
         total_score: Накопленный score
         messages_count: Количество сообщений в накоплении
         history: История сообщений
@@ -649,14 +657,64 @@ async def _apply_cross_message_action(
     user_id = message.from_user.id
     bot = message.bot
 
+    # ─────────────────────────────────────────────────────────
+    # ПОИСК ПОРОГА ДЛЯ ДАННОГО СКОРА
+    # ─────────────────────────────────────────────────────────
+    # Импортируем сервис здесь чтобы избежать циклических импортов
+    from bot.services.content_filter.cross_message_service import get_cross_message_service
+
+    # Получаем сервис (создаётся при старте бота)
+    cross_msg_service = get_cross_message_service()
+
+    # Переменные для действия и длительности мута
+    # По умолчанию берём из параметра и настроек
+    final_action = action
+    mute_duration = getattr(settings, 'default_mute_duration', 1440)
+    threshold_info = None  # Информация о пороге для журнала
+
+    # Ищем подходящий порог если сервис доступен
+    if cross_msg_service:
+        try:
+            threshold = await cross_msg_service.get_threshold_for_score(
+                chat_id=chat_id,
+                score=total_score,
+                session=session
+            )
+
+            # Если порог найден — переопределяем action и mute_duration
+            if threshold:
+                final_action = threshold.action
+                # Длительность мута берём из порога (если задана)
+                if threshold.mute_duration is not None:
+                    mute_duration = threshold.mute_duration
+
+                # Сохраняем информацию о пороге для журнала
+                threshold_info = {
+                    'id': threshold.id,
+                    'min_score': threshold.min_score,
+                    'max_score': threshold.max_score,
+                    'action': threshold.action,
+                    'mute_duration': threshold.mute_duration,
+                    'description': threshold.description
+                }
+
+                logger.info(
+                    f"[COORDINATOR/CM] Порог #{threshold.id} применён: "
+                    f"score={total_score} → {threshold.min_score}-{threshold.max_score or '∞'}, "
+                    f"action={final_action}, duration={mute_duration}"
+                )
+        except Exception as e:
+            # При ошибке поиска порога — используем дефолты
+            logger.warning(
+                f"[COORDINATOR/CM] Ошибка поиска порога: {e}, "
+                f"используем default action={action}"
+            )
+
     try:
         # ─────────────────────────────────────────────────────
         # ДЕЙСТВИЕ: MUTE
         # ─────────────────────────────────────────────────────
-        if action == 'mute':
-            # Используем default_mute_duration из настроек
-            mute_duration = getattr(settings, 'default_mute_duration', 1440)
-
+        if final_action == 'mute':
             permissions = ChatPermissions(
                 can_send_messages=False,
                 can_send_media_messages=False,
@@ -683,7 +741,7 @@ async def _apply_cross_message_action(
         # ─────────────────────────────────────────────────────
         # ДЕЙСТВИЕ: BAN
         # ─────────────────────────────────────────────────────
-        elif action == 'ban':
+        elif final_action == 'ban':
             await bot.ban_chat_member(chat_id, user_id)
             logger.info(
                 f"[COORDINATOR/CM] 🚫 Бан применён: user={user_id}, score={total_score}"
@@ -692,12 +750,92 @@ async def _apply_cross_message_action(
         # ─────────────────────────────────────────────────────
         # ДЕЙСТВИЕ: KICK
         # ─────────────────────────────────────────────────────
-        elif action == 'kick':
+        elif final_action == 'kick':
             await bot.ban_chat_member(chat_id, user_id)
             await bot.unban_chat_member(chat_id, user_id)
             logger.info(
                 f"[COORDINATOR/CM] 👢 Кик применён: user={user_id}, score={total_score}"
             )
+
+        # ─────────────────────────────────────────────────────
+        # ОТПРАВЛЯЕМ УВЕДОМЛЕНИЕ В ГРУППУ
+        # ─────────────────────────────────────────────────────
+        # Формируем текст уведомления
+        user_mention = message.from_user.mention_html()
+
+        # Форматируем длительность мута для текста
+        duration_text = ""
+        if final_action == 'mute':
+            days = mute_duration // 1440
+            remaining = mute_duration % 1440
+            hours = remaining // 60
+            minutes = remaining % 60
+
+            if days > 0:
+                duration_text = f"{days}д"
+                if hours > 0:
+                    duration_text += f" {hours}ч"
+            elif hours > 0:
+                duration_text = f"{hours}ч"
+                if minutes > 0:
+                    duration_text += f" {minutes}мин"
+            else:
+                duration_text = f"{minutes}мин"
+
+        # Получаем кастомный текст из настроек или используем стандартный
+        notification_text = None
+        if final_action == 'mute':
+            custom_text = getattr(settings, 'cross_message_mute_text', None)
+            if custom_text:
+                # Заменяем плейсхолдеры
+                notification_text = custom_text.replace('%user%', user_mention)
+                notification_text = notification_text.replace('%time%', duration_text)
+            else:
+                # Стандартный текст при муте
+                notification_text = (
+                    f"🔇 {user_mention} получил мут на {duration_text}.\n"
+                    f"Причина: накопленные нарушения (кросс-сообщение детекция)"
+                )
+
+        elif final_action == 'ban':
+            custom_text = getattr(settings, 'cross_message_ban_text', None)
+            if custom_text:
+                notification_text = custom_text.replace('%user%', user_mention)
+            else:
+                # Стандартный текст при бане
+                notification_text = (
+                    f"🚫 {user_mention} забанен.\n"
+                    f"Причина: накопленные нарушения (кросс-сообщение детекция)"
+                )
+
+        elif final_action == 'kick':
+            notification_text = (
+                f"👢 {user_mention} исключён из группы.\n"
+                f"Причина: накопленные нарушения (кросс-сообщение детекция)"
+            )
+
+        # Отправляем уведомление в группу
+        sent_notification = None
+        if notification_text:
+            try:
+                sent_notification = await message.answer(notification_text, parse_mode="HTML")
+                logger.info(f"[COORDINATOR/CM] 📢 Уведомление отправлено в группу")
+            except Exception as e:
+                logger.warning(f"[COORDINATOR/CM] Не удалось отправить уведомление: {e}")
+
+        # Планируем автоудаление уведомления если задана задержка
+        notification_delay = getattr(settings, 'cross_message_notification_delete_delay', None)
+        if sent_notification and notification_delay and notification_delay > 0:
+            async def _delete_notification():
+                try:
+                    await asyncio.sleep(notification_delay)
+                    await bot.delete_message(chat_id, sent_notification.message_id)
+                    logger.info(
+                        f"[COORDINATOR/CM] 🔔 Уведомление автоудалено через {notification_delay} сек"
+                    )
+                except Exception:
+                    pass  # Уведомление могло быть уже удалено
+            asyncio.create_task(_delete_notification())
 
         # ─────────────────────────────────────────────────────
         # УДАЛЯЕМ ВСЕ НАКОПЛЕННЫЕ СООБЩЕНИЯ
@@ -727,45 +865,121 @@ async def _apply_cross_message_action(
         # ОТПРАВЛЯЕМ В ЖУРНАЛ
         # ─────────────────────────────────────────────────────
         if getattr(settings, 'log_violations', True):
+            # Получаем информацию о группе для отображения
+            group_title = message.chat.title or "Без названия"
+            # Формируем ссылку на группу (если публичная) или просто название
+            if message.chat.username:
+                group_link = f'<a href="https://t.me/{message.chat.username}">{group_title}</a>'
+            else:
+                group_link = f"<b>{group_title}</b>"
+
             # Формируем текст сработавших паттернов
             patterns_text = ""
             if matched_patterns:
-                for i, p in enumerate(matched_patterns[:5], 1):  # Показываем до 5 паттернов
-                    p_pattern = p.get('pattern', '')[:30]
+                # Показываем до 10 паттернов для полноты картины
+                for i, p in enumerate(matched_patterns[:10], 1):
+                    p_pattern = p.get('pattern', '')[:40]
                     p_weight = p.get('weight', 0)
                     p_method = p.get('method', '')
                     patterns_text += f"  • «{p_pattern}» +{p_weight} [{p_method}]\n"
 
-            # Формируем историю для отображения
+            # Формируем историю сообщений - ПОЛНЫЙ ТЕКСТ
             history_text = ""
             if history:
-                for i, h in enumerate(history[-5:], 1):  # Показываем последние 5
-                    preview = h.get('preview', '')[:40]
+                # Показываем все сообщения из истории (до 10)
+                for i, h in enumerate(history[-10:], 1):
+                    # Берём полный текст сообщения, обрезаем только если > 200 символов
+                    full_text = h.get('text', h.get('preview', ''))
+                    if len(full_text) > 200:
+                        full_text = full_text[:200] + "..."
                     h_score = h.get('score', 0)
-                    history_text += f"  {i}. +{h_score} «{preview}...»\n"
+                    history_text += f"\n<b>Сообщение {i}</b> (+{h_score}):\n<i>{full_text}</i>\n"
 
+            # Формируем название действия с деталями
             action_names = {
                 'mute': '🔇 Мут',
                 'ban': '🚫 Бан',
                 'kick': '👢 Кик'
             }
-            action_name = action_names.get(action, action)
+            # Используем final_action (из порога или дефолт)
+            action_name = action_names.get(final_action, final_action)
+
+            # Добавляем время мута если это мут
+            if final_action == 'mute':
+                # Используем реальный mute_duration (из порога или настроек)
+                mute_mins = mute_duration
+                # Форматируем время читаемо
+                if mute_mins >= 1440:
+                    mute_time_str = f"{mute_mins // 1440} дн."
+                elif mute_mins >= 60:
+                    mute_time_str = f"{mute_mins // 60} ч."
+                else:
+                    mute_time_str = f"{mute_mins} мин."
+                action_name += f" на {mute_time_str}"
+
+            # Формируем информацию о пороге (если использован)
+            threshold_text = ""
+            if threshold_info:
+                min_s = threshold_info['min_score']
+                max_s = threshold_info['max_score'] or '∞'
+                th_desc = threshold_info.get('description') or ''
+                threshold_text = f"\n📏 Порог: {min_s}-{max_s} баллов"
+                if th_desc:
+                    threshold_text += f" ({th_desc})"
+
+            # Получаем порог и окно из настроек
+            threshold = getattr(settings, 'cross_message_threshold', 100)
+            window_mins = getattr(settings, 'cross_message_window', 7200) // 60
+
+            # ─────────────────────────────────────────────────────
+            # Создаём клавиатуру с действиями
+            # ─────────────────────────────────────────────────────
+            # Callback data формат: cm:action:chat_id:user_id
+            # cm = cross message (короткий префикс для 64 байт лимита)
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    # Кнопка размутить/разбанить (в зависимости от действия)
+                    InlineKeyboardButton(
+                        text="🔓 Размутить" if action == 'mute' else "🔓 Разбанить",
+                        callback_data=f"cm:unmute:{chat_id}:{user_id}"
+                    ),
+                    # Кнопка мут навсегда
+                    InlineKeyboardButton(
+                        text="🔇 Мут навсегда",
+                        callback_data=f"cm:permmute:{chat_id}:{user_id}"
+                    ),
+                ],
+                [
+                    # Кнопка бан навсегда
+                    InlineKeyboardButton(
+                        text="🚫 Бан",
+                        callback_data=f"cm:ban:{chat_id}:{user_id}"
+                    ),
+                    # Кнопка OK (подтверждение, удаляет кнопки)
+                    InlineKeyboardButton(
+                        text="✅ OK",
+                        callback_data=f"cm:ok:{chat_id}:{user_id}"
+                    ),
+                ]
+            ])
 
             await send_journal_event(
                 bot=bot,
                 session=session,
                 group_id=chat_id,
                 message_text=(
-                    f"📊 <b>Кросс-сообщение детекция</b>\n\n"
+                    f"📊 <b>Кросс-сообщение детекция</b> #crossmsg\n\n"
+                    f"👥 Группа: {group_link} [<code>{chat_id}</code>]\n"
                     f"👤 Пользователь: {message.from_user.mention_html()} "
-                    f"[<code>{user_id}</code>]\n"
-                    f"📈 Накопленный скор: <b>{total_score}</b>\n"
-                    f"📝 Сообщений: {messages_count}\n"
-                    f"🗑️ Удалено: {deleted_count}\n"
-                    f"⚡ Действие: {action_name}\n\n"
-                    f"🎯 Сработавшие паттерны:\n{patterns_text if patterns_text else '  (из разделов)'}\n"
-                    f"📜 Последние сообщения:\n{history_text}"
-                )
+                    f"[<code>{user_id}</code>]\n\n"
+                    f"📈 Накопленный скор: <b>{total_score}</b> (порог: {threshold})\n"
+                    f"📝 Сообщений в окне: {messages_count} (окно: {window_mins} мин)\n"
+                    f"🗑️ Удалено сообщений: {deleted_count}\n"
+                    f"⚡ Действие: {action_name}{threshold_text}\n\n"
+                    f"🎯 <b>Сработавшие паттерны:</b>\n{patterns_text if patterns_text else '  (из разделов)'}\n"
+                    f"📜 <b>Сообщения:</b>{history_text if history_text else ' (нет данных)'}"
+                ),
+                reply_markup=keyboard
             )
 
     except TelegramBadRequest as e:

@@ -1602,6 +1602,24 @@ def create_cross_message_settings_menu(
                 )
             ],
             # ─────────────────────────────────────────────────────
+            # НОВОЕ: Пороги баллов (разные действия для разных диапазонов)
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text="📈 Пороги баллов",
+                    callback_data=f"cf:cmst:{chat_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
+            # НОВОЕ: Настройка уведомлений
+            # ─────────────────────────────────────────────────────
+            [
+                InlineKeyboardButton(
+                    text="📢 Уведомления",
+                    callback_data=f"cf:cmn:{chat_id}"
+                )
+            ],
+            # ─────────────────────────────────────────────────────
             # Назад к главному меню
             # ─────────────────────────────────────────────────────
             [
@@ -1643,6 +1661,9 @@ def create_cross_message_window_menu(
     ]
 
     rows = []
+    # Флаг: текущее значение есть в списке?
+    current_in_list = current in [w[0] for w in windows]
+
     for seconds, label in windows:
         # Отмечаем текущий выбор
         marker = "✓ " if seconds == current else ""
@@ -1652,6 +1673,29 @@ def create_cross_message_window_menu(
                 callback_data=f"cf:cmw:s:{seconds}:{chat_id}"
             )
         ])
+
+    # Кнопка "Другое" для кастомного ввода
+    # Если текущее значение не в списке — показываем его
+    if not current_in_list:
+        # Форматируем текущее кастомное значение
+        if current >= 86400:
+            custom_label = f"✓ {current // 86400}д"
+        elif current >= 3600:
+            custom_label = f"✓ {current // 3600}ч"
+        elif current >= 60:
+            custom_label = f"✓ {current // 60}мин"
+        else:
+            custom_label = f"✓ {current}сек"
+        other_text = f"✏️ Другое ({custom_label})"
+    else:
+        other_text = "✏️ Другое"
+
+    rows.append([
+        InlineKeyboardButton(
+            text=other_text,
+            callback_data=f"cf:cmwc:{chat_id}"  # c = custom input
+        )
+    ])
 
     # Кнопка назад
     rows.append([
@@ -1685,6 +1729,9 @@ def create_cross_message_threshold_menu(
     thresholds = [50, 75, 100, 125, 150, 200]
 
     rows = []
+    # Флаг: текущее значение есть в списке?
+    current_in_list = current in thresholds
+
     for value in thresholds:
         marker = "✓ " if value == current else ""
         rows.append([
@@ -1693,6 +1740,20 @@ def create_cross_message_threshold_menu(
                 callback_data=f"cf:cmt:s:{value}:{chat_id}"
             )
         ])
+
+    # Кнопка "Другое" для кастомного ввода
+    # Если текущее значение не в списке — показываем его
+    if not current_in_list:
+        other_text = f"✏️ Другое (✓ {current})"
+    else:
+        other_text = "✏️ Другое"
+
+    rows.append([
+        InlineKeyboardButton(
+            text=other_text,
+            callback_data=f"cf:cmtc:{chat_id}"  # c = custom input
+        )
+    ])
 
     # Кнопка назад
     rows.append([
@@ -3659,25 +3720,51 @@ def create_cross_message_pattern_type_menu(
 
 
 def create_cross_message_cancel_input_menu(
-    chat_id: int
+    chat_id: int,
+    return_to: str = 'cmp'
 ) -> InlineKeyboardMarkup:
     """
-    Создаёт меню отмены ввода паттерна кросс-сообщений (FSM).
+    Создаёт меню отмены ввода (FSM) для кросс-сообщений.
 
     По CHECKLIST.md: кнопка должна быть "🔙 Назад", НЕ "Отмена"!
 
     Args:
         chat_id: ID группы
+        return_to: Куда возвращаться при отмене:
+            - 'cmp' = паттерны (cf:cmpcan:{chat_id}) — default
+            - 'cmw' = меню окна (cf:cmw:{chat_id})
+            - 'cmt' = меню порога (cf:cmt:{chat_id})
+            - 'cmsta' = добавление порога (cf:cmsta:{chat_id})
+            - 'cms' = настройки кросс-сообщений (cf:cms:{chat_id})
 
     Returns:
         InlineKeyboardMarkup: Клавиатура отмены
     """
+    # Определяем callback_data в зависимости от return_to
+    if return_to == 'cmp':
+        callback = f"cf:cmpcan:{chat_id}"
+    elif return_to == 'cmw':
+        callback = f"cf:cmw:{chat_id}"
+    elif return_to == 'cmt':
+        callback = f"cf:cmt:{chat_id}"
+    elif return_to == 'cmsta':
+        callback = f"cf:cmsta:{chat_id}"
+    elif return_to == 'cms':
+        callback = f"cf:cms:{chat_id}"
+    elif return_to == 'cmnd':
+        callback = f"cf:cmnd:{chat_id}"
+    elif return_to == 'cmn':
+        callback = f"cf:cmn:{chat_id}"
+    else:
+        # По умолчанию — паттерны
+        callback = f"cf:cmpcan:{chat_id}"
+
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="🔙 Назад",
-                    callback_data=f"cf:cmpcan:{chat_id}"
+                    callback_data=callback
                 )
             ]
         ]
@@ -3722,3 +3809,461 @@ def create_cross_message_delete_confirm_menu(
     )
 
     return keyboard
+
+
+# ============================================================
+# КРОСС-СООБЩЕНИЕ: ПОРОГИ БАЛЛОВ (CrossMessageThreshold)
+# ============================================================
+# Клавиатуры для управления порогами баллов с разными действиями
+# для разных диапазонов накопленного скора.
+# ============================================================
+
+def create_cross_message_score_thresholds_menu(
+    chat_id: int,
+    thresholds: list
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню списка порогов баллов.
+
+    Args:
+        chat_id: ID группы
+        thresholds: Список CrossMessageThreshold объектов
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура со списком порогов
+    """
+    rows = []
+
+    # Кнопка добавления нового порога
+    rows.append([
+        InlineKeyboardButton(
+            text="➕ Добавить порог",
+            callback_data=f"cf:cmsta:{chat_id}"
+        )
+    ])
+
+    # Список существующих порогов
+    for t in thresholds:
+        # Форматируем диапазон
+        if t.max_score is None:
+            range_text = f"{t.min_score}+"
+        else:
+            range_text = f"{t.min_score}-{t.max_score}"
+
+        # Форматируем действие
+        action_map = {'mute': '🔇', 'ban': '🚫', 'kick': '👢'}
+        action_emoji = action_map.get(t.action, '❓')
+
+        # Форматируем длительность мута
+        if t.action == 'mute' and t.mute_duration:
+            if t.mute_duration >= 1440:
+                duration_text = f"{t.mute_duration // 1440}д"
+            elif t.mute_duration >= 60:
+                duration_text = f"{t.mute_duration // 60}ч"
+            else:
+                duration_text = f"{t.mute_duration}мин"
+            action_text = f"{action_emoji} {duration_text}"
+        else:
+            action_text = action_emoji
+
+        # Статус активности
+        status = "✅" if t.enabled else "⏸️"
+
+        # Кнопка порога
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{status} {range_text} → {action_text}",
+                callback_data=f"cf:cmste:{chat_id}:{t.id}"
+            )
+        ])
+
+    # Кнопка назад
+    rows.append([
+        InlineKeyboardButton(
+            text=f"{EMOJI_BACK} Назад",
+            callback_data=f"cf:cms:{chat_id}"
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def create_cross_message_threshold_edit_menu(
+    chat_id: int,
+    threshold_id: int,
+    threshold
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню редактирования порога баллов.
+
+    Args:
+        chat_id: ID группы
+        threshold_id: ID порога
+        threshold: Объект CrossMessageThreshold
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура редактирования
+    """
+    # Статус активности
+    toggle_text = "⏸️ Отключить" if threshold.enabled else "✅ Включить"
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            # Переключить активность
+            [
+                InlineKeyboardButton(
+                    text=toggle_text,
+                    callback_data=f"cf:cmstt:{chat_id}:{threshold_id}"
+                )
+            ],
+            # Удалить
+            [
+                InlineKeyboardButton(
+                    text="🗑️ Удалить",
+                    callback_data=f"cf:cmstd:{chat_id}:{threshold_id}"
+                )
+            ],
+            # Назад
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI_BACK} Назад",
+                    callback_data=f"cf:cmst:{chat_id}"
+                )
+            ]
+        ]
+    )
+
+    return keyboard
+
+
+def create_cross_message_add_threshold_menu(
+    chat_id: int,
+    step: str = 'min_score'
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню добавления порога — выбор минимального скора.
+
+    Args:
+        chat_id: ID группы
+        step: Текущий шаг ('min_score')
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура выбора
+    """
+    # Предустановленные значения минимального скора
+    min_scores = [50, 75, 100, 150, 200, 300]
+
+    rows = []
+
+    # По 3 кнопки в ряд
+    for i in range(0, len(min_scores), 3):
+        row = []
+        for score in min_scores[i:i+3]:
+            row.append(
+                InlineKeyboardButton(
+                    text=f"{score}",
+                    callback_data=f"cf:cmstam:{chat_id}:{score}"
+                )
+            )
+        rows.append(row)
+
+    # Кнопка "Другое" для кастомного ввода минимального скора
+    rows.append([
+        InlineKeyboardButton(
+            text="✏️ Другое",
+            callback_data=f"cf:cmstamc:{chat_id}"  # c = custom input
+        )
+    ])
+
+    # Кнопка назад (по CHECKLIST.md: "Назад", НЕ "Отмена")
+    rows.append([
+        InlineKeyboardButton(
+            text=f"{EMOJI_BACK} Назад",
+            callback_data=f"cf:cmst:{chat_id}"
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def create_cross_message_add_threshold_max_menu(
+    chat_id: int,
+    min_score: int
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню выбора максимального скора для порога.
+
+    Args:
+        chat_id: ID группы
+        min_score: Выбранный минимальный скор
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура выбора
+    """
+    # Максимальные значения относительно минимального
+    max_options = [
+        (min_score + 49, f"{min_score + 49}"),
+        (min_score + 99, f"{min_score + 99}"),
+        (min_score + 199, f"{min_score + 199}"),
+        (None, "∞ (без лимита)")
+    ]
+
+    rows = []
+
+    for max_score, text in max_options:
+        max_val = max_score if max_score else 'inf'
+        rows.append([
+            InlineKeyboardButton(
+                text=text,
+                callback_data=f"cf:cmstax:{chat_id}:{min_score}:{max_val}"
+            )
+        ])
+
+    # Кнопка "Другое" для кастомного ввода максимального скора
+    rows.append([
+        InlineKeyboardButton(
+            text="✏️ Другое",
+            callback_data=f"cf:cmstaxc:{chat_id}:{min_score}"  # c = custom input
+        )
+    ])
+
+    # Кнопка назад
+    rows.append([
+        InlineKeyboardButton(
+            text=f"{EMOJI_BACK} Назад",
+            callback_data=f"cf:cmsta:{chat_id}"
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def create_cross_message_add_threshold_action_menu(
+    chat_id: int,
+    min_score: int,
+    max_score
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню выбора действия для порога.
+
+    Args:
+        chat_id: ID группы
+        min_score: Минимальный скор
+        max_score: Максимальный скор (или None)
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура выбора действия
+    """
+    max_val = max_score if max_score else 'inf'
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            # Только удалить (без мута/бана)
+            [
+                InlineKeyboardButton(
+                    text="🗑️ Только удалить",
+                    callback_data=f"cf:cmstaa:{chat_id}:{min_score}:{max_val}:delete:0"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔇 Мут 30 мин",
+                    callback_data=f"cf:cmstaa:{chat_id}:{min_score}:{max_val}:mute:30"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔇 Мут 2 часа",
+                    callback_data=f"cf:cmstaa:{chat_id}:{min_score}:{max_val}:mute:120"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔇 Мут 1 день",
+                    callback_data=f"cf:cmstaa:{chat_id}:{min_score}:{max_val}:mute:1440"
+                )
+            ],
+            # Кастомное время мута
+            [
+                InlineKeyboardButton(
+                    text="✏️ Другое (мут)",
+                    callback_data=f"cf:cmstam_c:{chat_id}:{min_score}:{max_val}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🚫 Бан",
+                    callback_data=f"cf:cmstaa:{chat_id}:{min_score}:{max_val}:ban:0"
+                )
+            ],
+            # Назад
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI_BACK} Назад",
+                    callback_data=f"cf:cmstam:{chat_id}:{min_score}"
+                )
+            ]
+        ]
+    )
+
+    return keyboard
+
+
+# ============================================================
+# КРОСС-СООБЩЕНИЕ: УВЕДОМЛЕНИЯ
+# ============================================================
+# Клавиатуры для настройки текстов уведомлений
+# ============================================================
+
+def create_cross_message_notifications_menu(
+    chat_id: int,
+    settings
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню настройки уведомлений кросс-сообщений.
+
+    Args:
+        chat_id: ID группы
+        settings: ContentFilterSettings
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура настроек уведомлений
+    """
+    # Получаем текущие значения
+    mute_text = getattr(settings, 'cross_message_mute_text', None) if settings else None
+    ban_text = getattr(settings, 'cross_message_ban_text', None) if settings else None
+    delete_delay = getattr(settings, 'cross_message_notification_delete_delay', None) if settings else None
+
+    # Статусы
+    mute_status = "✅" if mute_text else "❌"
+    ban_status = "✅" if ban_text else "❌"
+    delay_text = f"{delete_delay}сек" if delete_delay else "Выкл"
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            # Текст при муте
+            [
+                InlineKeyboardButton(
+                    text=f"{mute_status} Текст мута",
+                    callback_data=f"cf:cmnm:{chat_id}"
+                )
+            ],
+            # Текст при бане
+            [
+                InlineKeyboardButton(
+                    text=f"{ban_status} Текст бана",
+                    callback_data=f"cf:cmnb:{chat_id}"
+                )
+            ],
+            # Автоудаление
+            [
+                InlineKeyboardButton(
+                    text=f"🕐 Автоудаление: {delay_text}",
+                    callback_data=f"cf:cmnd:{chat_id}"
+                )
+            ],
+            # Назад
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI_BACK} Назад",
+                    callback_data=f"cf:cms:{chat_id}"
+                )
+            ]
+        ]
+    )
+
+    return keyboard
+
+
+def create_cross_message_notification_delay_menu(
+    chat_id: int,
+    settings
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт меню выбора задержки автоудаления уведомления.
+
+    Args:
+        chat_id: ID группы
+        settings: ContentFilterSettings
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура выбора задержки
+    """
+    current = getattr(settings, 'cross_message_notification_delete_delay', None) if settings else None
+
+    # Варианты задержки
+    delays = [
+        (None, "Выключено"),
+        (10, "10 сек"),
+        (30, "30 сек"),
+        (60, "1 мин"),
+        (120, "2 мин"),
+        (300, "5 мин")
+    ]
+
+    rows = []
+    # Флаг: текущее значение есть в списке?
+    delay_values = [d[0] for d in delays]
+    current_in_list = current in delay_values
+
+    for delay, text in delays:
+        # Отметка текущего значения
+        marker = " ✓" if delay == current else ""
+        delay_val = delay if delay else 0
+
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{text}{marker}",
+                callback_data=f"cf:cmnds:{chat_id}:{delay_val}"
+            )
+        ])
+
+    # Кнопка "Другое" для кастомного ввода
+    if not current_in_list and current is not None:
+        other_text = f"✏️ Другое (✓ {current}сек)"
+    else:
+        other_text = "✏️ Другое"
+
+    rows.append([
+        InlineKeyboardButton(
+            text=other_text,
+            callback_data=f"cf:cmndc:{chat_id}"  # c = custom input
+        )
+    ])
+
+    # Назад
+    rows.append([
+        InlineKeyboardButton(
+            text=f"{EMOJI_BACK} Назад",
+            callback_data=f"cf:cmn:{chat_id}"
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def create_cross_message_notification_text_back_menu(
+    chat_id: int
+) -> InlineKeyboardMarkup:
+    """
+    Создаёт клавиатуру с кнопкой "Назад" для FSM ввода текста уведомления.
+
+    По CHECKLIST.md: кнопка должна быть "🔙 Назад", НЕ "Отмена"!
+
+    Args:
+        chat_id: ID группы
+
+    Returns:
+        InlineKeyboardMarkup: Клавиатура с кнопкой назад
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI_BACK} Назад",
+                    # Специальный callback для очистки FSM состояния
+                    callback_data=f"cf:cmnc:{chat_id}"
+                )
+            ]
+        ]
+    )

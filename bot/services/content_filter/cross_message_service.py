@@ -48,8 +48,8 @@ from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# Импортируем модель паттернов (будет создана позже)
-from bot.database.models_content_filter import CrossMessagePattern
+# Импортируем модели паттернов и порогов
+from bot.database.models_content_filter import CrossMessagePattern, CrossMessageThreshold
 
 # Импортируем нормализатор текста (общий)
 from bot.services.content_filter.text_normalizer import get_normalizer
@@ -260,13 +260,16 @@ class CrossMessageService:
         # ─────────────────────────────────────────────────────────
         # Добавляем запись в историю сообщений
         # ─────────────────────────────────────────────────────────
-        # Формируем запись истории (теперь включает message_id)
+        # Формируем запись истории (теперь включает message_id и полный текст)
         history_entry = {
             'score': score,
+            # Полный текст сообщения (до 500 символов для журнала)
+            'text': message_preview[:500] if message_preview else '',
+            # Короткое превью для компактного отображения
             'preview': message_preview[:100] if message_preview else '',
             'section': section_name,
             'ts': datetime.utcnow().isoformat(),
-            'msg_id': message_id  # NEW: ID сообщения для удаления
+            'msg_id': message_id  # ID сообщения для удаления
         }
 
         # Добавляем в список (RPUSH) и обрезаем до MAX_HISTORY_SIZE (LTRIM)
@@ -617,13 +620,14 @@ class CrossMessageService:
         # ─────────────────────────────────────────────────────────
         if score > 0:
             # Добавляем скор и получаем результат накопления
+            # Передаём полный текст — обрезание происходит внутри add_score
             accumulation_result = await self.add_score(
                 chat_id=chat_id,
                 user_id=user_id,
                 score=score,
                 window_seconds=window_seconds,
                 threshold=threshold,
-                message_preview=text[:100] if text else '',
+                message_preview=text if text else '',  # Полный текст для журнала
                 section_name='cross_message',  # Указываем что это от кросс-паттернов
                 message_id=message_id
             )
@@ -834,6 +838,261 @@ class CrossMessageService:
 
         # Получаем TTL
         return await self._redis.ttl(score_key)
+
+    # ════════════════════════════════════════════════════════════════════════
+    # МЕТОДЫ ДЛЯ РАБОТЫ С ПОРОГАМИ (CrossMessageThreshold)
+    # ════════════════════════════════════════════════════════════════════════
+
+    async def get_threshold_for_score(
+        self,
+        chat_id: int,
+        score: int,
+        session: AsyncSession
+    ) -> Optional[CrossMessageThreshold]:
+        """
+        Ищет порог который подходит для данного скора.
+
+        Логика поиска:
+        1. Получаем все активные пороги для группы
+        2. Фильтруем: min_score <= score
+        3. Фильтруем: max_score >= score (или max_score is NULL для бесконечности)
+        4. Сортируем по priority (меньше = приоритетнее)
+        5. Возвращаем первый подходящий или None
+
+        Args:
+            chat_id: ID чата
+            score: Накопленный скор
+            session: Сессия БД
+
+        Returns:
+            CrossMessageThreshold или None если порог не найден
+        """
+        # Формируем запрос для активных порогов группы
+        # Условия: enabled=True, min_score <= score, (max_score >= score OR max_score IS NULL)
+        query = (
+            select(CrossMessageThreshold)
+            .where(CrossMessageThreshold.chat_id == chat_id)
+            .where(CrossMessageThreshold.enabled == True)  # noqa: E712
+            .where(CrossMessageThreshold.min_score <= score)
+            # max_score >= score ИЛИ max_score is NULL (бесконечность)
+            .where(
+                (CrossMessageThreshold.max_score >= score) |
+                (CrossMessageThreshold.max_score.is_(None))
+            )
+            # Сортируем по приоритету (меньше = важнее)
+            .order_by(CrossMessageThreshold.priority)
+            # Берём только первый подходящий
+            .limit(1)
+        )
+
+        # Выполняем запрос
+        result = await session.execute(query)
+        threshold = result.scalar_one_or_none()
+
+        # Логируем результат поиска
+        if threshold:
+            logger.info(
+                f"[CrossMessageService] get_threshold_for_score: "
+                f"chat={chat_id}, score={score} → порог #{threshold.id} "
+                f"({threshold.min_score}-{threshold.max_score or '∞'}) "
+                f"action={threshold.action}, duration={threshold.mute_duration}"
+            )
+        else:
+            logger.debug(
+                f"[CrossMessageService] get_threshold_for_score: "
+                f"chat={chat_id}, score={score} → порог не найден, "
+                f"будет использован default из настроек"
+            )
+
+        return threshold
+
+    async def get_thresholds(
+        self,
+        chat_id: int,
+        session: AsyncSession,
+        active_only: bool = True
+    ) -> List[CrossMessageThreshold]:
+        """
+        Получает все пороги для группы.
+
+        Args:
+            chat_id: ID чата
+            session: Сессия БД
+            active_only: True = только активные пороги
+
+        Returns:
+            Список CrossMessageThreshold отсортированный по min_score
+        """
+        # Формируем базовый запрос
+        query = select(CrossMessageThreshold).where(
+            CrossMessageThreshold.chat_id == chat_id
+        )
+
+        # Фильтруем только активные если нужно
+        if active_only:
+            query = query.where(CrossMessageThreshold.enabled == True)  # noqa: E712
+
+        # Сортируем по min_score (для отображения в UI)
+        query = query.order_by(CrossMessageThreshold.min_score)
+
+        # Выполняем запрос
+        result = await session.execute(query)
+
+        # Возвращаем список порогов
+        return list(result.scalars().all())
+
+    async def add_threshold(
+        self,
+        chat_id: int,
+        min_score: int,
+        max_score: Optional[int],
+        action: str,
+        mute_duration: Optional[int],
+        created_by: int,
+        session: AsyncSession,
+        description: str = None,
+        priority: int = 0
+    ) -> CrossMessageThreshold:
+        """
+        Добавляет новый порог.
+
+        Args:
+            chat_id: ID чата
+            min_score: Минимальный скор диапазона
+            max_score: Максимальный скор диапазона (None = бесконечность)
+            action: Действие (mute/kick/ban)
+            mute_duration: Длительность мута в минутах (только для action='mute')
+            created_by: ID пользователя (админа)
+            session: Сессия БД
+            description: Описание порога (опционально)
+            priority: Приоритет (0 = максимальный)
+
+        Returns:
+            Созданный CrossMessageThreshold
+        """
+        # Создаём объект порога
+        new_threshold = CrossMessageThreshold(
+            chat_id=chat_id,
+            min_score=min_score,
+            max_score=max_score,
+            action=action,
+            mute_duration=mute_duration,
+            enabled=True,
+            priority=priority,
+            description=description,
+            created_by=created_by
+        )
+
+        # Добавляем в сессию
+        session.add(new_threshold)
+
+        # Коммитим
+        await session.commit()
+
+        # Обновляем из БД
+        await session.refresh(new_threshold)
+
+        logger.info(
+            f"[CrossMessageService] add_threshold: chat={chat_id}, "
+            f"range={min_score}-{max_score or '∞'}, action={action}, "
+            f"duration={mute_duration}"
+        )
+
+        return new_threshold
+
+    async def delete_threshold(
+        self,
+        threshold_id: int,
+        session: AsyncSession
+    ) -> bool:
+        """
+        Удаляет порог по ID.
+
+        Args:
+            threshold_id: ID порога
+            session: Сессия БД
+
+        Returns:
+            True если удалён, False если не найден
+        """
+        # Ищем порог
+        result = await session.execute(
+            select(CrossMessageThreshold).where(CrossMessageThreshold.id == threshold_id)
+        )
+        threshold = result.scalar_one_or_none()
+
+        # Если не найден — возвращаем False
+        if not threshold:
+            return False
+
+        # Удаляем
+        await session.delete(threshold)
+        await session.commit()
+
+        logger.info(
+            f"[CrossMessageService] delete_threshold: id={threshold_id}, "
+            f"range={threshold.min_score}-{threshold.max_score or '∞'}"
+        )
+
+        return True
+
+    async def toggle_threshold(
+        self,
+        threshold_id: int,
+        enabled: bool,
+        session: AsyncSession
+    ) -> Optional[CrossMessageThreshold]:
+        """
+        Включает/выключает порог.
+
+        Args:
+            threshold_id: ID порога
+            enabled: True = включить, False = выключить
+            session: Сессия БД
+
+        Returns:
+            Обновлённый CrossMessageThreshold или None если не найден
+        """
+        # Ищем порог
+        result = await session.execute(
+            select(CrossMessageThreshold).where(CrossMessageThreshold.id == threshold_id)
+        )
+        threshold = result.scalar_one_or_none()
+
+        # Если не найден — возвращаем None
+        if not threshold:
+            return None
+
+        # Обновляем статус
+        threshold.enabled = enabled
+        await session.commit()
+
+        logger.info(
+            f"[CrossMessageService] toggle_threshold: id={threshold_id}, "
+            f"enabled={enabled}"
+        )
+
+        return threshold
+
+    async def get_thresholds_count(
+        self,
+        chat_id: int,
+        session: AsyncSession,
+        active_only: bool = False
+    ) -> int:
+        """
+        Возвращает количество порогов для группы.
+
+        Args:
+            chat_id: ID чата
+            session: Сессия БД
+            active_only: True = считать только активные
+
+        Returns:
+            Количество порогов
+        """
+        thresholds = await self.get_thresholds(chat_id, session, active_only=active_only)
+        return len(thresholds)
 
 
 # ============================================================
