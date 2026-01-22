@@ -151,6 +151,18 @@ def create_settings_keyboard(
     )
     buttons.append([send_btn])
 
+    # ─── БЛОК 5: Настройки других команд ───
+    buttons.append([
+        InlineKeyboardButton(
+            text="🚫 Настройки /aban",
+            callback_data=f"mcs:ban:{chat_id}"
+        ),
+        InlineKeyboardButton(
+            text="👢 Настройки /akick",
+            callback_data=f"mcs:kick:{chat_id}"
+        ),
+    ])
+
     # ─── Кнопка назад ───
     back_btn = InlineKeyboardButton(
         text="« Назад",
@@ -1367,3 +1379,939 @@ async def handle_custom_notify_delay_input(
     )
 
     logger.info(f"[MCS] Custom notify delay set: chat_id={chat_id}, delay={delay}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# НАСТРОЙКИ КОМАНДЫ /aban
+# ═══════════════════════════════════════════════════════════════════════════
+def create_ban_settings_keyboard(
+    chat_id: int,
+    delete_message: bool,
+    delete_all_messages: bool,
+    notify_group: bool,
+    delete_delay: int = 0,
+    notify_text: str | None = None,
+    notify_delete_delay: int = 0,
+) -> InlineKeyboardMarkup:
+    """Создаёт клавиатуру настроек /aban."""
+    buttons = []
+
+    # Удаление сообщения нарушителя
+    delete_icon = "✅" if delete_message else "❌"
+    buttons.append([
+        InlineKeyboardButton(
+            text=f"{delete_icon} Удалять сообщение",
+            callback_data=f"mcs:ban:toggle:delete:{chat_id}"
+        )
+    ])
+
+    # Задержка удаления
+    if delete_message:
+        delay_text = format_delay(delete_delay)
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"    ⏳ Задержка: {delay_text}",
+                callback_data=f"mcs:ban:deldelay:{chat_id}"
+            )
+        ])
+
+    # Удаление всех сообщений
+    delete_all_icon = "✅" if delete_all_messages else "❌"
+    buttons.append([
+        InlineKeyboardButton(
+            text=f"{delete_all_icon} Удалять ВСЕ сообщения (48ч)",
+            callback_data=f"mcs:ban:toggle:deleteall:{chat_id}"
+        )
+    ])
+
+    # Уведомление в группу
+    notify_icon = "✅" if notify_group else "❌"
+    buttons.append([
+        InlineKeyboardButton(
+            text=f"{notify_icon} Уведомлять группу",
+            callback_data=f"mcs:ban:toggle:notify:{chat_id}"
+        )
+    ])
+
+    # Настройки уведомления
+    if notify_group:
+        text_preview = "📝 По умолчанию" if not notify_text else f"📝 «{notify_text[:20]}...»"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"    {text_preview}",
+                callback_data=f"mcs:ban:notifytext:{chat_id}"
+            )
+        ])
+
+        if notify_delete_delay > 0:
+            notify_del_text = format_delay(notify_delete_delay)
+        else:
+            notify_del_text = "не удалять"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"    🗑 Удалить через: {notify_del_text}",
+                callback_data=f"mcs:ban:notifydelay:{chat_id}"
+            )
+        ])
+
+    # Назад
+    buttons.append([
+        InlineKeyboardButton(
+            text="« Назад",
+            callback_data=f"mcs:m:{chat_id}"
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@settings_router.callback_query(F.data.regexp(r"^mcs:ban:(\d+)$"))
+async def handle_ban_settings_menu(
+    callback: CallbackQuery,
+    session: AsyncSession,
+):
+    """Показывает меню настроек /aban."""
+    try:
+        chat_id = int(callback.data.split(":")[-1])
+
+        if not await check_granular_permissions(
+            callback.bot, callback.from_user.id, chat_id, "restrict_members", session
+        ):
+            await callback.answer("❌ Недостаточно прав", show_alert=True)
+            return
+
+        settings = await get_manual_command_settings(session, chat_id)
+
+        text = (
+            "🚫 <b>Настройки /aban</b>\n\n"
+            "Команда /aban банит пользователя:\n"
+            "• Добавляет в БД спаммеров\n"
+            "• Банит во всех группах где вы админ\n\n"
+            "<i>Настройте поведение команды:</i>"
+        )
+
+        keyboard = create_ban_settings_keyboard(
+            chat_id=chat_id,
+            delete_message=settings.ban_delete_message,
+            delete_all_messages=settings.ban_delete_all_messages,
+            notify_group=settings.ban_notify_group,
+            delete_delay=settings.ban_delete_delay,
+            notify_text=settings.ban_notify_text,
+            notify_delete_delay=settings.ban_notify_delete_delay,
+        )
+
+        await callback.message.edit_text(
+            text=text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"[MCS] Ban settings menu error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@settings_router.callback_query(F.data.startswith("mcs:ban:toggle:"))
+async def handle_ban_toggle(
+    callback: CallbackQuery,
+    session: AsyncSession,
+):
+    """Переключает boolean настройки /aban."""
+    try:
+        parts = callback.data.split(":")
+        toggle_type = parts[3]
+        chat_id = int(parts[4])
+
+        if not await check_granular_permissions(
+            callback.bot, callback.from_user.id, chat_id, "restrict_members", session
+        ):
+            await callback.answer("❌ Недостаточно прав", show_alert=True)
+            return
+
+        settings = await get_manual_command_settings(session, chat_id)
+
+        if toggle_type == "delete":
+            new_value = not settings.ban_delete_message
+            await update_mute_settings(session, chat_id, ban_delete_message=new_value)
+            msg = "Удаление сообщений включено" if new_value else "Удаление сообщений выключено"
+        elif toggle_type == "deleteall":
+            new_value = not settings.ban_delete_all_messages
+            await update_mute_settings(session, chat_id, ban_delete_all_messages=new_value)
+            msg = "Удаление всех сообщений включено" if new_value else "Удаление всех сообщений выключено"
+        elif toggle_type == "notify":
+            new_value = not settings.ban_notify_group
+            await update_mute_settings(session, chat_id, ban_notify_group=new_value)
+            msg = "Уведомления включены" if new_value else "Уведомления выключены"
+        else:
+            await callback.answer("❌ Неизвестный параметр", show_alert=True)
+            return
+
+        await session.commit()
+        settings = await get_manual_command_settings(session, chat_id)
+
+        keyboard = create_ban_settings_keyboard(
+            chat_id=chat_id,
+            delete_message=settings.ban_delete_message,
+            delete_all_messages=settings.ban_delete_all_messages,
+            notify_group=settings.ban_notify_group,
+            delete_delay=settings.ban_delete_delay,
+            notify_text=settings.ban_notify_text,
+            notify_delete_delay=settings.ban_notify_delete_delay,
+        )
+
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
+        await callback.answer(f"✅ {msg}")
+
+    except Exception as e:
+        logger.error(f"[MCS] Ban toggle error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# НАСТРОЙКИ КОМАНДЫ /akick
+# ═══════════════════════════════════════════════════════════════════════════
+def create_kick_settings_keyboard(
+    chat_id: int,
+    delete_message: bool,
+    notify_group: bool,
+    delete_delay: int = 0,
+    notify_text: str | None = None,
+    notify_delete_delay: int = 0,
+) -> InlineKeyboardMarkup:
+    """Создаёт клавиатуру настроек /akick."""
+    buttons = []
+
+    # Удаление сообщения нарушителя
+    delete_icon = "✅" if delete_message else "❌"
+    buttons.append([
+        InlineKeyboardButton(
+            text=f"{delete_icon} Удалять сообщение",
+            callback_data=f"mcs:kick:toggle:delete:{chat_id}"
+        )
+    ])
+
+    # Задержка удаления
+    if delete_message:
+        delay_text = format_delay(delete_delay)
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"    ⏳ Задержка: {delay_text}",
+                callback_data=f"mcs:kick:deldelay:{chat_id}"
+            )
+        ])
+
+    # Уведомление в группу
+    notify_icon = "✅" if notify_group else "❌"
+    buttons.append([
+        InlineKeyboardButton(
+            text=f"{notify_icon} Уведомлять группу",
+            callback_data=f"mcs:kick:toggle:notify:{chat_id}"
+        )
+    ])
+
+    # Настройки уведомления
+    if notify_group:
+        text_preview = "📝 По умолчанию" if not notify_text else f"📝 «{notify_text[:20]}...»"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"    {text_preview}",
+                callback_data=f"mcs:kick:notifytext:{chat_id}"
+            )
+        ])
+
+        if notify_delete_delay > 0:
+            notify_del_text = format_delay(notify_delete_delay)
+        else:
+            notify_del_text = "не удалять"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"    🗑 Удалить через: {notify_del_text}",
+                callback_data=f"mcs:kick:notifydelay:{chat_id}"
+            )
+        ])
+
+    # Назад
+    buttons.append([
+        InlineKeyboardButton(
+            text="« Назад",
+            callback_data=f"mcs:m:{chat_id}"
+        )
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@settings_router.callback_query(F.data.regexp(r"^mcs:kick:(\d+)$"))
+async def handle_kick_settings_menu(
+    callback: CallbackQuery,
+    session: AsyncSession,
+):
+    """Показывает меню настроек /akick."""
+    try:
+        chat_id = int(callback.data.split(":")[-1])
+
+        if not await check_granular_permissions(
+            callback.bot, callback.from_user.id, chat_id, "restrict_members", session
+        ):
+            await callback.answer("❌ Недостаточно прав", show_alert=True)
+            return
+
+        settings = await get_manual_command_settings(session, chat_id)
+
+        text = (
+            "👢 <b>Настройки /akick</b>\n\n"
+            "Команда /akick кикает пользователя:\n"
+            "• Пользователь может вернуться по ссылке\n"
+            "• Не добавляется в БД спаммеров\n\n"
+            "<i>Настройте поведение команды:</i>"
+        )
+
+        keyboard = create_kick_settings_keyboard(
+            chat_id=chat_id,
+            delete_message=settings.kick_delete_message,
+            notify_group=settings.kick_notify_group,
+            delete_delay=settings.kick_delete_delay,
+            notify_text=settings.kick_notify_text,
+            notify_delete_delay=settings.kick_notify_delete_delay,
+        )
+
+        await callback.message.edit_text(
+            text=text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"[MCS] Kick settings menu error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ЗАДЕРЖКА УДАЛЕНИЯ ДЛЯ /aban
+# ═══════════════════════════════════════════════════════════════════════════
+def create_ban_delete_delay_keyboard(chat_id: int, current_delay: int = 0) -> InlineKeyboardMarkup:
+    """Клавиатура выбора задержки удаления для /aban."""
+    presets = [0, 3, 5, 10, 30, 60]
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 0 else ''}Сразу",
+                callback_data=f"mcs:ban:setdeldelay:0:{chat_id}"
+            ),
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 3 else ''}3 сек",
+                callback_data=f"mcs:ban:setdeldelay:3:{chat_id}"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 5 else ''}5 сек",
+                callback_data=f"mcs:ban:setdeldelay:5:{chat_id}"
+            ),
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 10 else ''}10 сек",
+                callback_data=f"mcs:ban:setdeldelay:10:{chat_id}"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 30 else ''}30 сек",
+                callback_data=f"mcs:ban:setdeldelay:30:{chat_id}"
+            ),
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 60 else ''}1 мин",
+                callback_data=f"mcs:ban:setdeldelay:60:{chat_id}"
+            ),
+        ],
+    ]
+
+    # Кнопка "Другое"
+    if current_delay not in presets:
+        other_text = f"✏️ Другое (✓ {format_delay(current_delay)})"
+    else:
+        other_text = "✏️ Другое"
+    buttons.append([
+        InlineKeyboardButton(text=other_text, callback_data=f"mcs:ban:customdeldelay:{chat_id}")
+    ])
+    buttons.append([
+        InlineKeyboardButton(text="« Назад", callback_data=f"mcs:ban:{chat_id}"),
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@settings_router.callback_query(F.data.startswith("mcs:ban:deldelay:"))
+async def handle_ban_delete_delay_menu(
+    callback: CallbackQuery,
+    session: AsyncSession,
+):
+    """Показывает меню выбора задержки удаления для /aban."""
+    try:
+        chat_id = int(callback.data.split(":")[-1])
+
+        if not await check_granular_permissions(
+            callback.bot, callback.from_user.id, chat_id, "restrict_members", session
+        ):
+            await callback.answer("❌ Недостаточно прав", show_alert=True)
+            return
+
+        settings = await get_manual_command_settings(session, chat_id)
+
+        text = (
+            "⏳ <b>Задержка удаления сообщения (/aban)</b>\n\n"
+            "Через сколько секунд удалять сообщение нарушителя?"
+        )
+
+        keyboard = create_ban_delete_delay_keyboard(chat_id, settings.ban_delete_delay)
+
+        await callback.message.edit_text(
+            text=text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"[MCS] Ban delete delay menu error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@settings_router.callback_query(F.data.startswith("mcs:ban:setdeldelay:"))
+async def handle_ban_set_delete_delay(
+    callback: CallbackQuery,
+    session: AsyncSession,
+):
+    """Устанавливает задержку удаления для /aban."""
+    try:
+        parts = callback.data.split(":")
+        delay = int(parts[3])
+        chat_id = int(parts[4])
+
+        if not await check_granular_permissions(
+            callback.bot, callback.from_user.id, chat_id, "restrict_members", session
+        ):
+            await callback.answer("❌ Недостаточно прав", show_alert=True)
+            return
+
+        await update_mute_settings(session, chat_id, ban_delete_delay=delay)
+        await session.commit()
+
+        delay_text = format_delay(delay)
+        await callback.answer(f"✅ Задержка: {delay_text}")
+
+        # Возвращаемся к настройкам /aban
+        settings = await get_manual_command_settings(session, chat_id)
+
+        keyboard = create_ban_settings_keyboard(
+            chat_id=chat_id,
+            delete_message=settings.ban_delete_message,
+            delete_all_messages=settings.ban_delete_all_messages,
+            notify_group=settings.ban_notify_group,
+            delete_delay=settings.ban_delete_delay,
+            notify_text=settings.ban_notify_text,
+            notify_delete_delay=settings.ban_notify_delete_delay,
+        )
+
+        text = (
+            "🚫 <b>Настройки /aban</b>\n\n"
+            "Команда /aban банит пользователя:\n"
+            "• Добавляет в БД спаммеров\n"
+            "• Банит во всех группах где вы админ"
+        )
+
+        await callback.message.edit_text(
+            text=text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+
+    except Exception as e:
+        logger.error(f"[MCS] Ban set delete delay error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ЗАДЕРЖКА УДАЛЕНИЯ ДЛЯ /akick
+# ═══════════════════════════════════════════════════════════════════════════
+def create_kick_delete_delay_keyboard(chat_id: int, current_delay: int = 0) -> InlineKeyboardMarkup:
+    """Клавиатура выбора задержки удаления для /akick."""
+    presets = [0, 3, 5, 10, 30, 60]
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 0 else ''}Сразу",
+                callback_data=f"mcs:kick:setdeldelay:0:{chat_id}"
+            ),
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 3 else ''}3 сек",
+                callback_data=f"mcs:kick:setdeldelay:3:{chat_id}"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 5 else ''}5 сек",
+                callback_data=f"mcs:kick:setdeldelay:5:{chat_id}"
+            ),
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 10 else ''}10 сек",
+                callback_data=f"mcs:kick:setdeldelay:10:{chat_id}"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 30 else ''}30 сек",
+                callback_data=f"mcs:kick:setdeldelay:30:{chat_id}"
+            ),
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 60 else ''}1 мин",
+                callback_data=f"mcs:kick:setdeldelay:60:{chat_id}"
+            ),
+        ],
+    ]
+
+    # Кнопка "Другое"
+    if current_delay not in presets:
+        other_text = f"✏️ Другое (✓ {format_delay(current_delay)})"
+    else:
+        other_text = "✏️ Другое"
+    buttons.append([
+        InlineKeyboardButton(text=other_text, callback_data=f"mcs:kick:customdeldelay:{chat_id}")
+    ])
+    buttons.append([
+        InlineKeyboardButton(text="« Назад", callback_data=f"mcs:kick:{chat_id}"),
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@settings_router.callback_query(F.data.startswith("mcs:kick:deldelay:"))
+async def handle_kick_delete_delay_menu(
+    callback: CallbackQuery,
+    session: AsyncSession,
+):
+    """Показывает меню выбора задержки удаления для /akick."""
+    try:
+        chat_id = int(callback.data.split(":")[-1])
+
+        if not await check_granular_permissions(
+            callback.bot, callback.from_user.id, chat_id, "restrict_members", session
+        ):
+            await callback.answer("❌ Недостаточно прав", show_alert=True)
+            return
+
+        settings = await get_manual_command_settings(session, chat_id)
+
+        text = (
+            "⏳ <b>Задержка удаления сообщения (/akick)</b>\n\n"
+            "Через сколько секунд удалять сообщение нарушителя?"
+        )
+
+        keyboard = create_kick_delete_delay_keyboard(chat_id, settings.kick_delete_delay)
+
+        await callback.message.edit_text(
+            text=text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"[MCS] Kick delete delay menu error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@settings_router.callback_query(F.data.startswith("mcs:kick:setdeldelay:"))
+async def handle_kick_set_delete_delay(
+    callback: CallbackQuery,
+    session: AsyncSession,
+):
+    """Устанавливает задержку удаления для /akick."""
+    try:
+        parts = callback.data.split(":")
+        delay = int(parts[3])
+        chat_id = int(parts[4])
+
+        if not await check_granular_permissions(
+            callback.bot, callback.from_user.id, chat_id, "restrict_members", session
+        ):
+            await callback.answer("❌ Недостаточно прав", show_alert=True)
+            return
+
+        await update_mute_settings(session, chat_id, kick_delete_delay=delay)
+        await session.commit()
+
+        delay_text = format_delay(delay)
+        await callback.answer(f"✅ Задержка: {delay_text}")
+
+        # Возвращаемся к настройкам /akick
+        settings = await get_manual_command_settings(session, chat_id)
+
+        keyboard = create_kick_settings_keyboard(
+            chat_id=chat_id,
+            delete_message=settings.kick_delete_message,
+            notify_group=settings.kick_notify_group,
+            delete_delay=settings.kick_delete_delay,
+            notify_text=settings.kick_notify_text,
+            notify_delete_delay=settings.kick_notify_delete_delay,
+        )
+
+        text = (
+            "👢 <b>Настройки /akick</b>\n\n"
+            "Команда /akick кикает пользователя:\n"
+            "• Пользователь может вернуться по ссылке\n"
+            "• Не добавляется в БД спаммеров"
+        )
+
+        await callback.message.edit_text(
+            text=text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+
+    except Exception as e:
+        logger.error(f"[MCS] Kick set delete delay error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@settings_router.callback_query(F.data.startswith("mcs:kick:toggle:"))
+async def handle_kick_toggle(
+    callback: CallbackQuery,
+    session: AsyncSession,
+):
+    """Переключает boolean настройки /akick."""
+    try:
+        parts = callback.data.split(":")
+        toggle_type = parts[3]
+        chat_id = int(parts[4])
+
+        if not await check_granular_permissions(
+            callback.bot, callback.from_user.id, chat_id, "restrict_members", session
+        ):
+            await callback.answer("❌ Недостаточно прав", show_alert=True)
+            return
+
+        settings = await get_manual_command_settings(session, chat_id)
+
+        if toggle_type == "delete":
+            new_value = not settings.kick_delete_message
+            await update_mute_settings(session, chat_id, kick_delete_message=new_value)
+            msg = "Удаление сообщений включено" if new_value else "Удаление сообщений выключено"
+        elif toggle_type == "notify":
+            new_value = not settings.kick_notify_group
+            await update_mute_settings(session, chat_id, kick_notify_group=new_value)
+            msg = "Уведомления включены" if new_value else "Уведомления выключены"
+        else:
+            await callback.answer("❌ Неизвестный параметр", show_alert=True)
+            return
+
+        await session.commit()
+        settings = await get_manual_command_settings(session, chat_id)
+
+        keyboard = create_kick_settings_keyboard(
+            chat_id=chat_id,
+            delete_message=settings.kick_delete_message,
+            notify_group=settings.kick_notify_group,
+            delete_delay=settings.kick_delete_delay,
+            notify_text=settings.kick_notify_text,
+            notify_delete_delay=settings.kick_notify_delete_delay,
+        )
+
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
+        await callback.answer(f"✅ {msg}")
+
+    except Exception as e:
+        logger.error(f"[MCS] Kick toggle error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ЗАДЕРЖКА УДАЛЕНИЯ УВЕДОМЛЕНИЯ ДЛЯ /aban
+# ═══════════════════════════════════════════════════════════════════════════
+def create_ban_notify_delay_keyboard(chat_id: int, current_delay: int = 0) -> InlineKeyboardMarkup:
+    """Клавиатура выбора задержки удаления уведомления для /aban."""
+    presets = [0, 5, 10, 30, 60, 300]
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 0 else ''}Не удалять",
+                callback_data=f"mcs:ban:setnotdel:0:{chat_id}"
+            ),
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 5 else ''}5 сек",
+                callback_data=f"mcs:ban:setnotdel:5:{chat_id}"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 10 else ''}10 сек",
+                callback_data=f"mcs:ban:setnotdel:10:{chat_id}"
+            ),
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 30 else ''}30 сек",
+                callback_data=f"mcs:ban:setnotdel:30:{chat_id}"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 60 else ''}1 мин",
+                callback_data=f"mcs:ban:setnotdel:60:{chat_id}"
+            ),
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 300 else ''}5 мин",
+                callback_data=f"mcs:ban:setnotdel:300:{chat_id}"
+            ),
+        ],
+    ]
+
+    # Кнопка "Другое"
+    if current_delay not in presets:
+        other_text = f"✏️ Другое (✓ {format_delay(current_delay)})"
+    else:
+        other_text = "✏️ Другое"
+    buttons.append([
+        InlineKeyboardButton(text=other_text, callback_data=f"mcs:ban:customnotdel:{chat_id}")
+    ])
+    buttons.append([
+        InlineKeyboardButton(text="« Назад", callback_data=f"mcs:ban:{chat_id}"),
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@settings_router.callback_query(F.data.startswith("mcs:ban:notifydelay:"))
+async def handle_ban_notify_delay_menu(
+    callback: CallbackQuery,
+    session: AsyncSession,
+):
+    """Показывает меню выбора задержки удаления уведомления для /aban."""
+    try:
+        chat_id = int(callback.data.split(":")[-1])
+
+        if not await check_granular_permissions(
+            callback.bot, callback.from_user.id, chat_id, "restrict_members", session
+        ):
+            await callback.answer("❌ Недостаточно прав", show_alert=True)
+            return
+
+        settings = await get_manual_command_settings(session, chat_id)
+
+        text = (
+            "🗑 <b>Удаление уведомления (/aban)</b>\n\n"
+            "Через сколько секунд удалять уведомление о бане из группы?"
+        )
+
+        keyboard = create_ban_notify_delay_keyboard(chat_id, settings.ban_notify_delete_delay)
+
+        await callback.message.edit_text(
+            text=text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"[MCS] Ban notify delay menu error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@settings_router.callback_query(F.data.startswith("mcs:ban:setnotdel:"))
+async def handle_ban_set_notify_delay(
+    callback: CallbackQuery,
+    session: AsyncSession,
+):
+    """Устанавливает задержку удаления уведомления для /aban."""
+    try:
+        parts = callback.data.split(":")
+        delay = int(parts[3])
+        chat_id = int(parts[4])
+
+        if not await check_granular_permissions(
+            callback.bot, callback.from_user.id, chat_id, "restrict_members", session
+        ):
+            await callback.answer("❌ Недостаточно прав", show_alert=True)
+            return
+
+        await update_mute_settings(session, chat_id, ban_notify_delete_delay=delay)
+        await session.commit()
+
+        delay_text = "не удалять" if delay == 0 else format_delay(delay)
+        await callback.answer(f"✅ Удалить через: {delay_text}")
+
+        # Возвращаемся к настройкам /aban
+        settings = await get_manual_command_settings(session, chat_id)
+
+        keyboard = create_ban_settings_keyboard(
+            chat_id=chat_id,
+            delete_message=settings.ban_delete_message,
+            delete_all_messages=settings.ban_delete_all_messages,
+            notify_group=settings.ban_notify_group,
+            delete_delay=settings.ban_delete_delay,
+            notify_text=settings.ban_notify_text,
+            notify_delete_delay=settings.ban_notify_delete_delay,
+        )
+
+        text = (
+            "🚫 <b>Настройки /aban</b>\n\n"
+            "Команда /aban банит пользователя:\n"
+            "• Добавляет в БД спаммеров\n"
+            "• Банит во всех группах где вы админ"
+        )
+
+        await callback.message.edit_text(
+            text=text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+
+    except Exception as e:
+        logger.error(f"[MCS] Ban set notify delay error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ЗАДЕРЖКА УДАЛЕНИЯ УВЕДОМЛЕНИЯ ДЛЯ /akick
+# ═══════════════════════════════════════════════════════════════════════════
+def create_kick_notify_delay_keyboard(chat_id: int, current_delay: int = 0) -> InlineKeyboardMarkup:
+    """Клавиатура выбора задержки удаления уведомления для /akick."""
+    presets = [0, 5, 10, 30, 60, 300]
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 0 else ''}Не удалять",
+                callback_data=f"mcs:kick:setnotdel:0:{chat_id}"
+            ),
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 5 else ''}5 сек",
+                callback_data=f"mcs:kick:setnotdel:5:{chat_id}"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 10 else ''}10 сек",
+                callback_data=f"mcs:kick:setnotdel:10:{chat_id}"
+            ),
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 30 else ''}30 сек",
+                callback_data=f"mcs:kick:setnotdel:30:{chat_id}"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 60 else ''}1 мин",
+                callback_data=f"mcs:kick:setnotdel:60:{chat_id}"
+            ),
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current_delay == 300 else ''}5 мин",
+                callback_data=f"mcs:kick:setnotdel:300:{chat_id}"
+            ),
+        ],
+    ]
+
+    # Кнопка "Другое"
+    if current_delay not in presets:
+        other_text = f"✏️ Другое (✓ {format_delay(current_delay)})"
+    else:
+        other_text = "✏️ Другое"
+    buttons.append([
+        InlineKeyboardButton(text=other_text, callback_data=f"mcs:kick:customnotdel:{chat_id}")
+    ])
+    buttons.append([
+        InlineKeyboardButton(text="« Назад", callback_data=f"mcs:kick:{chat_id}"),
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@settings_router.callback_query(F.data.startswith("mcs:kick:notifydelay:"))
+async def handle_kick_notify_delay_menu(
+    callback: CallbackQuery,
+    session: AsyncSession,
+):
+    """Показывает меню выбора задержки удаления уведомления для /akick."""
+    try:
+        chat_id = int(callback.data.split(":")[-1])
+
+        if not await check_granular_permissions(
+            callback.bot, callback.from_user.id, chat_id, "restrict_members", session
+        ):
+            await callback.answer("❌ Недостаточно прав", show_alert=True)
+            return
+
+        settings = await get_manual_command_settings(session, chat_id)
+
+        text = (
+            "🗑 <b>Удаление уведомления (/akick)</b>\n\n"
+            "Через сколько секунд удалять уведомление о кике из группы?"
+        )
+
+        keyboard = create_kick_notify_delay_keyboard(chat_id, settings.kick_notify_delete_delay)
+
+        await callback.message.edit_text(
+            text=text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"[MCS] Kick notify delay menu error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+
+
+@settings_router.callback_query(F.data.startswith("mcs:kick:setnotdel:"))
+async def handle_kick_set_notify_delay(
+    callback: CallbackQuery,
+    session: AsyncSession,
+):
+    """Устанавливает задержку удаления уведомления для /akick."""
+    try:
+        parts = callback.data.split(":")
+        delay = int(parts[3])
+        chat_id = int(parts[4])
+
+        if not await check_granular_permissions(
+            callback.bot, callback.from_user.id, chat_id, "restrict_members", session
+        ):
+            await callback.answer("❌ Недостаточно прав", show_alert=True)
+            return
+
+        await update_mute_settings(session, chat_id, kick_notify_delete_delay=delay)
+        await session.commit()
+
+        delay_text = "не удалять" if delay == 0 else format_delay(delay)
+        await callback.answer(f"✅ Удалить через: {delay_text}")
+
+        # Возвращаемся к настройкам /akick
+        settings = await get_manual_command_settings(session, chat_id)
+
+        keyboard = create_kick_settings_keyboard(
+            chat_id=chat_id,
+            delete_message=settings.kick_delete_message,
+            notify_group=settings.kick_notify_group,
+            delete_delay=settings.kick_delete_delay,
+            notify_text=settings.kick_notify_text,
+            notify_delete_delay=settings.kick_notify_delete_delay,
+        )
+
+        text = (
+            "👢 <b>Настройки /akick</b>\n\n"
+            "Команда /akick кикает пользователя:\n"
+            "• Пользователь может вернуться по ссылке\n"
+            "• Не добавляется в БД спаммеров"
+        )
+
+        await callback.message.edit_text(
+            text=text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+
+    except Exception as e:
+        logger.error(f"[MCS] Kick set notify delay error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)

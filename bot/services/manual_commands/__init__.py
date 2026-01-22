@@ -5,6 +5,7 @@
 # Админы могут модерировать группу через команды в чате.
 #
 # Создано: 2026-01-21
+# Обновлено: 2026-01-22 — добавлены /aban и /akick
 # ═══════════════════════════════════════════════════════════════════════════
 
 # Экспортируем функции парсинга
@@ -26,6 +27,20 @@ from bot.services.manual_commands.mute_service import (
     MuteResult,
 )
 
+# Экспортируем функции бана
+from bot.services.manual_commands.ban_service import (
+    apply_ban,
+    apply_unban,
+    ban_across_groups,
+    BanResult,
+)
+
+# Экспортируем функции кика
+from bot.services.manual_commands.kick_service import (
+    apply_kick,
+    KickResult,
+)
+
 __all__ = [
     # Parser
     'parse_mute_command',
@@ -40,4 +55,12 @@ __all__ = [
     'format_user_link',
     'format_user_link_by_id',
     'MuteResult',
+    # Ban service
+    'apply_ban',
+    'apply_unban',
+    'ban_across_groups',
+    'BanResult',
+    # Kick service
+    'apply_kick',
+    'KickResult',
 ]

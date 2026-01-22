@@ -19,7 +19,7 @@ from aiogram.exceptions import TelegramAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Импортируем сервисы
-from bot.services.manual_commands import apply_unmute
+from bot.services.manual_commands import apply_unmute, apply_unban
 from bot.services.spammer_registry import delete_spammer_record
 
 # Создаём роутер для callbacks
@@ -229,6 +229,47 @@ async def handle_ban_callback(
     except TelegramAPIError as e:
         await callback.answer(f"❌ Ошибка: {e}", show_alert=True)
         logger.error(f"[MANUAL_CMD_CB] ban error: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CALLBACK: РАЗБАН
+# ═══════════════════════════════════════════════════════════════════════════
+@callbacks_router.callback_query(F.data.startswith("mc:unban:"))
+async def handle_unban_callback(
+    callback: CallbackQuery,
+    bot: Bot,
+    session: AsyncSession,
+):
+    """Обработчик кнопки 'Разбан' — разбанивает пользователя."""
+    # Парсим callback data
+    action, user_id, chat_id = parse_callback_data(callback.data)
+
+    if user_id == 0 or chat_id == 0:
+        await callback.answer("❌ Ошибка данных", show_alert=True)
+        return
+
+    # Применяем разбан
+    result = await apply_unban(
+        bot=bot,
+        session=session,
+        chat_id=chat_id,
+        user_id=user_id,
+        unban_everywhere=True,
+        admin_id=callback.from_user.id,
+    )
+
+    if result.success:
+        await callback.answer("✅ Пользователь разбанен")
+        # Обновляем сообщение журнала
+        admin_name = callback.from_user.full_name
+        await update_journal_message(callback, "Разбанен", admin_name)
+    else:
+        await callback.answer(f"❌ {result.error}", show_alert=True)
+
+    logger.info(
+        f"[MANUAL_CMD_CB] unban: user_id={user_id}, chat_id={chat_id}, "
+        f"success={result.success}, by admin={callback.from_user.id}"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
