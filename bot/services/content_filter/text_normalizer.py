@@ -194,6 +194,20 @@ class TextNormalizer:
         '\u1d22': 'з',  # ᴢ LATIN LETTER SMALL CAPITAL Z
 
         # ─────────────────────────────────────────────────────────
+        # IPA / Latin Extended символы
+        # ─────────────────────────────────────────────────────────
+        # Спамеры используют IPA символы для обфускации:
+        # Нɑбирɑю → Набираю (ɑ вместо а)
+        # рɑзȯвую → разовую (ȯ вместо о)
+        'ɑ': 'а',  # U+0251 LATIN SMALL LETTER ALPHA → а
+        'Ɑ': 'а',  # U+2C6D LATIN CAPITAL LETTER ALPHA → а
+        'ȯ': 'о',  # U+022F LATIN SMALL LETTER O WITH DOT ABOVE → о
+        'Ȯ': 'о',  # U+022E LATIN CAPITAL LETTER O WITH DOT ABOVE → о
+        'ɵ': 'о',  # U+0275 LATIN SMALL LETTER BARRED O → о
+        'ɔ': 'о',  # U+0254 LATIN SMALL LETTER OPEN O → о
+        'ɛ': 'е',  # U+025B LATIN SMALL LETTER OPEN E → е
+
+        # ─────────────────────────────────────────────────────────
         # Греческие буквы → кириллица
         # ─────────────────────────────────────────────────────────
         # Спамеры используют греческие буквы похожие на кириллицу:

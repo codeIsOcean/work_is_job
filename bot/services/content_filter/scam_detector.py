@@ -315,6 +315,91 @@ def fuzzy_match(text: str, pattern: str, threshold: float = 0.8) -> bool:
     return False
 
 
+def get_fuzzy_match_context(text: str, pattern: str, threshold: float = 0.8) -> tuple:
+    """
+    Находит какое слово/фраза из текста сработало на fuzzy match.
+
+    ВАЖНО: Эта функция вызывается ПОСЛЕ детекции, только для логирования!
+    Она НЕ влияет на логику детекции — только показывает контекст в журнале.
+
+    Args:
+        text: Нормализованный текст сообщения
+        pattern: Нормализованный паттерн который сработал
+        threshold: Порог совпадения (0.0-1.0)
+
+    Returns:
+        tuple[str, int]: (слово_из_текста, процент_совпадения)
+        Если не удалось найти — возвращает (начало_текста, overall_score)
+    """
+    # Приводим к нижнему регистру для сравнения
+    pattern_lower = pattern.lower()
+    text_lower = text.lower()
+
+    # Конвертируем threshold в проценты для rapidfuzz (0-100)
+    threshold_100 = threshold * 100
+
+    # Лучшее совпадение по умолчанию
+    best_match = ""
+    best_score = 0
+
+    # ─────────────────────────────────────────────────────
+    # МЕТОД 1: Проверяем отдельные слова
+    # Ищем слово из текста которое максимально похоже на паттерн
+    # ─────────────────────────────────────────────────────
+    words = text_lower.split()
+    for word in words:
+        # Пропускаем слишком короткие слова
+        if len(word) < 3:
+            continue
+
+        # Вычисляем схожесть слова с паттерном
+        score = fuzz.ratio(pattern_lower, word)
+
+        # Если это лучшее совпадение — запоминаем
+        if score > best_score:
+            best_score = score
+            best_match = word
+
+    # ─────────────────────────────────────────────────────
+    # МЕТОД 2: Скользящее окно (если по словам не нашли хорошее)
+    # Ищем подстроку текста размером ~длина паттерна
+    # ─────────────────────────────────────────────────────
+    if best_score < threshold_100:
+        # Размер окна = длина паттерна +/- 20%
+        window_size = len(pattern_lower)
+        min_window = max(3, int(window_size * 0.8))
+        max_window = int(window_size * 1.2)
+
+        # Проходим по тексту скользящим окном
+        for win_size in range(min_window, max_window + 1):
+            for i in range(len(text_lower) - win_size + 1):
+                # Извлекаем подстроку
+                substring = text_lower[i:i + win_size]
+
+                # Вычисляем схожесть
+                score = fuzz.ratio(pattern_lower, substring)
+
+                # Если это лучшее совпадение — запоминаем
+                if score > best_score:
+                    best_score = score
+                    best_match = substring
+
+    # ─────────────────────────────────────────────────────
+    # МЕТОД 3: Если всё ещё не нашли — используем partial_ratio
+    # Показываем начало текста как контекст
+    # ─────────────────────────────────────────────────────
+    if not best_match or best_score < 50:
+        # Вычисляем общий partial_ratio для информации
+        overall_score = fuzz.partial_ratio(pattern_lower, text_lower)
+
+        # Возвращаем начало текста как контекст
+        context_len = min(50, len(text))
+        best_match = text[:context_len] + ("..." if len(text) > context_len else "")
+        best_score = overall_score
+
+    return (best_match, int(best_score))
+
+
 async def fuzzy_match_async(text: str, pattern: str, threshold: float = 0.8) -> bool:
     """
     Асинхронная версия fuzzy_match с выполнением в отдельном потоке.

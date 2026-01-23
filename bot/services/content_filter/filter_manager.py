@@ -42,7 +42,9 @@ from bot.services.content_filter.text_normalizer import TextNormalizer, get_norm
 from bot.services.content_filter.scam_detector import (
     ScamDetector, get_scam_detector,
     # Функции для fuzzy и n-gram matching (используются в CustomSpamSection)
-    fuzzy_match, extract_ngrams, ngram_match
+    fuzzy_match, extract_ngrams, ngram_match,
+    # Функция для получения контекста fuzzy match (только для логирования)
+    get_fuzzy_match_context
 )
 from bot.services.content_filter.flood_detector import FloodDetector, create_flood_detector
 # Импортируем CAS сервис для проверки в глобальной базе спамеров
@@ -720,8 +722,12 @@ class FilterManager:
                             if fuzzy_match(normalized_text, pattern.normalized, threshold=0.8):
                                 matched = True
                                 match_method = 'fuzzy'
-                                # Показываем нормализованную форму паттерна
-                                match_context = f"fuzzy ~ '{pattern.normalized}'"
+                                # Получаем контекст — какое слово из текста сработало (только для лога!)
+                                matched_word, match_score = get_fuzzy_match_context(
+                                    normalized_text, pattern.normalized, threshold=0.8
+                                )
+                                # Показываем паттерн И слово из текста которое сработало
+                                match_context = f"fuzzy({match_score}%) '{pattern.normalized}' ← «{matched_word}»"
 
                         # ─────────────────────────────────────────────────────
                         # МЕТОД 3: N-gram matching (перекрытие 0.6)
